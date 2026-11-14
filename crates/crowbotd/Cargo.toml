@@ -1,6 +1,7 @@
 [package]
 name = "crowbotd"
 description = "Crow Bot daemon"
+license = "PolyForm-Noncommercial-1.0.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,7 @@
 [package]
 name = "crowbot-protocol"
 description = "Messages exchanged between the Crow Bot daemon and its clients"
+license = "Apache-2.0"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

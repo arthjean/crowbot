@@ -15,7 +15,7 @@ Crow Bot gives a person or a team AI teammates, called bots. Each bot has its ow
 
 ## Hard rules
 
-- **License boundary.** The desktop client is GPL-3.0-or-later and may depend on Zed's GPL crates. The daemon and the protocol crate must not depend on any GPL crate. The daemon will carry a noncommercial license; the exact license is not chosen yet.
+- **License boundary.** Each crate carries its own license file. The desktop client is GPL-3.0-or-later, so it may depend on Zed's GPL crates and adapt Zed's GPL code. The protocol crate is Apache-2.0, because both the GPL client and the daemon link it. The daemon is PolyForm Noncommercial 1.0.0. The daemon and the protocol crate must not depend on any GPL crate.
 - **Model usage belongs to the user.** A bot runs on the user's own subscription or API key. Never pay for, resell, or proxy model usage. Never read, copy, or store provider credentials: sign-in happens in the provider's own CLI. Run provider binaries unmodified.
 - **The daemon owns approvals.** A bot must not inherit what its owner allowed for personal use. The Claude profile (`provider/claude.rs`) starts each session with `settingSources: []`, refuses bypass mode, and sets the session mode to `default`, so every gated tool call reaches the daemon as an approval request. A turn fails when the agent does not offer that mode. A request waits until a client answers it, and the daemon only ever selects the allow-once or the reject-once option: it declines a request that offers no allow-once option.
 - **The database is the source of truth.** A conversation is the ordered list of its events in SQLite (`store.rs`). The provider session is only a handle to resume the agent; the daemon never reads history back from a provider. Schema changes go through `PRAGMA user_version`, keep all user data, and a daemon refuses a database that a newer daemon wrote. A stored event is the JSON of the protocol `Event`, so a change to `Event` must still read the rows already stored: add fields with `#[serde(default)]`, never rename or remove a variant.
@@ -29,5 +29,4 @@ Crow Bot gives a person or a team AI teammates, called bots. Each bot has its ow
 
 - The remote transport. The protocol runs over any byte stream, but only the local endpoint exists: encryption and client sign-in for a daemon on a server are not designed.
 - Who may reach the local endpoint. The Windows pipe keeps the default access rules and refuses remote clients; the Unix socket is readable and writable by its owner only, and the daemon drops a connection from another user. The Windows daemon does not check who the client is, and no client checks who the daemon is.
-- The exact license of the daemon.
 - Whether a native Rust client for the Claude CLI replaces `claude-agent-acp` later. If it does, it plugs in as an ACP agent, so the daemon does not change.

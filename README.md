@@ -43,3 +43,13 @@ It needs Bun, Node.js 22 or later, and a signed-in Claude Code.
 ## Pricing model
 
 Personal use on your own computer is free. Hosted servers and licenses for use at work are paid.
+
+## Licenses
+
+| Crate | License |
+| --- | --- |
+| `crates/crowbot-desktop` | GPL-3.0-or-later |
+| `crates/crowbot-protocol` | Apache-2.0 |
+| `crates/crowbotd` | PolyForm Noncommercial 1.0.0 |
+
+Each crate holds its license text.
