@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crowbot_protocol::{
     Avatar, BOT_NAME_LENGTH, BotDraft, BotPatch, BotState, BotSummary, ConversationSummary,
-    PermissionLevel, ServerMessage,
+    PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage,
 };
 use tokio::sync::oneshot;
 
@@ -205,6 +205,7 @@ impl Daemon {
             state: BotState::of(waiting, standing.failed, working, standing.unread),
             unread: standing.unread,
             last_activity_ms: standing.last_activity_ms,
+            preview: standing.preview,
             current_conversation_id: row.current_conversation_id,
             bot: row.bot,
         })
@@ -491,6 +492,33 @@ impl Daemon {
             .broadcast(&ServerMessage::ConversationChanged(summary.clone()));
         self.publish_bot(bot_id);
         Ok(summary)
+    }
+
+    pub fn preferences(&self) -> ServerMessage {
+        let preferences = self
+            .store
+            .with(|store| store.preferences())
+            .unwrap_or_else(|error| {
+                eprintln!("[crowbotd] cannot read the preferences: {error}");
+                Preferences::default()
+            });
+        ServerMessage::Preferences(preferences)
+    }
+
+    pub fn set_preferences(&self, patch: &PreferencesPatch) -> Result<(), Refusal> {
+        if patch
+            .sidebar_width
+            .is_some_and(|width| width > SIDEBAR_WIDTH_LIMIT)
+        {
+            return Err(invalid(
+                "sidebar_width",
+                format!("The sidebar can be {SIDEBAR_WIDTH_LIMIT} pixels wide at most."),
+            ));
+        }
+        let mut state = self.state();
+        let preferences = self.store.with(|store| store.update_preferences(patch))?;
+        state.broadcast(&ServerMessage::Preferences(preferences));
+        Ok(())
     }
 
     pub fn mark_bot_read(&self, bot_id: i64) -> Result<(), String> {

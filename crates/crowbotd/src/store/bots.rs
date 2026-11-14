@@ -34,13 +34,30 @@ pub struct NewBot {
 }
 
 /// What the stored events say about a bot, over all its conversations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Standing {
     /// The turns that ended after the read mark of their conversation.
     pub unread: u32,
     /// A conversation whose last turn failed or was interrupted, after its read mark.
     pub failed: bool,
     pub last_activity_ms: i64,
+    pub preview: String,
+}
+
+const PREVIEW_LENGTH: usize = 140;
+
+fn preview_of(text: &str) -> String {
+    let mut preview = String::new();
+    for word in text.split_whitespace() {
+        if !preview.is_empty() {
+            preview.push(' ');
+        }
+        preview.push_str(word);
+        if preview.chars().count() >= PREVIEW_LENGTH {
+            break;
+        }
+    }
+    preview.chars().take(PREVIEW_LENGTH).collect()
 }
 
 fn level_name(level: PermissionLevel) -> &'static str {
@@ -289,10 +306,32 @@ impl Store {
                     unread: row.get(0)?,
                     failed: row.get(1)?,
                     last_activity_ms: row.get(2)?,
+                    preview: String::new(),
                 })
             },
         )?;
-        Ok(standing)
+        Ok(Standing {
+            preview: self.preview(bot_id)?,
+            ..standing
+        })
+    }
+
+    fn preview(&self, bot_id: i64) -> Result<String, StoreError> {
+        let payload = self
+            .connection
+            .query_row(
+                "SELECT e.payload FROM events e
+                 JOIN conversations c ON c.id = e.conversation_id
+                 WHERE c.bot_id = ?1 AND e.kind IN ('user_text', 'message_text')
+                 ORDER BY e.id DESC LIMIT 1",
+                params![bot_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(match payload.as_deref().map(serde_json::from_str) {
+            Some(Ok(Event::UserText(text) | Event::MessageText(text))) => preview_of(&text),
+            _ => String::new(),
+        })
     }
 
     /// Moves the read mark of a conversation to its last event, and returns the
@@ -715,6 +754,50 @@ mod tests {
         // Asking again does not move the mark forward or further back.
         assert!(store.mark_bot_unread(id).unwrap());
         assert_eq!(store.standing(id).unwrap().unread, 1);
+    }
+
+    #[test]
+    fn the_preview_is_the_last_message_on_one_line() {
+        let store = store();
+        let bot = store.create_bot(&new_bot("Atlas")).unwrap();
+        let (id, first) = (bot.bot.id, bot.current_conversation_id);
+        assert_eq!(store.standing(id).unwrap().preview, "");
+
+        store
+            .append(
+                first,
+                &Event::UserText(
+                    "  Plan
+ the   trip "
+                        .to_owned(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(store.standing(id).unwrap().preview, "Plan the trip");
+        store
+            .append(
+                first,
+                &Event::MessageText(
+                    "Here is
+
+the plan."
+                        .to_owned(),
+                ),
+            )
+            .unwrap();
+        store
+            .append(first, &Event::TurnEnded(TurnEnd::Completed))
+            .unwrap();
+        assert_eq!(store.standing(id).unwrap().preview, "Here is the plan.");
+
+        let second = store.new_conversation(id).unwrap().unwrap().id;
+        store
+            .append(second, &Event::UserText("é".repeat(400)))
+            .unwrap();
+        assert_eq!(store.standing(id).unwrap().preview, "é".repeat(140));
+
+        let other = store.create_bot(&new_bot("Orion")).unwrap();
+        assert_eq!(store.standing(other.bot.id).unwrap().preview, "");
     }
 
     #[test]

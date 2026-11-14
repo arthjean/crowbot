@@ -1,18 +1,7 @@
 //! How a bot and its conversations read in the window.
 
-use crowbot_protocol::{BotState, BotSummary, Event};
+use crowbot_protocol::{BotSummary, Event};
 use gpui::Rgba;
-
-/// What the list says next to a bot's name. A bot with nothing to tell has no label.
-pub fn status_label(summary: &BotSummary) -> Option<String> {
-    match summary.state {
-        BotState::Waiting => Some("Needs you".to_owned()),
-        BotState::Failed => Some("Failed".to_owned()),
-        BotState::Working => Some("Working…".to_owned()),
-        BotState::Unread => Some(format!("{} new", summary.unread)),
-        BotState::Idle => None,
-    }
-}
 
 /// The color of an avatar written `#rrggbb`.
 pub fn avatar_color(color: &str) -> Option<Rgba> {
@@ -51,45 +40,10 @@ pub fn ago(now_ms: i64, then_ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crowbot_protocol::{Avatar, Bot, PermissionLevel, TurnEnd};
+    use crowbot_protocol::{BotState, TurnEnd};
 
     use super::*;
-
-    fn summary(name: &str, state: BotState, unread: u32) -> BotSummary {
-        BotSummary {
-            bot: Bot {
-                id: 1,
-                name: name.to_owned(),
-                title: String::new(),
-                instructions: String::new(),
-                avatar: Avatar {
-                    color: "#3b82f6".to_owned(),
-                    glyph: "A".to_owned(),
-                },
-                provider: "claude".to_owned(),
-                model: None,
-                permission_level: PermissionLevel::AskFirst,
-                workspace: "/work".to_owned(),
-                pinned: false,
-                hidden: false,
-                created_at_ms: 0,
-            },
-            current_conversation_id: 1,
-            state,
-            unread,
-            last_activity_ms: 0,
-        }
-    }
-
-    #[test]
-    fn each_state_has_its_label_and_an_idle_bot_has_none() {
-        let label = |state, unread| status_label(&summary("Atlas", state, unread));
-        assert_eq!(label(BotState::Waiting, 2).as_deref(), Some("Needs you"));
-        assert_eq!(label(BotState::Failed, 1).as_deref(), Some("Failed"));
-        assert_eq!(label(BotState::Working, 0).as_deref(), Some("Working…"));
-        assert_eq!(label(BotState::Unread, 3).as_deref(), Some("3 new"));
-        assert_eq!(label(BotState::Idle, 0), None);
-    }
+    use crate::sidebar::tests::summary;
 
     #[test]
     fn an_avatar_color_is_read_from_its_hex_form() {
@@ -114,8 +68,8 @@ mod tests {
     fn a_bot_made_with_no_form_takes_the_next_free_name() {
         assert_eq!(next_name(&[]), "Bot 1");
         let bots = [
-            summary("Atlas", BotState::Idle, 0),
-            summary("Bot 3", BotState::Idle, 0),
+            summary(1, "Atlas", BotState::Idle),
+            summary(2, "Bot 3", BotState::Idle),
         ];
         assert_eq!(next_name(&bots), "Bot 4");
     }

@@ -11,12 +11,37 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, layout, size as sizes, text};
 
-const FONT_SIZE: Pixels = px(15.);
-const LINE_HEIGHT: Pixels = px(22.);
-const MAX_VISIBLE_ROWS: f32 = 8.;
 const KEY_CONTEXT: &str = "Composer";
+
+#[derive(Clone, Copy)]
+pub struct InputStyle {
+    pub step: text::Step,
+    pub single_line: bool,
+    pub label: &'static str,
+    pub max_rows: f32,
+}
+
+impl InputStyle {
+    pub fn message() -> Self {
+        Self {
+            step: text::LG,
+            single_line: false,
+            label: "Message",
+            max_rows: layout::COMPOSER_MAX_ROWS,
+        }
+    }
+
+    pub fn search() -> Self {
+        Self {
+            step: text::MD,
+            single_line: true,
+            label: "Search bots",
+            max_rows: 1.,
+        }
+    }
+}
 
 actions!(
     composer,
@@ -109,6 +134,8 @@ pub struct Composer {
     is_selecting: bool,
     scroll: ScrollHandle,
     reveal_cursor: bool,
+    style: InputStyle,
+    enabled: bool,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -131,10 +158,16 @@ struct TextLayout {
     rows: Vec<Row>,
     bounds: Bounds<Pixels>,
     content_len: usize,
+    line_height: Pixels,
 }
 
 impl TextLayout {
-    fn new(lines: Vec<WrappedLine>, bounds: Bounds<Pixels>, content_len: usize) -> Self {
+    fn new(
+        lines: Vec<WrappedLine>,
+        bounds: Bounds<Pixels>,
+        content_len: usize,
+        line_height: Pixels,
+    ) -> Self {
         let mut rows = Vec::new();
         let mut line_start = 0;
         for (index, line) in lines.iter().enumerate() {
@@ -163,6 +196,7 @@ impl TextLayout {
             rows,
             bounds,
             content_len,
+            line_height,
         }
     }
 
@@ -182,7 +216,7 @@ impl TextLayout {
     fn position(&self, offset: usize) -> Point<Pixels> {
         let index = self.row_for_offset(offset);
         match self.rows.get(index) {
-            Some(row) => point(self.x_in_row(row, offset), LINE_HEIGHT * index as f32),
+            Some(row) => point(self.x_in_row(row, offset), self.line_height * index as f32),
             None => Point::default(),
         }
     }
@@ -202,7 +236,7 @@ impl TextLayout {
         if local.y < px(0.) {
             return 0;
         }
-        let index = (local.y / LINE_HEIGHT).floor() as usize;
+        let index = (local.y / self.line_height).floor() as usize;
         if index >= self.rows.len() {
             return self.content_len;
         }
@@ -218,13 +252,13 @@ impl TextLayout {
                 let left = self.x_in_row(row, range.start.max(row.start));
                 let mut right = self.x_in_row(row, range.end.min(row.end));
                 if range.end > row.end {
-                    right += px(4.);
+                    right += sizes::SELECTION_OVERHANG;
                 }
-                let top = self.bounds.top() + LINE_HEIGHT * index as f32;
+                let top = self.bounds.top() + self.line_height * index as f32;
                 fill(
                     Bounds::from_corners(
                         point(self.bounds.left() + left, top),
-                        point(self.bounds.left() + right, top + LINE_HEIGHT),
+                        point(self.bounds.left() + right, top + self.line_height),
                     ),
                     color,
                 )
@@ -234,7 +268,11 @@ impl TextLayout {
 }
 
 impl Composer {
-    pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        placeholder: impl Into<SharedString>,
+        style: InputStyle,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             content: String::new(),
@@ -246,11 +284,29 @@ impl Composer {
             is_selecting: false,
             scroll: ScrollHandle::new(),
             reveal_cursor: false,
+            style,
+            enabled: true,
         }
     }
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.enabled != enabled {
+            self.enabled = enabled;
+            cx.notify();
+        }
+    }
+
+    fn accepted(&self, text: &str) -> String {
+        let text = text.replace("\r\n", "\n");
+        if self.style.single_line {
+            text.replace('\n', " ")
+        } else {
+            text
+        }
     }
 
     pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -264,7 +320,7 @@ impl Composer {
     }
 
     pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.content = text.replace("\r\n", "\n");
+        self.content = self.accepted(text);
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
@@ -389,7 +445,9 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.replace_text_in_range(None, "\n", window, cx);
+        if !self.style.single_line {
+            self.replace_text_in_range(None, "\n", window, cx);
+        }
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -526,7 +584,7 @@ impl Composer {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\r\n", "\n"), window, cx);
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -679,6 +737,10 @@ impl EntityInputHandler for Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled {
+            return;
+        }
+        let new_text = &self.accepted(new_text);
         let range = self.replacement_range(range_utf16);
         self.content.replace_range(range.clone(), new_text);
         let cursor = range.start + new_text.len();
@@ -698,6 +760,10 @@ impl EntityInputHandler for Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled {
+            return;
+        }
+        let new_text = &self.accepted(new_text);
         let range = self.replacement_range(range_utf16);
         self.content.replace_range(range.clone(), new_text);
         let inserted_end = range.start + new_text.len();
@@ -731,7 +797,7 @@ impl EntityInputHandler for Composer {
         let end = layout.bounds.origin + layout.position(range.end);
         Some(Bounds::from_corners(
             start,
-            point(end.x.max(start.x), start.y + LINE_HEIGHT),
+            point(end.x.max(start.x), start.y + layout.line_height),
         ))
     }
 
@@ -772,13 +838,14 @@ struct Prepainted {
 
 fn shape(
     text: SharedString,
+    font_size: Pixels,
     runs: &[TextRun],
     width: Option<Pixels>,
     window: &Window,
 ) -> Vec<WrappedLine> {
     window
         .text_system()
-        .shape_text(text, FONT_SIZE, runs, width, None)
+        .shape_text(text, font_size, runs, width, None)
         .map(|lines| lines.into_iter().collect())
         .unwrap_or_default()
 }
@@ -795,10 +862,7 @@ impl ComposerText {
     fn display(&self, window: &Window, cx: &App) -> (SharedString, Vec<TextRun>) {
         let composer = self.composer.read(cx);
         let (text, color): (SharedString, gpui::Hsla) = if composer.content.is_empty() {
-            (
-                composer.placeholder.clone(),
-                self.theme.text_secondary.into(),
-            )
+            (composer.placeholder.clone(), self.theme.text_muted.into())
         } else {
             (composer.content.clone().into(), self.theme.text.into())
         };
@@ -824,7 +888,7 @@ impl ComposerText {
                     len: marked.end - marked.start,
                     underline: Some(UnderlineStyle {
                         color: Some(color),
-                        thickness: px(1.),
+                        thickness: sizes::HAIRLINE,
                         wavy: false,
                     }),
                     ..run.clone()
@@ -863,6 +927,7 @@ impl Element for ComposerText {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let (text, runs) = self.display(window, cx);
+        let step = self.composer.read(cx).style.step;
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         let layout = window.request_measured_layout(style, move |known, available, window, _| {
@@ -870,10 +935,10 @@ impl Element for ComposerText {
                 gpui::AvailableSpace::Definite(width) => Some(width),
                 _ => None,
             });
-            let lines = shape(text.clone(), &runs, width, window);
+            let lines = shape(text.clone(), step.size, &runs, width, window);
             size(
                 width.unwrap_or_default(),
-                LINE_HEIGHT * row_count(&lines) as f32,
+                step.leading * row_count(&lines) as f32,
             )
         });
         (layout, ())
@@ -889,10 +954,11 @@ impl Element for ComposerText {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let (text, runs) = self.display(window, cx);
-        let lines = shape(text, &runs, Some(bounds.size.width), window);
+        let step = self.composer.read(cx).style.step;
+        let lines = shape(text, step.size, &runs, Some(bounds.size.width), window);
         let composer = self.composer.read(cx);
         let empty = composer.content.is_empty();
-        let layout = TextLayout::new(lines, bounds, composer.content.len());
+        let layout = TextLayout::new(lines, bounds, composer.content.len(), step.leading);
         let cursor_position = if empty {
             bounds.origin
         } else {
@@ -900,14 +966,14 @@ impl Element for ComposerText {
         };
         let (cursor, selection) = if empty || composer.selected_range.is_empty() {
             let cursor = fill(
-                Bounds::new(cursor_position, size(px(1.5), LINE_HEIGHT)),
+                Bounds::new(cursor_position, size(sizes::CURSOR, step.leading)),
                 self.theme.text,
             );
             (Some(cursor), Vec::new())
         } else {
             (
                 None,
-                layout.selection_quads(&composer.selected_range, self.theme.text_selection),
+                layout.selection_quads(&composer.selected_range, self.theme.accent_strong),
             )
         };
         let reveal = composer.reveal_cursor;
@@ -919,7 +985,7 @@ impl Element for ComposerText {
         }
         if reveal && viewport.size.height > px(0.) {
             let above = viewport.top() - cursor_position.y;
-            let below = cursor_position.y + LINE_HEIGHT - viewport.bottom();
+            let below = cursor_position.y + step.leading - viewport.bottom();
             let shift = if above > px(0.) {
                 above
             } else if below > px(0.) {
@@ -952,11 +1018,13 @@ impl Element for ComposerText {
         cx: &mut App,
     ) {
         let focus_handle = self.composer.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.composer.clone()),
-            cx,
-        );
+        if self.composer.read(cx).enabled {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.composer.clone()),
+                cx,
+            );
+        }
         for quad in prepaint.selection.drain(..) {
             window.paint_quad(quad);
         }
@@ -964,9 +1032,16 @@ impl Element for ComposerText {
         if let Some(layout) = layout.as_ref() {
             let mut origin = bounds.origin;
             for line in &layout.lines {
-                line.paint(origin, LINE_HEIGHT, TextAlign::Left, None, window, cx)
-                    .ok();
-                origin.y += LINE_HEIGHT * (line.wrap_boundaries.len() + 1) as f32;
+                line.paint(
+                    origin,
+                    layout.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .ok();
+                origin.y += layout.line_height * (line.wrap_boundaries.len() + 1) as f32;
             }
         }
         let layout = layout.filter(|_| prepaint.keep_layout);
@@ -981,15 +1056,20 @@ impl Element for ComposerText {
 }
 
 impl Render for Composer {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_appearance(window.appearance());
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let step = self.style.step;
         div()
-            .id("composer")
+            .id(self.style.label)
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .tab_stop(true)
-            .role(Role::MultilineTextInput)
-            .aria_label("Message")
+            .role(if self.style.single_line {
+                Role::TextInput
+            } else {
+                Role::MultilineTextInput
+            })
+            .aria_label(self.style.label)
             .aria_value(self.content.clone())
             .aria_placeholder(self.placeholder.clone())
             .on_a11y_action(AccessibleAction::Focus, {
@@ -1038,13 +1118,13 @@ impl Render for Composer {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .text_size(FONT_SIZE)
-            .line_height(LINE_HEIGHT)
+            .text_size(step.size)
+            .line_height(step.leading)
             .child(
                 div()
                     .id("composer-scroll")
                     .w_full()
-                    .max_h(LINE_HEIGHT * MAX_VISIBLE_ROWS)
+                    .max_h(step.leading * self.style.max_rows)
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .child(ComposerText {

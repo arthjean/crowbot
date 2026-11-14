@@ -289,6 +289,7 @@ mod tests {
             turn_active,
             pending_approvals: pending.iter().map(|id| (*id).to_owned()).collect(),
             queue: QueueState::default(),
+            turn_model: None,
         }
     }
 

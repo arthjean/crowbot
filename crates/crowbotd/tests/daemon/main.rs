@@ -8,5 +8,6 @@ mod claude;
 mod endpoint;
 mod queue;
 mod recovery;
+mod shell;
 mod stop;
 mod support;

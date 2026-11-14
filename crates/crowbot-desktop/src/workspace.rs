@@ -1,26 +1,34 @@
+mod bot_list;
+mod conversation;
+mod header;
+mod overlays;
+mod screens;
+#[cfg(test)]
+mod tests;
+
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
-    ApprovalDecision, ApprovalReason, BotDraft, BotState, BotSummary, ClientMessage,
-    ConversationSummary, Event, QueueState, ServerMessage, ToolStatus,
+    ApprovalDecision, BotDraft, BotPatch, BotState, BotSummary, ClientMessage, ConversationSummary,
+    Event, Preferences, QueueState, ServerMessage,
 };
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Focusable, FollowMode,
-    FontWeight, KeyBinding, ListAlignment, ListState, Role, SharedString, Stateful, Subscription,
-    Task, Text, Window, actions, div, list, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, FollowMode, KeyBinding, KeyDownEvent,
+    ListAlignment, ListState, Pixels, Point, Role, SharedString, Subscription, Task, Window,
+    actions, div, prelude::*,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::bots;
-use crate::composer::{Composer, ComposerEvent};
+use crate::composer::{Composer, ComposerEvent, InputStyle};
 use crate::connection::{Connection, ConnectionEvent};
-use crate::theme::Theme;
-use crate::transcript::{ApprovalState, Item, Transcript};
-
-const COLUMN_WIDTH: f32 = 760.;
-const SIDEBAR_WIDTH: f32 = 260.;
+use crate::layout::SidebarLayout;
+use crate::menu::{self, MenuAction, MenuEntry};
+use crate::sidebar;
+use crate::theme::{Theme, font, layout, text};
+use crate::transcript::Transcript;
 
 actions!(workspace, [FocusNext, FocusPrevious]);
 
@@ -31,15 +39,28 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-enum Status {
+#[derive(Clone, Debug, PartialEq)]
+enum Link {
     Connecting,
-    /// No daemon was listening, so the client is starting one.
     Starting,
     Connected,
-    /// The connection dropped and the client reconnects on its own.
-    Disconnected(SharedString),
-    /// The client cannot attach until the user retries.
+    Reconnecting(SharedString),
     Failed(SharedString),
+    Incompatible {
+        daemon_protocol: u32,
+        daemon_version: Option<SharedString>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Screen {
+    Loading,
+    Unreachable(SharedString),
+    Incompatible {
+        daemon_protocol: u32,
+        daemon_version: Option<SharedString>,
+    },
+    Shell,
 }
 
 struct OpenConversation {
@@ -48,35 +69,71 @@ struct OpenConversation {
     transcript: Transcript,
     list: ListState,
     queue: QueueState,
-    /// Whether the list showed its end at the last scroll, as the daemon was told.
     at_end: Rc<Cell<bool>>,
+    turn_model: Option<Option<String>>,
+}
+
+struct PendingChange {
+    before: BotSummary,
+    index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuTarget {
+    Bot(i64),
+    Area,
+}
+
+struct Menu {
+    target: MenuTarget,
+    position: Option<Point<Pixels>>,
+    highlighted: Option<usize>,
+    restore_focus: Option<FocusHandle>,
+}
+
+struct ResizeSidebar;
+
+struct DragGhost;
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
 }
 
 pub struct Workspace {
     connection: Connection,
-    status: Status,
+    link: Link,
+    loaded: bool,
+    preferences: Preferences,
+    sidebar: SidebarLayout,
+    saved_sidebar: SidebarLayout,
+    resizing: bool,
     bots: Vec<BotSummary>,
+    pending: Vec<PendingChange>,
+    deleting: HashSet<i64>,
     selected_bot: Option<i64>,
-    /// The conversation the pane shows: the bot's current one, or one picked
-    /// from its history.
     selected: Option<i64>,
     open: Option<OpenConversation>,
-    /// The conversations of the selected bot, while the pane shows its history.
+    load_error: Option<SharedString>,
     history: Option<Vec<ConversationSummary>>,
     composer: Entity<Composer>,
-    /// The queued message that the composer is editing.
+    search: Entity<Composer>,
     editing: Option<i64>,
     notice: Option<SharedString>,
+    menu: Option<Menu>,
+    menu_focus: FocusHandle,
+    confirm_delete: Option<i64>,
+    dialog_focus: FocusHandle,
+    dialog_confirm_focus: FocusHandle,
+    side_panel: bool,
+    hidden_open: bool,
+    title_width: Rc<Cell<Pixels>>,
+    inert: bool,
+    retry_focus: FocusHandle,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _events: Task<()>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ButtonStyle {
-    Solid,
-    Quiet,
-    Disabled,
 }
 
 impl Workspace {
@@ -86,7 +143,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let composer = cx.new(|cx| Composer::new("Message the bot", cx));
+        let composer = cx.new(|cx| Composer::new("Message the bot", InputStyle::message(), cx));
+        let search = cx.new(|cx| Composer::new("Search", InputStyle::search(), cx));
         let subscriptions = vec![
             cx.subscribe_in(
                 &composer,
@@ -95,7 +153,8 @@ impl Workspace {
                     ComposerEvent::Submit => this.send_message(window, cx),
                 },
             ),
-            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            cx.observe(&search, |_, _, cx| cx.notify()),
+            cx.observe_window_appearance(window, |this, _, cx| this.apply_theme(cx)),
         ];
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
@@ -108,49 +167,137 @@ impl Workspace {
             }
         });
         window.focus(&composer.focus_handle(cx), cx);
-        Self {
+        let mut workspace = Self {
             connection,
-            status: Status::Connecting,
+            link: Link::Connecting,
+            loaded: false,
+            preferences: Preferences::default(),
+            sidebar: SidebarLayout::default(),
+            saved_sidebar: SidebarLayout::default(),
+            resizing: false,
             bots: Vec::new(),
+            pending: Vec::new(),
+            deleting: HashSet::new(),
             selected_bot: None,
             selected: None,
             open: None,
+            load_error: None,
             history: None,
             composer,
+            search,
             editing: None,
             notice: None,
+            menu: None,
+            menu_focus: cx.focus_handle(),
+            confirm_delete: None,
+            dialog_focus: cx.focus_handle(),
+            dialog_confirm_focus: cx.focus_handle(),
+            side_panel: false,
+            hidden_open: false,
+            title_width: Rc::new(Cell::new(Pixels::MAX)),
+            inert: false,
+            retry_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
             _events: events,
+        };
+        workspace.apply_theme(cx);
+        workspace
+    }
+
+    fn apply_theme(&mut self, cx: &mut Context<Self>) {
+        let theme = Theme::resolve(self.preferences.appearance, cx.window_appearance());
+        if cx.try_global::<Theme>() != Some(&theme) {
+            cx.set_global(theme);
+            cx.refresh_windows();
         }
+    }
+
+    fn live(&self) -> bool {
+        self.link == Link::Connected
+    }
+
+    fn screen(&self) -> Screen {
+        match &self.link {
+            Link::Incompatible {
+                daemon_protocol,
+                daemon_version,
+            } => Screen::Incompatible {
+                daemon_protocol: *daemon_protocol,
+                daemon_version: daemon_version.clone(),
+            },
+            Link::Failed(reason) if !self.loaded => Screen::Unreachable(reason.clone()),
+            _ if !self.loaded => Screen::Loading,
+            _ => Screen::Shell,
+        }
+    }
+
+    fn set_link(&mut self, link: Link, cx: &mut Context<Self>) {
+        self.link = link;
+        let live = self.live();
+        if !live {
+            self.menu = None;
+            self.confirm_delete = None;
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_enabled(live, cx));
     }
 
     fn handle_connection(&mut self, event: ConnectionEvent, cx: &mut Context<Self>) {
         match event {
             ConnectionEvent::Connected => {
-                self.status = Status::Connected;
-                self.notice = None;
+                self.set_link(Link::Connected, cx);
+                self.load_error = None;
+                self.connection.send(ClientMessage::GetPreferences);
                 self.connection.send(ClientMessage::ListBots);
                 if let Some(conversation_id) = self.selected {
                     self.connection
                         .send(ClientMessage::OpenConversation { conversation_id });
                 }
             }
-            ConnectionEvent::Starting => self.status = Status::Starting,
+            ConnectionEvent::Starting => self.set_link(Link::Starting, cx),
             ConnectionEvent::Disconnected(reason) => {
-                self.status = Status::Disconnected(reason.into());
+                self.roll_back();
+                self.set_link(Link::Reconnecting(reason.into()), cx);
             }
-            ConnectionEvent::Failed(reason) => self.status = Status::Failed(reason.into()),
-            ConnectionEvent::Message(message) => self.handle_message(*message),
+            ConnectionEvent::Failed(reason) => {
+                self.roll_back();
+                self.set_link(Link::Failed(reason.into()), cx);
+            }
+            ConnectionEvent::Incompatible {
+                daemon_protocol,
+                daemon_version,
+            } => {
+                self.roll_back();
+                self.set_link(
+                    Link::Incompatible {
+                        daemon_protocol,
+                        daemon_version: daemon_version.map(SharedString::from),
+                    },
+                    cx,
+                );
+            }
+            ConnectionEvent::Message(message) => self.handle_message(*message, cx),
         }
         cx.notify();
     }
 
-    fn handle_message(&mut self, message: ServerMessage) {
+    fn handle_message(&mut self, message: ServerMessage, cx: &mut Context<Self>) {
         match message {
-            ServerMessage::Welcome { .. } => {}
+            ServerMessage::Welcome { .. } | ServerMessage::Incompatible { .. } => {}
+            ServerMessage::Preferences(preferences) => {
+                self.saved_sidebar = SidebarLayout::from_preferences(&preferences);
+                if !self.resizing {
+                    self.sidebar = self.saved_sidebar;
+                }
+                self.preferences = preferences;
+                self.apply_theme(cx);
+            }
             ServerMessage::Bots(bots) => {
                 self.bots = bots;
+                self.loaded = true;
+                self.pending.clear();
+                self.deleting.clear();
                 if self.selected_bot().is_none() {
                     self.forget_selection();
                     self.select_first_bot();
@@ -158,6 +305,10 @@ impl Workspace {
             }
             ServerMessage::BotChanged(summary) => {
                 let id = summary.bot.id;
+                if self.deleting.contains(&id) {
+                    return;
+                }
+                self.pending.retain(|change| change.before.bot.id != id);
                 match self.bots.iter_mut().find(|known| known.bot.id == id) {
                     Some(known) => *known = summary,
                     None => self.bots.push(summary),
@@ -166,10 +317,14 @@ impl Workspace {
                     self.select_bot(id);
                 }
             }
-            // This client made the bot: it opens it.
             ServerMessage::BotCreated { bot_id } => self.select_bot(bot_id),
             ServerMessage::BotDeleted { bot_id } => {
+                self.deleting.remove(&bot_id);
+                self.pending.retain(|change| change.before.bot.id != bot_id);
                 self.bots.retain(|known| known.bot.id != bot_id);
+                if self.confirm_delete == Some(bot_id) {
+                    self.confirm_delete = None;
+                }
                 if self.selected_bot == Some(bot_id) {
                     self.forget_selection();
                     self.select_first_bot();
@@ -183,7 +338,6 @@ impl Workspace {
                     self.history = Some(conversations);
                 }
             }
-            // This client started the conversation: it shows it.
             ServerMessage::ConversationCreated(summary) => {
                 if self.selected_bot == Some(summary.bot_id) {
                     self.history = None;
@@ -210,11 +364,14 @@ impl Workspace {
                 }
                 let title = snapshot.conversation.title.clone();
                 let queue = snapshot.queue.clone();
+                let turn_model = snapshot.turn_model.clone();
                 let transcript = Transcript::from_snapshot(snapshot);
-                let list = ListState::new(transcript.items().len(), ListAlignment::Top, px(600.));
+                let list = ListState::new(
+                    transcript.items().len(),
+                    ListAlignment::Top,
+                    layout::LIST_OVERDRAW,
+                );
                 list.set_follow_mode(FollowMode::Tail);
-                // The daemon learns when the list leaves its end and when it
-                // comes back: it reads what arrives only while the end shows.
                 let at_end = Rc::new(Cell::new(true));
                 let (connection, told) = (self.connection.clone(), at_end.clone());
                 list.set_scroll_handler(move |scroll, _, _| {
@@ -233,9 +390,9 @@ impl Workspace {
                     list,
                     queue,
                     at_end,
+                    turn_model,
                 });
-                // The conversation opens at its end: all of it is shown,
-                // unless the history covers it.
+                self.load_error = None;
                 self.conversation_shown();
                 self.forget_started_edit();
             }
@@ -252,40 +409,92 @@ impl Workspace {
                 conversation_id,
                 event,
             } => self.apply(conversation_id, event),
+            ServerMessage::TurnModel {
+                conversation_id,
+                model,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    open.turn_model = Some(model);
+                }
+            }
             ServerMessage::Error { message } | ServerMessage::InvalidField { message, .. } => {
-                self.notice = Some(message.into());
+                self.fail(message);
             }
         }
     }
 
-    fn selected_bot(&self) -> Option<&BotSummary> {
-        let id = self.selected_bot?;
-        self.bots.iter().find(|known| known.bot.id == id)
+    fn loading_conversation(&self) -> bool {
+        self.selected.is_some() && self.open.is_none() && self.load_error.is_none()
     }
 
-    /// Drops what the pane shows without telling the daemon: the bot is gone.
+    fn fail(&mut self, message: String) {
+        if !self.pending.is_empty() {
+            self.roll_back();
+            self.notice = Some(format!("The change was not saved: {message}").into());
+        } else if self.loading_conversation() {
+            self.load_error = Some(message.into());
+        } else {
+            self.notice = Some(message.into());
+        }
+    }
+
+    fn roll_back(&mut self) {
+        for change in std::mem::take(&mut self.pending).into_iter().rev() {
+            let id = change.before.bot.id;
+            match self.bots.iter_mut().find(|known| known.bot.id == id) {
+                Some(known) => *known = change.before,
+                None => {
+                    let index = change.index.min(self.bots.len());
+                    self.bots.insert(index, change.before);
+                }
+            }
+        }
+        self.deleting.clear();
+        if self.selected_bot.is_none() {
+            self.select_first_bot();
+        }
+    }
+
+    fn change_bot(&mut self, bot_id: i64, change: impl FnOnce(&mut BotSummary)) -> bool {
+        let Some(index) = self.bots.iter().position(|known| known.bot.id == bot_id) else {
+            return false;
+        };
+        self.pending.push(PendingChange {
+            before: self.bots[index].clone(),
+            index,
+        });
+        change(&mut self.bots[index]);
+        true
+    }
+
+    fn selected_bot(&self) -> Option<&BotSummary> {
+        self.bot(self.selected_bot?)
+    }
+
+    fn bot(&self, bot_id: i64) -> Option<&BotSummary> {
+        self.bots.iter().find(|known| known.bot.id == bot_id)
+    }
+
     fn forget_selection(&mut self) {
         self.selected_bot = None;
         self.selected = None;
         self.open = None;
+        self.load_error = None;
         self.history = None;
         self.editing = None;
     }
 
     fn select_first_bot(&mut self) {
-        if let Some(first) = self.bots.first().map(|known| known.bot.id) {
+        let first = sidebar::groups(&self.bots, "")
+            .first()
+            .and_then(|group| group.bots.first().copied());
+        if let Some(first) = first {
             self.select_bot(first);
         }
     }
 
-    /// Opens a bot on its current conversation.
     fn select_bot(&mut self, bot_id: i64) {
-        let Some(current) = self
-            .bots
-            .iter()
-            .find(|known| known.bot.id == bot_id)
-            .map(|known| known.current_conversation_id)
-        else {
+        let Some(current) = self.bot(bot_id).map(|known| known.current_conversation_id) else {
             return;
         };
         self.selected_bot = Some(bot_id);
@@ -298,6 +507,9 @@ impl Workspace {
             return;
         };
         let marks_read = bots::marks_read(&event);
+        if event.ends_turn() {
+            open.turn_model = None;
+        }
         let before = open.transcript.items().len();
         let first_changed = open.transcript.apply(event);
         let after = open.transcript.items().len();
@@ -310,7 +522,6 @@ impl Workspace {
         if !marks_read {
             return;
         }
-        // The list shows the conversation at its end: what arrived is read.
         if open.at_end.get() && self.history.is_none() {
             self.connection.send(ClientMessage::MarkRead {
                 conversation_id,
@@ -319,8 +530,6 @@ impl Workspace {
         }
     }
 
-    /// A queued message that started, or was deleted elsewhere, can no longer
-    /// be edited: the text in the composer then goes out as a new message.
     fn forget_started_edit(&mut self) {
         let queued = |id| {
             self.open
@@ -343,22 +552,37 @@ impl Workspace {
         }
         self.selected = Some(conversation_id);
         self.open = None;
+        self.load_error = None;
         self.editing = None;
-        self.notice = None;
         self.connection
             .send(ClientMessage::OpenConversation { conversation_id });
     }
 
+    fn retry_load(&mut self) {
+        if let Some(conversation_id) = self.selected
+            && self.live()
+        {
+            self.load_error = None;
+            self.connection
+                .send(ClientMessage::OpenConversation { conversation_id });
+        }
+    }
+
+    fn retry_connection(&mut self, cx: &mut Context<Self>) {
+        self.set_link(Link::Connecting, cx);
+        self.connection.retry();
+        cx.notify();
+    }
+
     fn can_send(&self, cx: &App) -> bool {
-        matches!(self.status, Status::Connected)
+        self.live()
             && self.open.is_some()
             && self.history.is_none()
             && !self.composer.read(cx).text().trim().is_empty()
     }
 
-    /// The bot works and the composer is empty: the send control stops the turn.
     fn can_stop(&self, cx: &App) -> bool {
-        matches!(self.status, Status::Connected)
+        self.live()
             && self
                 .open
                 .as_ref()
@@ -367,7 +591,9 @@ impl Workspace {
     }
 
     fn stop_turn(&mut self) {
-        if let Some(open) = self.open.as_ref() {
+        if let Some(open) = self.open.as_ref()
+            && self.live()
+        {
             self.connection.send(ClientMessage::StopTurn {
                 conversation_id: open.id,
             });
@@ -398,7 +624,9 @@ impl Workspace {
     }
 
     fn queue_action(&mut self, action: impl FnOnce(i64) -> ClientMessage) {
-        if let Some(open) = self.open.as_ref() {
+        if let Some(open) = self.open.as_ref()
+            && self.live()
+        {
             self.connection.send(action(open.id));
         }
     }
@@ -431,16 +659,13 @@ impl Workspace {
     }
 
     fn open_bot(&mut self, bot_id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        self.notice = None;
         self.select_bot(bot_id);
         self.focus_composer(window, cx);
         cx.notify();
     }
 
-    /// Creates a bot with a default name. The daemon answers with the bot,
-    /// and this client opens it.
     fn new_bot(&mut self) {
-        if matches!(self.status, Status::Connected) {
+        if self.live() {
             self.connection.send(ClientMessage::CreateBot {
                 draft: BotDraft {
                     name: bots::next_name(&self.bots),
@@ -450,30 +675,26 @@ impl Workspace {
         }
     }
 
-    /// Starts a conversation of the selected bot. The daemon makes it the
-    /// bot's current one, and this client shows it.
     fn new_chat(&mut self) {
         if let Some(bot_id) = self.selected_bot
-            && matches!(self.status, Status::Connected)
+            && self.live()
         {
             self.connection
                 .send(ClientMessage::NewConversation { bot_id });
         }
     }
 
-    /// Shows the conversations of the selected bot, or goes back to the one
-    /// the pane showed.
     fn toggle_history(&mut self) {
         if self.history.take().is_some() {
             self.conversation_shown();
             return;
         }
-        if let Some(bot_id) = self.selected_bot {
+        if let Some(bot_id) = self.selected_bot
+            && self.live()
+        {
             self.history = Some(Vec::new());
             self.connection
                 .send(ClientMessage::ListConversations { bot_id });
-            // The history covers the conversation: what was shown is read,
-            // and what arrives from now on is not.
             if let Some(open) = self.open.as_ref()
                 && open.at_end.get()
             {
@@ -495,8 +716,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The pane shows the conversation: when the list is at its end, all of
-    /// it is read, and so is what arrives while the end stays on screen.
     fn conversation_shown(&self) {
         if let Some(open) = self.open.as_ref()
             && open.at_end.get()
@@ -514,7 +733,9 @@ impl Workspace {
     }
 
     fn resolve_approval(&mut self, approval_id: String, decision: ApprovalDecision) {
-        if let Some(open) = self.open.as_ref() {
+        if let Some(open) = self.open.as_ref()
+            && self.live()
+        {
             self.connection.send(ClientMessage::ResolveApproval {
                 conversation_id: open.id,
                 approval_id,
@@ -523,817 +744,276 @@ impl Workspace {
         }
     }
 
-    fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let connected = matches!(self.status, Status::Connected);
-        let rows = self.bots.iter().map(|summary| {
-            let id = summary.bot.id;
-            let selected = self.selected_bot == Some(id);
-            let name: SharedString = summary.bot.name.clone().into();
-            let status = bots::status_label(summary);
-            let status_color = match summary.state {
-                BotState::Waiting => theme.attention_text,
-                BotState::Failed => theme.danger_text,
-                BotState::Unread => theme.text,
-                BotState::Working | BotState::Idle => theme.text_secondary,
-            };
-            let label: SharedString = match &status {
-                Some(status) => format!("{name}, {status}").into(),
-                None => name.clone(),
-            };
-            let hover = theme.hover;
-            div()
-                .id(("bot", usize::try_from(id).unwrap_or_default()))
-                .focusable()
-                .tab_stop(true)
-                .role(Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .h(px(36.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .rounded(px(6.))
-                .border_2()
-                .border_color(gpui::transparent_black())
-                .focus_visible(|style| style.border_color(theme.focus_ring))
-                .cursor_pointer()
-                .when(selected, |row| {
-                    row.bg(theme.selected).font_weight(FontWeight::MEDIUM)
-                })
-                .when(!selected, |row| row.hover(move |style| style.bg(hover)))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_bot(id, window, cx);
-                }))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(22.))
-                        .rounded_full()
-                        .bg(bots::avatar_color(&summary.bot.avatar.color)
-                            .unwrap_or(theme.accent_solid))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.))
-                        .text_color(theme.on_accent)
-                        .child(SharedString::from(summary.bot.avatar.glyph.clone())),
-                )
-                .child(div().flex_1().min_w_0().truncate().child(name))
-                .children(status.map(|status| {
-                    div()
-                        .flex_none()
-                        .text_color(status_color)
-                        .child(SharedString::from(status))
-                }))
-        });
-        let (status, status_color) = match &self.status {
-            Status::Connected => ("Connected to the daemon", theme.text_secondary),
-            Status::Connecting => ("Connecting to the daemon…", theme.text_secondary),
-            Status::Starting => ("Starting the daemon…", theme.text_secondary),
-            Status::Disconnected(_) => ("Reconnecting to the daemon…", theme.danger_text),
-            Status::Failed(_) => ("Daemon not connected", theme.danger_text),
-        };
-        div()
-            .w(px(SIDEBAR_WIDTH))
-            .flex_none()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.separator)
-            .child(
-                div().p(px(12.)).child(
-                    button(
-                        "new-bot",
-                        "New bot",
-                        if connected {
-                            ButtonStyle::Quiet
-                        } else {
-                            ButtonStyle::Disabled
-                        },
-                        theme,
-                    )
-                    .w_full()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.new_bot();
-                        this.focus_composer(window, cx);
-                    })),
-                ),
-            )
-            .child(
-                div()
-                    .id("bots")
-                    .role(Role::List)
-                    .aria_label("Bots")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(8.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .children(rows),
-            )
-            .child(
-                div()
-                    .px(px(16.))
-                    .py(px(12.))
-                    .border_t_1()
-                    .border_color(theme.separator)
-                    .text_color(status_color)
-                    .child(status),
-            )
+    fn pending_model(&self) -> Option<SharedString> {
+        let open = self.open.as_ref()?;
+        let running = open
+            .turn_model
+            .as_ref()
+            .filter(|_| open.transcript.turn_active())?;
+        let next = &self.selected_bot()?.bot.model;
+        (running != next).then(|| model_label(next))
     }
 
-    /// The bot the pane shows, the title of its conversation, and the way to
-    /// its other conversations.
-    fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let bot = self.selected_bot()?;
-        let title: SharedString = if self.history.is_some() {
-            "History".into()
-        } else {
-            self.open
-                .as_ref()
-                .and_then(|open| open.title.clone())
-                .unwrap_or_else(|| "New chat".to_owned())
-                .into()
-        };
-        Some(
-            div()
-                .id("conversation-header")
-                .flex_none()
-                .px(px(24.))
-                .py(px(10.))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .border_b_1()
-                .border_color(theme.separator)
-                .child(
-                    div()
-                        .flex_none()
-                        .max_w(px(240.))
-                        .truncate()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(SharedString::from(bot.bot.name.clone())),
-                )
-                .child(
-                    div()
-                        .id("conversation-title")
-                        .role(Role::Heading)
-                        .aria_label(title.clone())
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(theme.text_secondary)
-                        .child(title),
-                )
-                .child(
-                    button(
-                        "toggle-history",
-                        if self.history.is_some() {
-                            "Back to chat"
-                        } else {
-                            "History"
-                        },
-                        ButtonStyle::Quiet,
-                        theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_history();
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    button("new-chat", "New chat", ButtonStyle::Quiet, theme).on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.new_chat();
-                            this.focus_composer(window, cx);
-                        }),
-                    ),
-                ),
-        )
+    fn resize_sidebar(&mut self, pointer: Pixels, window: &Window, cx: &mut Context<Self>) {
+        self.resizing = true;
+        let before = self.sidebar;
+        self.sidebar
+            .drag(f32::from(pointer), f32::from(window.viewport_size().width));
+        if self.sidebar != before {
+            cx.notify();
+        }
     }
 
-    /// The conversations of the selected bot, the most recently active first.
-    fn render_history(
-        &self,
-        conversations: &[ConversationSummary],
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let current = self.selected_bot().map(|bot| bot.current_conversation_id);
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
-            .unwrap_or_default();
-        let rows = conversations.iter().map(|summary| {
-            let id = summary.id;
-            let title: SharedString = summary
-                .title
-                .clone()
-                .unwrap_or_else(|| "New chat".to_owned())
-                .into();
-            let mut detail = bots::ago(now_ms, summary.last_activity_ms);
-            if current == Some(id) {
-                detail = format!("Current · {detail}");
+    fn save_sidebar(&mut self) {
+        if let Some(patch) = self.sidebar.changes_since(&self.saved_sidebar) {
+            self.saved_sidebar = self.sidebar;
+            self.connection
+                .send(ClientMessage::SetPreferences { patch });
+        }
+    }
+
+    fn finish_resize(&mut self) {
+        self.resizing = false;
+        self.save_sidebar();
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar.toggle();
+        self.save_sidebar();
+        cx.notify();
+    }
+
+    fn resizer_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
+        let window_width = f32::from(window.viewport_size().width);
+        match event.keystroke.key.as_str() {
+            "left" => self.sidebar.step(-1., window_width),
+            "right" => self.sidebar.step(1., window_width),
+            "home" => {
+                if !self.sidebar.is_compact() {
+                    self.sidebar.toggle();
+                }
             }
-            let hover = theme.hover;
-            div()
-                .id(("history", usize::try_from(id).unwrap_or_default()))
-                .focusable()
-                .tab_stop(true)
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("{title}, {detail}")))
-                .flex_none()
-                .h(px(36.))
-                .px(px(10.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .rounded(px(6.))
-                .border_2()
-                .border_color(gpui::transparent_black())
-                .focus_visible(|style| style.border_color(theme.focus_ring))
-                .cursor_pointer()
-                .when(self.selected == Some(id), |row| row.bg(theme.selected))
-                .hover(move |style| style.bg(hover))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_from_history(id, window, cx);
-                }))
-                .child(div().flex_1().min_w_0().truncate().child(title))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(theme.text_secondary)
-                        .child(SharedString::from(detail)),
-                )
-        });
-        div()
-            .size_full()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .id("history")
-                    .role(Role::List)
-                    .aria_label("Conversations of this bot")
-                    .w_full()
-                    .max_w(px(COLUMN_WIDTH))
-                    .h_full()
-                    .overflow_y_scroll()
-                    .px(px(24.))
-                    .py(px(16.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .children(rows),
-            )
-            .into_any_element()
+            "end" => self.sidebar.drag(layout::SIDEBAR_MAX, window_width),
+            _ => return,
+        }
+        self.save_sidebar();
+        cx.stop_propagation();
+        cx.notify();
     }
 
-    fn render_item(
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar.is_compact() {
+            self.toggle_sidebar(cx);
+        }
+        window.focus(&self.search.focus_handle(cx), cx);
+    }
+
+    fn menu_entries(&self) -> Vec<MenuEntry> {
+        match self.menu.as_ref().map(|menu| menu.target) {
+            Some(MenuTarget::Bot(bot_id)) => {
+                self.bot(bot_id).map(menu::bot_menu).unwrap_or_default()
+            }
+            Some(MenuTarget::Area) => menu::area_menu(&self.bots),
+            None => Vec::new(),
+        }
+    }
+
+    fn open_menu(
         &mut self,
-        index: usize,
+        target: MenuTarget,
+        position: Option<Point<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = Theme::for_appearance(window.appearance());
-        let Some((item, last)) = self.open.as_ref().and_then(|open| {
-            let items = open.transcript.items();
-            Some((items.get(index)?, index + 1 == items.len()))
-        }) else {
-            return div().into_any_element();
-        };
-        let (top, body) = match item {
-            Item::User(text) => (
-                24.,
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(
-                        div()
-                            .max_w(px(COLUMN_WIDTH * 0.8))
-                            .px(px(14.))
-                            .py(px(9.))
-                            .rounded(px(12.))
-                            .bg(theme.selected)
-                            .text_size(px(15.))
-                            .line_height(px(22.))
-                            .child(readable(index, text)),
-                    )
-                    .into_any_element(),
-            ),
-            Item::Assistant(text) => (
-                16.,
-                div()
-                    .text_size(px(15.))
-                    .line_height(px(22.))
-                    .child(readable(index, text.trim_matches('\n')))
-                    .into_any_element(),
-            ),
-            Item::Thought(text) => (
-                12.,
-                div()
-                    .pl(px(10.))
-                    .border_l_2()
-                    .border_color(theme.separator)
-                    .text_color(theme.text_secondary)
-                    .child(readable(index, text.trim_matches('\n')))
-                    .into_any_element(),
-            ),
-            Item::Tool { title, status, .. } => {
-                let (label, color) = match status {
-                    Some(ToolStatus::Pending) => ("Waiting", theme.text_secondary),
-                    Some(ToolStatus::InProgress) => ("Running", theme.text_secondary),
-                    Some(ToolStatus::Completed) => ("Done", theme.success_text),
-                    Some(ToolStatus::Failed) => ("Failed", theme.danger_text),
-                    None => ("", theme.text_secondary),
-                };
-                (
-                    8.,
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .text_color(theme.text_secondary)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .child(SharedString::from(title.clone())),
-                        )
-                        .child(div().flex_none().text_color(color).child(label))
-                        .into_any_element(),
-                )
-            }
-            Item::Approval {
-                id,
-                title,
-                state,
-                automatic,
-            } => (
-                12.,
-                self.render_approval(
-                    index,
-                    id.clone(),
-                    title.clone(),
-                    (*state, *automatic),
-                    &theme,
-                    cx,
-                ),
-            ),
-            Item::Notice(text) => (
-                12.,
-                div()
-                    .text_color(theme.danger_text)
-                    .child(readable(index, text))
-                    .into_any_element(),
-            ),
-        };
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(COLUMN_WIDTH))
-                    .px(px(24.))
-                    .pt(px(top))
-                    .when(last, |column| column.pb(px(24.)))
-                    .child(body),
-            )
-            .into_any_element()
-    }
-
-    fn render_approval(
-        &self,
-        index: usize,
-        id: Option<String>,
-        title: Option<String>,
-        (state, automatic): (ApprovalState, Option<ApprovalReason>),
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let title = title.unwrap_or_else(|| "use a tool".to_owned());
-        let settled = |label: &'static str, color| {
-            div()
-                .flex()
-                .gap(px(8.))
-                .child(div().flex_none().text_color(color).child(label))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(theme.text_secondary)
-                        .child(SharedString::from(title.clone())),
-                )
-                .into_any_element()
-        };
-        let id = match (state, id) {
-            (ApprovalState::Waiting, Some(id)) => id,
-            (ApprovalState::Allowed, _) => {
-                let label = match automatic {
-                    Some(ApprovalReason::PermissionLevel) => "Allowed by Full access",
-                    _ => "Allowed",
-                };
-                return settled(label, theme.success_text);
-            }
-            (ApprovalState::Declined, _) => {
-                let label = match automatic {
-                    Some(ApprovalReason::NoAllowOnce) => "Declined: it could not be allowed once",
-                    _ => "Declined",
-                };
-                return settled(label, theme.danger_text);
-            }
-            (ApprovalState::Cancelled, _) => return settled("Cancelled", theme.text_secondary),
-            (ApprovalState::Expired | ApprovalState::Waiting, _) => {
-                return settled("Not answered", theme.text_secondary);
-            }
-        };
-        let allow_id = id.clone();
-        div()
-            .id(("approval", index))
-            .role(Role::Group)
-            .aria_label(SharedString::from(format!("The bot asks to {title}")))
-            .p(px(14.))
-            .rounded(px(10.))
-            .bg(theme.attention_surface)
-            .border_1()
-            .border_color(theme.attention_border)
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_color(theme.attention_text)
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("The bot asks for your approval"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .line_height(px(22.))
-                            .child(SharedString::from(title)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        button(("allow", index), "Allow once", ButtonStyle::Solid, theme).on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.resolve_approval(allow_id.clone(), ApprovalDecision::Allowed);
-                                this.focus_composer(window, cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        button(("decline", index), "Decline", ButtonStyle::Quiet, theme).on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.resolve_approval(id.clone(), ApprovalDecision::Declined);
-                                this.focus_composer(window, cx);
-                            }),
-                        ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_transcript(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let message = |text: &'static str| {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(theme.text_secondary)
-                .child(text)
-                .into_any_element()
-        };
-        if let Some(history) = &self.history {
-            return self.render_history(history, theme, cx);
+    ) {
+        if !self.live() {
+            return;
         }
-        match &self.open {
-            Some(open) if open.transcript.items().is_empty() => {
-                message("Send a message to start this conversation.")
-            }
-            Some(open) => list(
-                open.list.clone(),
-                cx.processor(|this, index, window, cx| this.render_item(index, window, cx)),
-            )
-            .size_full()
-            .into_any_element(),
-            None if !matches!(self.status, Status::Connected) => {
-                message("Bots appear here once the daemon is connected.")
-            }
-            None if self.selected_bot.is_none() => message("Create a bot to start."),
-            None => message("Opening the conversation…"),
-        }
-    }
-
-    /// The messages that wait for the running turn to end, above the composer.
-    fn render_queue(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let queue = &self.open.as_ref()?.queue;
-        if queue.messages.is_empty() {
-            return None;
-        }
-        let heading = if queue.paused {
-            "Queue paused: the last turn did not finish."
-        } else if queue.messages.len() == 1 {
-            "1 message waits for the bot."
-        } else {
-            "Messages wait for the bot, in this order."
+        let restore_focus = match self.menu.take() {
+            Some(open) => open.restore_focus,
+            None => window.focused(cx),
         };
-        let rows = queue.messages.iter().enumerate().map(|(index, message)| {
-            let id = message.id;
-            let editing = self.editing == Some(id);
-            let label = SharedString::from(message.text.clone());
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .id(("queued", index))
-                        .role(Role::ListItem)
-                        .aria_label(label.clone())
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .when(editing, |text| text.text_color(theme.text_secondary))
-                        .child(label),
-                )
-                .child(
-                    button(("queue-edit", index), "Edit", ButtonStyle::Quiet, theme).on_click(
-                        cx.listener(move |this, _, window, cx| this.edit_queued(id, window, cx)),
-                    ),
-                )
-                .child(
-                    button(
-                        ("queue-send-now", index),
-                        "Send now",
-                        ButtonStyle::Quiet,
-                        theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, _| {
-                        this.queue_action(|conversation_id| ClientMessage::SendQueuedMessageNow {
-                            conversation_id,
-                            queue_id: id,
-                        });
-                    })),
-                )
-                .child(
-                    button(("queue-delete", index), "Delete", ButtonStyle::Quiet, theme).on_click(
-                        cx.listener(move |this, _, _, _| {
-                            this.queue_action(|conversation_id| {
-                                ClientMessage::DeleteQueuedMessage {
-                                    conversation_id,
-                                    queue_id: id,
-                                }
-                            });
-                        }),
-                    ),
-                )
+        self.menu = Some(Menu {
+            target,
+            position,
+            highlighted: None,
+            restore_focus,
         });
-        Some(
-            div()
-                .id("queue")
-                .role(Role::List)
-                .aria_label("Queued messages")
-                .p(px(10.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(if queue.paused {
-                    theme.attention_border
-                } else {
-                    theme.separator
-                })
-                .when(queue.paused, |panel| panel.bg(theme.attention_surface))
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_color(if queue.paused {
-                                    theme.attention_text
-                                } else {
-                                    theme.text_secondary
-                                })
-                                .child(heading),
-                        )
-                        .children(queue.paused.then(|| {
-                            button("queue-resume", "Resume", ButtonStyle::Solid, theme).on_click(
-                                cx.listener(|this, _, _, _| {
-                                    this.queue_action(|conversation_id| {
-                                        ClientMessage::ResumeQueue { conversation_id }
-                                    });
-                                }),
-                            )
-                        })),
-                )
-                .children(rows)
-                .into_any_element(),
-        )
+        if position.is_none() {
+            let entries = self.menu_entries();
+            if let Some(menu) = self.menu.as_mut() {
+                menu.highlighted = menu::step(&entries, None, true);
+            }
+        }
+        window.focus(&self.menu_focus, cx);
+        cx.notify();
     }
 
-    fn render_composer(
-        &self,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let can_send = self.can_send(cx);
-        let can_stop = self.can_stop(cx);
-        let send_control = if can_stop {
-            button("stop-turn", "Stop", ButtonStyle::Quiet, theme)
-                .on_click(cx.listener(|this, _, _, _| this.stop_turn()))
-        } else {
-            button(
-                "send-message",
-                if self.editing.is_some() {
-                    "Save"
-                } else {
-                    "Send"
-                },
-                if can_send {
-                    ButtonStyle::Solid
-                } else {
-                    ButtonStyle::Disabled
-                },
-                theme,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.send_message(window, cx);
-            }))
-        };
-        let focused = self.composer.focus_handle(cx).is_focused(window);
-        let activity = self.open.as_ref().and_then(|open| {
-            if !open.transcript.turn_active() {
-                return None;
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = self.menu.take() {
+            if self.menu_focus.contains_focused(window, cx) {
+                match menu.restore_focus {
+                    Some(focus) => window.focus(&focus, cx),
+                    None => self.focus_composer(window, cx),
+                }
             }
-            let waiting = open.transcript.items().iter().any(|item| {
-                matches!(
-                    item,
-                    Item::Approval {
-                        state: ApprovalState::Waiting,
-                        ..
+            cx.notify();
+        }
+    }
+
+    fn menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.menu_entries();
+        let Some(menu) = self.menu.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "down" => menu.highlighted = menu::step(&entries, menu.highlighted, true),
+            "up" => menu.highlighted = menu::step(&entries, menu.highlighted, false),
+            "home" => menu.highlighted = menu::step(&entries, None, true),
+            "end" => menu.highlighted = menu::step(&entries, None, false),
+            "escape" => self.close_menu(window, cx),
+            "enter" | "space" => {
+                let chosen = menu
+                    .highlighted
+                    .and_then(|index| entries.get(index))
+                    .filter(|entry| entry.enabled)
+                    .map(|entry| entry.action);
+                if let Some(action) = chosen {
+                    self.perform(action, window, cx);
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn perform(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
+        if !self.live() {
+            return;
+        }
+        self.notice = None;
+        match action {
+            MenuAction::MarkRead(bot_id) => self.mark_read(bot_id),
+            MenuAction::MarkUnread(bot_id) => {
+                if self.change_bot(bot_id, |summary| {
+                    summary.unread = summary.unread.max(1);
+                    if summary.state == BotState::Idle {
+                        summary.state = BotState::Unread;
                     }
-                )
-            });
-            Some(if waiting {
-                "The bot is waiting for your approval."
-            } else {
-                "The bot is working…"
-            })
-        });
-        div()
-            .w_full()
-            .max_w(px(COLUMN_WIDTH))
-            .mx_auto()
-            .px(px(24.))
-            .pb(px(20.))
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .children(self.notice.clone().map(|notice| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_color(theme.danger_text)
-                            .child(notice),
-                    )
-                    .child(
-                        button("dismiss-notice", "Dismiss", ButtonStyle::Quiet, theme).on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.notice = None;
-                                this.focus_composer(window, cx);
-                                cx.notify();
-                            }),
-                        ),
-                    )
-            }))
-            .children(self.render_queue(theme, cx))
-            .child(
-                div()
-                    .id("activity")
-                    .role(Role::Status)
-                    .h(px(20.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_color(theme.text_secondary)
-                    .children(if self.editing.is_some() {
-                        Some("Editing a queued message.")
-                    } else {
-                        activity
-                    })
-                    .children(self.editing.map(|_| {
-                        button("cancel-edit", "Cancel", ButtonStyle::Quiet, theme).on_click(
-                            cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)),
-                        )
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_end()
-                    .gap(px(8.))
-                    .p(px(6.))
-                    .rounded(px(12.))
-                    .bg(theme.raised)
-                    .border_1()
-                    .border_color(if focused {
-                        theme.focus_ring
-                    } else {
-                        theme.control_border
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(8.))
-                            .py(px(5.))
-                            .child(self.composer.clone()),
-                    )
-                    .child(send_control),
-            )
+                }) {
+                    self.connection
+                        .send(ClientMessage::MarkBotUnread { bot_id });
+                }
+            }
+            MenuAction::NewChat(bot_id) => {
+                self.select_bot(bot_id);
+                self.new_chat();
+                self.focus_composer(window, cx);
+            }
+            MenuAction::Edit(bot_id) => {
+                self.select_bot(bot_id);
+                self.side_panel = true;
+            }
+            MenuAction::Duplicate(bot_id) => {
+                self.connection.send(ClientMessage::DuplicateBot { bot_id });
+            }
+            MenuAction::SetPinned(bot_id, pinned) => {
+                if self.change_bot(bot_id, |summary| summary.bot.pinned = pinned) {
+                    self.connection.send(ClientMessage::UpdateBot {
+                        bot_id,
+                        patch: BotPatch {
+                            pinned: Some(pinned),
+                            ..BotPatch::default()
+                        },
+                    });
+                }
+            }
+            MenuAction::SetHidden(bot_id, hidden) => {
+                if self.change_bot(bot_id, |summary| summary.bot.hidden = hidden) {
+                    self.connection.send(ClientMessage::UpdateBot {
+                        bot_id,
+                        patch: BotPatch {
+                            hidden: Some(hidden),
+                            ..BotPatch::default()
+                        },
+                    });
+                }
+            }
+            MenuAction::Delete(bot_id) => {
+                if self.bot(bot_id).is_some() {
+                    self.confirm_delete = Some(bot_id);
+                    window.focus(&self.dialog_focus, cx);
+                }
+            }
+            MenuAction::NewBot => {
+                self.new_bot();
+                self.focus_composer(window, cx);
+            }
+            MenuAction::MarkAllRead => {
+                for bot_id in sidebar::unread_bots(&self.bots) {
+                    self.mark_read(bot_id);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn mark_read(&mut self, bot_id: i64) {
+        if self.change_bot(bot_id, |summary| {
+            summary.unread = 0;
+            if matches!(summary.state, BotState::Unread | BotState::Failed) {
+                summary.state = BotState::Idle;
+            }
+        }) {
+            self.connection.send(ClientMessage::MarkBotRead { bot_id });
+        }
+    }
+
+    fn cancel_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_delete.take().is_some() {
+            self.focus_composer(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn delete_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bot_id) = self.confirm_delete.take() else {
+            return;
+        };
+        self.focus_composer(window, cx);
+        cx.notify();
+        if !self.live() {
+            return;
+        }
+        let Some(index) = self.bots.iter().position(|known| known.bot.id == bot_id) else {
+            return;
+        };
+        let before = self.bots.remove(index);
+        self.pending.push(PendingChange { before, index });
+        self.deleting.insert(bot_id);
+        if self.selected_bot == Some(bot_id) {
+            self.forget_selection();
+            self.select_first_bot();
+        }
+        self.connection.send(ClientMessage::DeleteBot { bot_id });
+    }
+
+    fn toggle_side_panel(&mut self, cx: &mut Context<Self>) {
+        self.side_panel = !self.side_panel;
+        cx.notify();
     }
 }
 
-fn button(
-    id: impl Into<ElementId>,
-    label: &'static str,
-    style: ButtonStyle,
-    theme: &Theme,
-) -> Stateful<Div> {
-    let focus_ring = theme.focus_ring;
-    let base = div()
-        .id(id)
-        .focusable()
-        .tab_stop(style != ButtonStyle::Disabled)
-        .role(Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .h(px(32.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.))
-        .border_2()
-        .font_weight(FontWeight::MEDIUM)
-        .focus_visible(move |style| style.border_color(focus_ring))
-        .child(label);
-    match style {
-        ButtonStyle::Solid => {
-            let hover = theme.accent_solid_hover;
-            base.bg(theme.accent_solid)
-                .border_color(theme.accent_solid)
-                .text_color(theme.on_accent)
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover))
-        }
-        ButtonStyle::Quiet => {
-            let hover = theme.selected;
-            base.bg(theme.hover)
-                .border_color(theme.hover)
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover))
-        }
-        ButtonStyle::Disabled => base
-            .bg(theme.hover)
-            .border_color(theme.hover)
-            .text_color(theme.text_secondary),
+fn model_label(model: &Option<String>) -> SharedString {
+    match model {
+        Some(model) => model.clone().into(),
+        None => "Default model".into(),
     }
 }
 
-fn readable(index: usize, text: &str) -> Text {
-    Text::new(
-        ElementId::from(("message", index)),
-        SharedString::from(text.to_owned()),
-    )
+fn row_id(bot_id: i64) -> usize {
+    usize::try_from(bot_id).unwrap_or_default()
 }
 
 impl Focusable for Workspace {
@@ -1344,78 +1024,65 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::for_appearance(window.appearance());
-        let banner = |text: SharedString, retry: bool| {
-            div()
-                .id("connection-notice")
-                .role(Role::Status)
-                .aria_label(text.clone())
-                .px(px(24.))
-                .py(px(10.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .bg(theme.attention_surface)
-                .border_b_1()
-                .border_color(theme.attention_border)
-                .child(div().flex_1().min_w_0().child(text))
-                .children(retry.then(|| {
-                    button("retry-connection", "Retry", ButtonStyle::Solid, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.status = Status::Connecting;
-                            this.connection.retry();
-                            cx.notify();
-                        }),
-                    )
-                }))
-        };
-        let banner = match &self.status {
-            Status::Starting => Some(banner("Starting the daemon…".into(), false)),
-            Status::Disconnected(reason) if reason.is_empty() => Some(banner(
-                "The daemon is not reachable. Reconnecting.".into(),
-                false,
-            )),
-            Status::Disconnected(reason) => Some(banner(
-                format!("The daemon is not reachable. Reconnecting. ({reason})").into(),
-                false,
-            )),
-            Status::Failed(reason) => Some(banner(reason.clone(), true)),
-            Status::Connecting | Status::Connected => None,
-        };
-        div()
+        if self.resizing && !cx.has_active_drag() {
+            self.finish_resize();
+        }
+        let theme = Theme::of(cx);
+        let root = div()
             .id("workspace")
             .role(Role::Application)
             .aria_label("Crow Bot")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
-            .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
+            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
+                this.focus_step(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrevious, window, cx| {
+                this.focus_step(false, window, cx);
+            }))
+            .on_drag_move::<ResizeSidebar>(cx.listener(
+                |this, event: &gpui::DragMoveEvent<ResizeSidebar>, window, cx| {
+                    this.resize_sidebar(event.event.position.x, window, cx);
+                },
+            ))
+            .relative()
             .size_full()
             .flex()
-            .bg(theme.background)
+            .flex_col()
+            .bg(theme.frame)
             .text_color(theme.text)
-            .text_size(px(13.))
-            .line_height(px(20.))
-            .child(self.render_sidebar(&theme, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .children(banner)
-                    .children(self.render_header(&theme, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .child(self.render_transcript(&theme, cx)),
-                    )
-                    .children(
-                        self.history
-                            .is_none()
-                            .then(|| self.render_composer(&theme, window, cx)),
-                    ),
-            )
+            .font(font::sans())
+            .text_size(text::MD.size)
+            .line_height(text::MD.leading);
+        let root = match self.screen() {
+            Screen::Shell => self.render_shell(root, &theme, window, cx),
+            screen => root.child(self.render_screen(&screen, &theme, window, cx)),
+        };
+        root.children(self.render_floating_menu(&theme, cx))
+            .children(self.render_delete_dialog(&theme, cx))
+            .children(self.render_toast(&theme, cx))
+    }
+}
+
+impl Workspace {
+    fn focus_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_some() {
+            self.close_menu(window, cx);
+        } else if !self.live() {
+            if matches!(self.link, Link::Failed(_) | Link::Incompatible { .. }) {
+                window.focus(&self.retry_focus, cx);
+            }
+        } else if self.confirm_delete.is_some() {
+            let cancel = self.dialog_focus.is_focused(window);
+            let next = if cancel {
+                &self.dialog_confirm_focus
+            } else {
+                &self.dialog_focus
+            };
+            window.focus(next, cx);
+        } else if forward {
+            window.focus_next(cx);
+        } else {
+            window.focus_prev(cx);
+        }
     }
 }

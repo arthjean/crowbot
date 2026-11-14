@@ -1,4 +1,5 @@
 mod bots;
+mod preferences;
 
 pub use bots::{BotRow, NewBot};
 
@@ -12,7 +13,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -82,6 +83,13 @@ ALTER TABLE conversations ADD COLUMN title TEXT;
 ALTER TABLE conversations ADD COLUMN session_revision INTEGER;
 ALTER TABLE conversations ADD COLUMN read_event_id INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX conversations_by_bot ON conversations(bot_id);
+";
+
+const SCHEMA_V4: &str = "
+CREATE TABLE preferences (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 const UNFINISHED_TURNS: &str = "
@@ -207,6 +215,9 @@ impl Store {
         if version < 3 {
             transaction.execute_batch(SCHEMA_V3)?;
             self.adopt_conversations()?;
+        }
+        if version < 4 {
+            transaction.execute_batch(SCHEMA_V4)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;

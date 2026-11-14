@@ -1,10 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod assets;
 mod bots;
 mod composer;
 mod connection;
+mod layout;
+mod menu;
+mod sidebar;
 mod theme;
 mod transcript;
+mod ui;
 mod workspace;
 
 use std::ffi::OsString;
@@ -12,10 +17,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crowbot_protocol::Endpoint;
-use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, size};
 use gpui_platform::application;
 
 use crate::connection::DaemonLauncher;
+use crate::theme::layout::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH};
 use crate::workspace::Workspace;
 
 const USAGE: &str =
@@ -88,34 +94,40 @@ fn main() -> ExitCode {
         }
     };
 
-    application().run(move |cx: &mut App| {
-        composer::bind_keys(cx);
-        workspace::bind_keys(cx);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
+    application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            if let Err(error) = cx.text_system().add_fonts(assets::fonts()) {
+                eprintln!("cannot load the interface font: {error}");
             }
-        })
-        .detach();
-        let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
-        let opened = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(640.), px(420.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Crow Bot".into()),
+            composer::bind_keys(cx);
+            workspace::bind_keys(cx);
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            let bounds = Bounds::centered(None, size(WINDOW_WIDTH, WINDOW_HEIGHT), cx);
+            let opened = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Crow Bot".into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Workspace::new(connection, events, window, cx)),
-        );
-        if opened.is_err() {
-            cx.quit();
-            return;
-        }
-        cx.activate(true);
-    });
+                },
+                |window, cx| cx.new(|cx| Workspace::new(connection, events, window, cx)),
+            );
+            if opened.is_err() {
+                cx.quit();
+                return;
+            }
+            cx.activate(true);
+        });
     ExitCode::SUCCESS
 }
 

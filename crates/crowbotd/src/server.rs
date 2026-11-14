@@ -41,12 +41,14 @@ async fn connection(daemon: Arc<Daemon>, mut reader: MessageReader, mut writer: 
 
     loop {
         match reader.read::<ClientMessage>().await {
-            Ok(Some(message)) => {
-                if let Err(message) = client.handle(&daemon, message, &sink) {
+            Ok(Some(message)) => match client.handle(&daemon, message, &sink) {
+                Ok(()) => {}
+                Err(Closing::Silent) => break,
+                Err(Closing::Error(message)) => {
                     sink.send(ServerMessage::Error { message }).ok();
                     break;
                 }
-            }
+            },
             Ok(None) => break,
             Err(error) => {
                 sink.send(ServerMessage::Error {
@@ -73,6 +75,13 @@ async fn connection(daemon: Arc<Daemon>, mut reader: MessageReader, mut writer: 
     }
 }
 
+const INCOMPATIBLE_SINCE: u32 = 4;
+
+enum Closing {
+    Error(String),
+    Silent,
+}
+
 struct ClientState {
     id: u64,
     greeted: bool,
@@ -85,12 +94,20 @@ impl ClientState {
         daemon: &Arc<Daemon>,
         message: ClientMessage,
         sink: &Sink,
-    ) -> Result<(), String> {
+    ) -> Result<(), Closing> {
         if let ClientMessage::Hello { protocol_version } = message {
             if protocol_version != PROTOCOL_VERSION {
-                return Err(format!(
+                if protocol_version >= INCOMPATIBLE_SINCE {
+                    sink.send(ServerMessage::Incompatible {
+                        protocol_version: PROTOCOL_VERSION,
+                        daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    })
+                    .ok();
+                    return Err(Closing::Silent);
+                }
+                return Err(Closing::Error(format!(
                     "this daemon speaks protocol version {PROTOCOL_VERSION}, the client speaks {protocol_version}"
-                ));
+                )));
             }
             self.greeted = true;
             sink.send(ServerMessage::Welcome {
@@ -102,7 +119,9 @@ impl ClientState {
             return Ok(());
         }
         if !self.greeted {
-            return Err("the first message must be a hello".to_owned());
+            return Err(Closing::Error(
+                "the first message must be a hello".to_owned(),
+            ));
         }
         let reply = |message: ServerMessage| {
             sink.send(message).ok();
@@ -152,6 +171,11 @@ impl ClientState {
             ClientMessage::MarkBotUnread { bot_id } => {
                 daemon.mark_bot_unread(bot_id).map_err(failed)
             }
+            ClientMessage::GetPreferences => {
+                reply(daemon.preferences());
+                Ok(())
+            }
+            ClientMessage::SetPreferences { patch } => daemon.set_preferences(&patch),
             ClientMessage::OpenConversation { conversation_id } => daemon
                 .conversation(conversation_id)
                 .map(|handle| {

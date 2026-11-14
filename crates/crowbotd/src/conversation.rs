@@ -129,6 +129,7 @@ struct Session {
     generation: u64,
     /// The revision of the bot's session settings this session was started with.
     revision: i64,
+    model: Option<String>,
     commands: UnboundedSender<SessionCommand>,
     task: AbortHandle,
 }
@@ -380,6 +381,11 @@ impl Actor {
                 .map(|approval| approval.id.clone())
                 .collect(),
             queue,
+            turn_model: self
+                .session
+                .as_ref()
+                .filter(|_| self.turn_active)
+                .map(|session| session.model.clone()),
         })
     }
 
@@ -416,8 +422,16 @@ impl Actor {
     }
 
     fn deliver(&mut self, text: String) {
-        if let Err(message) = self.try_deliver(text) {
-            self.end_turn(Event::TurnFailed { message });
+        match self.try_deliver(text) {
+            Ok(()) => {
+                if let Some(model) = self.session.as_ref().map(|session| session.model.clone()) {
+                    self.broadcast(ServerMessage::TurnModel {
+                        conversation_id: self.id,
+                        model,
+                    });
+                }
+            }
+            Err(message) => self.end_turn(Event::TurnFailed { message }),
         }
     }
 
@@ -470,6 +484,7 @@ impl Actor {
         bot: BotRow,
     ) -> Result<Session, String> {
         let revision = bot.session_revision;
+        let model = bot.bot.model.clone();
         let config = SessionConfig {
             agent: self.daemon.agent_profile(&bot.bot.provider)?,
             cwd: PathBuf::from(bot.bot.workspace),
@@ -504,6 +519,7 @@ impl Actor {
         Ok(Session {
             generation,
             revision,
+            model,
             commands,
             task: task.abort_handle(),
         })

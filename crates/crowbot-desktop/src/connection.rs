@@ -32,6 +32,10 @@ pub enum ConnectionEvent {
     Disconnected(String),
     /// The client cannot attach and waits for the user to retry.
     Failed(String),
+    Incompatible {
+        daemon_protocol: u32,
+        daemon_version: Option<String>,
+    },
     Message(Box<ServerMessage>),
 }
 
@@ -124,6 +128,16 @@ impl Connection {
     pub fn retry(&self) {
         self.retry.notify_one();
     }
+
+    #[cfg(test)]
+    pub fn for_test() -> (Self, UnboundedReceiver<ClientMessage>) {
+        let (outgoing, sent) = mpsc::unbounded_channel();
+        let connection = Self {
+            outgoing,
+            retry: Arc::new(Notify::new()),
+        };
+        (connection, sent)
+    }
 }
 
 pub fn start(
@@ -175,11 +189,24 @@ async fn run(
                 match serve(reader, writer, &mut outgoing, &attachment.events).await {
                     Ended::Dropped(reason) => (ConnectionEvent::Disconnected(reason), false),
                     Ended::Refused(reason) => (ConnectionEvent::Failed(reason), true),
+                    Ended::Incompatible {
+                        daemon_protocol,
+                        daemon_version,
+                    } => (
+                        ConnectionEvent::Incompatible {
+                            daemon_protocol,
+                            daemon_version,
+                        },
+                        true,
+                    ),
                 }
             }
             Err(reason) => (ConnectionEvent::Failed(reason), false),
         };
-        let failed = matches!(event, ConnectionEvent::Failed(_));
+        let failed = matches!(
+            event,
+            ConnectionEvent::Failed(_) | ConnectionEvent::Incompatible { .. }
+        );
         if attachment.events.send(event).is_err() || outgoing.is_closed() {
             return;
         }
@@ -314,6 +341,21 @@ enum Ended {
     Dropped(String),
     /// The daemon answered and refused this client. Reconnecting gives the same answer.
     Refused(String),
+    Incompatible {
+        daemon_protocol: u32,
+        daemon_version: Option<String>,
+    },
+}
+
+const LEGACY_VERSION_REFUSAL: &str = "this daemon speaks protocol version ";
+
+fn legacy_daemon_protocol(refusal: &str) -> Option<u32> {
+    let digits: String = refusal
+        .strip_prefix(LEGACY_VERSION_REFUSAL)?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 async fn serve(
@@ -331,8 +373,23 @@ async fn serve(
     }
     match reader.read::<ServerMessage>().await {
         Ok(Some(ServerMessage::Welcome { .. })) => {}
+        Ok(Some(ServerMessage::Incompatible {
+            protocol_version,
+            daemon_version,
+        })) => {
+            return Ended::Incompatible {
+                daemon_protocol: protocol_version,
+                daemon_version: Some(daemon_version),
+            };
+        }
         Ok(Some(ServerMessage::Error { message })) => {
-            return Ended::Refused(format!("The daemon refused the connection: {message}"));
+            return match legacy_daemon_protocol(&message) {
+                Some(daemon_protocol) => Ended::Incompatible {
+                    daemon_protocol,
+                    daemon_version: None,
+                },
+                None => Ended::Refused(format!("The daemon refused the connection: {message}")),
+            };
         }
         Ok(Some(_)) => return dropped("The daemon did not answer the greeting."),
         Ok(None) => return dropped("The daemon closed the connection."),
@@ -602,6 +659,15 @@ mod tests {
 
     /// A daemon that refuses every greeting, and counts the clients that greeted it.
     fn refusing_daemon(endpoint: Endpoint) -> Arc<AtomicU32> {
+        answering_daemon(
+            endpoint,
+            ServerMessage::Error {
+                message: "the first message must be a hello".to_owned(),
+            },
+        )
+    }
+
+    fn answering_daemon(endpoint: Endpoint, answer: ServerMessage) -> Arc<AtomicU32> {
         let greeted = Arc::new(AtomicU32::new(0));
         let count = greeted.clone();
         let (ready, bound) = std::sync::mpsc::channel();
@@ -616,10 +682,7 @@ mod tests {
                 while let Ok((mut reader, mut writer)) = listener.accept().await {
                     if matches!(reader.read::<ClientMessage>().await, Ok(Some(_))) {
                         count.fetch_add(1, Ordering::SeqCst);
-                        let refusal = ServerMessage::Error {
-                            message: "wrong protocol version".to_owned(),
-                        };
-                        writer.write(&refusal).await.ok();
+                        writer.write(&answer).await.ok();
                     }
                 }
             });
@@ -635,7 +698,7 @@ mod tests {
         let (connection, mut events) = scene.client_with(None);
         let reason = until_failed(&mut events);
         assert!(reason.contains("refused the connection"), "{reason}");
-        assert!(reason.contains("wrong protocol version"), "{reason}");
+        assert!(reason.contains("must be a hello"), "{reason}");
 
         // No silent loop: the daemon still listens, and the client leaves it alone.
         std::thread::sleep(IDLE_POLL * 2 + Duration::from_millis(500));
@@ -646,6 +709,105 @@ mod tests {
         let reason = until_failed(&mut events);
         assert!(reason.contains("refused the connection"), "{reason}");
         assert_eq!(greeted.load(Ordering::SeqCst), 2);
+    }
+
+    fn until_incompatible(
+        events: &mut UnboundedReceiver<ConnectionEvent>,
+    ) -> (u32, Option<String>) {
+        let started = Instant::now();
+        loop {
+            assert!(started.elapsed() < PATIENCE, "the client never gave up");
+            match events.try_recv() {
+                Ok(ConnectionEvent::Incompatible {
+                    daemon_protocol,
+                    daemon_version,
+                }) => return (daemon_protocol, daemon_version),
+                Ok(ConnectionEvent::Connected) => panic!("the client connected"),
+                Ok(ConnectionEvent::Failed(reason)) => panic!("the client failed: {reason}"),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    }
+
+    #[test]
+    fn a_daemon_of_another_protocol_version_is_reported_with_its_version_and_not_retried() {
+        let scene = Scene::new();
+        let greeted = answering_daemon(
+            scene.endpoint.clone(),
+            ServerMessage::Incompatible {
+                protocol_version: PROTOCOL_VERSION + 1,
+                daemon_version: "9.9.9".to_owned(),
+            },
+        );
+        let (connection, mut events) = scene.client_with(None);
+        assert_eq!(
+            until_incompatible(&mut events),
+            (PROTOCOL_VERSION + 1, Some("9.9.9".to_owned()))
+        );
+
+        std::thread::sleep(IDLE_POLL * 2 + Duration::from_millis(500));
+        assert!(events.try_recv().is_err());
+        assert_eq!(greeted.load(Ordering::SeqCst), 1);
+
+        connection.retry();
+        assert_eq!(until_incompatible(&mut events).0, PROTOCOL_VERSION + 1);
+        assert_eq!(greeted.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn an_older_daemon_that_refuses_in_words_is_read_as_its_protocol_version() {
+        let scene = Scene::new();
+        let _greeted = answering_daemon(
+            scene.endpoint.clone(),
+            ServerMessage::Error {
+                message: "this daemon speaks protocol version 3, the client speaks 4".to_owned(),
+            },
+        );
+        let (_connection, mut events) = scene.client_with(None);
+        assert_eq!(until_incompatible(&mut events), (3, None));
+
+        assert_eq!(
+            legacy_daemon_protocol("this daemon speaks protocol version 12"),
+            Some(12)
+        );
+        assert_eq!(
+            legacy_daemon_protocol("the first message must be a hello"),
+            None
+        );
+        assert_eq!(
+            legacy_daemon_protocol("this daemon speaks protocol version x"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_real_daemon_tells_a_client_of_a_later_version_which_version_it_speaks() {
+        daemon_binary();
+        let mut scene = Scene::new();
+        let (_first, mut first_events) = scene.client("first");
+        until_connected(&mut first_events);
+
+        let endpoint = scene.endpoint.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let answer = runtime.block_on(async move {
+            let (mut reader, mut writer) = transport::connect(&endpoint).await.unwrap();
+            let hello = ClientMessage::Hello {
+                protocol_version: PROTOCOL_VERSION + 1,
+            };
+            writer.write(&hello).await.unwrap();
+            reader.read::<ServerMessage>().await.unwrap()
+        });
+        match answer {
+            Some(ServerMessage::Incompatible {
+                protocol_version, ..
+            }) => assert_eq!(protocol_version, PROTOCOL_VERSION),
+            other => panic!("expected the versions, got {other:?}"),
+        }
+        assert_eq!(scene.listening(&["first"]), 1);
     }
 
     #[test]

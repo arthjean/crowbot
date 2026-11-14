@@ -190,6 +190,10 @@ impl Daemon {
         Client::connect(&self.endpoint).await
     }
 
+    pub async fn raw_connection(&self) -> (MessageReader, MessageWriter) {
+        connect(&self.endpoint).await
+    }
+
     /// The counter that the scripted agent rewrites while its process is alive.
     pub fn heartbeat(&self) -> Option<String> {
         std::fs::read_to_string(self.dir.join("heartbeat")).ok()

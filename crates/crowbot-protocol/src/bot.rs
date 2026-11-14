@@ -90,7 +90,7 @@ pub struct BotPatch {
 }
 
 /// Reads a field that is present, so that `null` differs from a field left out.
-fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     T: Deserialize<'de>,
     D: Deserializer<'de>,
@@ -141,6 +141,8 @@ pub struct BotSummary {
     /// The turns that ended since the last read mark, over all conversations.
     pub unread: u32,
     pub last_activity_ms: i64,
+    #[serde(default)]
+    pub preview: String,
 }
 
 #[cfg(test)]

@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::bot::{BotDraft, BotPatch, BotSummary};
+use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event};
+use crate::preferences::{Preferences, PreferencesPatch};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -85,6 +86,10 @@ pub enum ClientMessage {
     MarkBotUnread {
         bot_id: i64,
     },
+    GetPreferences,
+    SetPreferences {
+        patch: PreferencesPatch,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +135,15 @@ pub enum ServerMessage {
         field: String,
         message: String,
     },
+    Preferences(Preferences),
+    Incompatible {
+        protocol_version: u32,
+        daemon_version: String,
+    },
+    TurnModel {
+        conversation_id: i64,
+        model: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +163,12 @@ pub struct ConversationSnapshot {
     pub pending_approvals: Vec<String>,
     #[serde(default)]
     pub queue: QueueState,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub turn_model: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,4 +181,47 @@ pub struct QueueState {
 pub struct QueuedMessage {
     pub id: i64,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(turn_model: Option<Option<String>>) -> ConversationSnapshot {
+        ConversationSnapshot {
+            conversation: ConversationSummary {
+                id: 1,
+                bot_id: 1,
+                title: None,
+                created_at_ms: 0,
+                last_activity_ms: 0,
+            },
+            events: Vec::new(),
+            turn_active: turn_model.is_some(),
+            pending_approvals: Vec::new(),
+            queue: QueueState::default(),
+            turn_model,
+        }
+    }
+
+    #[test]
+    fn a_snapshot_tells_the_default_model_of_a_turn_from_no_turn() {
+        for turn_model in [None, Some(None), Some(Some("opus".to_owned()))] {
+            let sent = snapshot(turn_model);
+            let wire = serde_json::to_string(&sent).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ConversationSnapshot>(&wire).unwrap(),
+                sent
+            );
+        }
+    }
+
+    #[test]
+    fn a_snapshot_from_an_older_daemon_has_no_turn_model() {
+        let wire = r#"{"conversation":{"id":1,"bot_id":1,"title":null,"created_at_ms":0,
+            "last_activity_ms":0},"events":[],"turn_active":true,"pending_approvals":[]}"#;
+        let read: ConversationSnapshot = serde_json::from_str(wire).unwrap();
+        assert_eq!(read.turn_model, None);
+        assert!(read.turn_active);
+    }
 }

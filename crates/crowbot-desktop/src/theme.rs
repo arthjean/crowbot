@@ -1,116 +1,436 @@
-use gpui::{Rgba, WindowAppearance};
+use crowbot_protocol::Appearance;
+use gpui::{
+    App, BoxShadow, Font, FontFallbacks, Global, Pixels, Rgba, WindowAppearance, point, px, rgb,
+};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
-    pub background: Rgba,
+    pub frame: Rgba,
+    pub canvas: Rgba,
     pub sidebar: Rgba,
-    pub raised: Rgba,
+    pub surface: Rgba,
+    pub surface_raised: Rgba,
+    pub control: Rgba,
+    pub control_hover: Rgba,
+    pub control_active: Rgba,
+    pub sheet: Rgba,
+    pub overlay: Rgba,
+    pub dialog_ring: Rgba,
+    pub border: Rgba,
+    pub border_strong: Rgba,
+    pub border_focus: Rgba,
     pub hover: Rgba,
-    pub selected: Rgba,
-    pub separator: Rgba,
-    pub control_border: Rgba,
     pub text: Rgba,
     pub text_secondary: Rgba,
-    pub accent_solid: Rgba,
-    pub accent_solid_hover: Rgba,
+    pub text_muted: Rgba,
+    pub text_dim: Rgba,
+    pub text_readable: Rgba,
+    pub text_placeholder: Rgba,
+    pub inverse_surface: Rgba,
+    pub inverse_text: Rgba,
+    pub accent: Rgba,
+    pub accent_hover: Rgba,
+    pub accent_text: Rgba,
+    pub accent_soft: Rgba,
+    pub accent_strong: Rgba,
     pub on_accent: Rgba,
-    pub focus_ring: Rgba,
-    pub text_selection: Rgba,
-    pub attention_surface: Rgba,
-    pub attention_border: Rgba,
-    pub attention_text: Rgba,
-    pub danger_text: Rgba,
+    pub success: Rgba,
     pub success_text: Rgba,
+    pub warning: Rgba,
+    pub warning_text: Rgba,
+    pub warning_soft: Rgba,
+    pub danger: Rgba,
+    pub danger_hover: Rgba,
+    pub danger_text: Rgba,
+    pub danger_soft: Rgba,
+    pub danger_soft_hover: Rgba,
+    pub unread_surface: Rgba,
+    pub unread_text: Rgba,
+    pub on_status: Rgba,
+    pub shadow_menu: Rgba,
+    pub window_close: Rgba,
 }
+
+impl Global for Theme {}
 
 impl Theme {
-    pub fn for_appearance(appearance: WindowAppearance) -> Self {
-        match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
+    pub fn resolve(preference: Appearance, system: WindowAppearance) -> Self {
+        match preference {
+            Appearance::Light => Self::light(),
+            Appearance::Dark => Self::dark(),
+            Appearance::System => match system {
+                WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
+            },
         }
     }
 
-    fn light() -> Self {
+    pub fn of(cx: &App) -> Self {
+        cx.try_global::<Self>()
+            .copied()
+            .unwrap_or_else(|| Self::resolve(Appearance::System, cx.window_appearance()))
+    }
+
+    pub fn dark() -> Self {
+        let white = |alpha| alpha_of(rgb(0xff_ff_ff), alpha);
+        let black = |alpha| alpha_of(rgb(0x00_00_00), alpha);
+        let text_muted = rgb(0x97_97_97);
         Self {
-            background: oklch(0.985, 0.002, 250.),
-            sidebar: oklch(0.962, 0.004, 250.),
-            raised: oklch(1., 0., 0.),
-            hover: oklch(0.935, 0.005, 250.),
-            selected: oklch(0.905, 0.008, 250.),
-            separator: oklch(0.90, 0.005, 250.),
-            control_border: oklch(0.62, 0.012, 250.),
-            text: oklch(0.21, 0.012, 250.),
-            text_secondary: oklch(0.46, 0.012, 250.),
-            accent_solid: oklch(0.50, 0.16, 255.),
-            accent_solid_hover: oklch(0.44, 0.16, 255.),
-            on_accent: oklch(1., 0., 0.),
-            focus_ring: oklch(0.55, 0.18, 255.),
-            text_selection: with_alpha(oklch(0.55, 0.18, 255.), 0.25),
-            attention_surface: oklch(0.965, 0.035, 85.),
-            attention_border: oklch(0.58, 0.13, 70.),
-            attention_text: oklch(0.40, 0.09, 70.),
-            danger_text: oklch(0.50, 0.18, 27.),
-            success_text: oklch(0.46, 0.12, 150.),
+            frame: rgb(0x0d_0d_0d),
+            canvas: rgb(0x1a_1a_1a),
+            sidebar: rgb(0x1a_1a_1a),
+            surface: rgb(0x21_21_21),
+            surface_raised: rgb(0x24_24_24),
+            control: rgb(0x21_21_21),
+            control_hover: rgb(0x24_24_24),
+            control_active: rgb(0x2a_2a_2a),
+            sheet: rgb(0x14_14_14),
+            overlay: black(0.1),
+            dialog_ring: white(0.1),
+            border: white(0.035),
+            border_strong: white(0.045),
+            border_focus: text_muted,
+            hover: white(0.06),
+            text: rgb(0xff_ff_ff),
+            text_secondary: rgb(0xdc_dc_dc),
+            text_muted,
+            text_dim: rgb(0x6a_6a_6a),
+            text_readable: white(0.52),
+            text_placeholder: rgb(0xbf_bf_bf),
+            inverse_surface: rgb(0xf0_f0_f0),
+            inverse_text: rgb(0x14_14_14),
+            accent: rgb(0x00_7c_f7),
+            accent_hover: rgb(0x1f_8f_ff),
+            accent_text: rgb(0x42_a0_ff),
+            accent_soft: alpha_of(rgb(0x00_7c_f7), 0.16),
+            accent_strong: alpha_of(rgb(0x00_7c_f7), 0.34),
+            on_accent: rgb(0xff_ff_ff),
+            success: rgb(0x31_cf_76),
+            success_text: rgb(0x31_cf_76),
+            warning: rgb(0xff_94_12),
+            warning_text: rgb(0xff_94_12),
+            warning_soft: alpha_of(rgb(0xff_94_12), 0.12),
+            danger: rgb(0xfd_2f_3b),
+            danger_hover: rgb(0xfd_5d_67),
+            danger_text: rgb(0xff_60_69),
+            danger_soft: alpha_of(rgb(0xfd_2f_3b), 0.16),
+            danger_soft_hover: alpha_of(rgb(0xfd_2f_3b), 0.28),
+            unread_surface: rgb(0x74_b9_ff),
+            unread_text: rgb(0x07_13_1f),
+            on_status: rgb(0x07_13_0c),
+            shadow_menu: black(0.45),
+            window_close: rgb(0xe8_11_20),
         }
     }
 
-    fn dark() -> Self {
+    pub fn light() -> Self {
+        let ink = |alpha| alpha_of(rgb(0x14_14_14), alpha);
+        let text_muted = rgb(0x6b_6b_70);
         Self {
-            background: oklch(0.175, 0.004, 250.),
-            sidebar: oklch(0.148, 0.004, 250.),
-            raised: oklch(0.215, 0.005, 250.),
-            hover: oklch(0.245, 0.006, 250.),
-            selected: oklch(0.29, 0.010, 250.),
-            separator: oklch(0.28, 0.006, 250.),
-            control_border: oklch(0.56, 0.012, 250.),
-            text: oklch(0.93, 0.004, 250.),
-            text_secondary: oklch(0.72, 0.008, 250.),
-            accent_solid: oklch(0.52, 0.15, 255.),
-            accent_solid_hover: oklch(0.46, 0.15, 255.),
-            on_accent: oklch(1., 0., 0.),
-            focus_ring: oklch(0.72, 0.13, 255.),
-            text_selection: with_alpha(oklch(0.72, 0.13, 255.), 0.30),
-            attention_surface: oklch(0.26, 0.04, 80.),
-            attention_border: oklch(0.66, 0.11, 80.),
-            attention_text: oklch(0.87, 0.09, 85.),
-            danger_text: oklch(0.74, 0.14, 25.),
-            success_text: oklch(0.76, 0.12, 150.),
+            frame: rgb(0xe8_e8_eb),
+            canvas: rgb(0xf5_f5_f6),
+            sidebar: rgb(0xf5_f5_f6),
+            surface: rgb(0xff_ff_ff),
+            surface_raised: rgb(0xfc_fc_fc),
+            control: rgb(0xff_ff_ff),
+            control_hover: rgb(0xf0_f0_f2),
+            control_active: rgb(0xe8_e8_eb),
+            sheet: rgb(0xff_ff_ff),
+            overlay: ink(0.12),
+            dialog_ring: ink(0.1),
+            border: ink(0.07),
+            border_strong: ink(0.1),
+            border_focus: text_muted,
+            hover: ink(0.05),
+            text: rgb(0x14_14_14),
+            text_secondary: rgb(0x3a_3a_3c),
+            text_muted,
+            text_dim: rgb(0x8e_8e_93),
+            text_readable: ink(0.6),
+            text_placeholder: rgb(0x5c_5c_61),
+            inverse_surface: rgb(0x1c_1c_1e),
+            inverse_text: rgb(0xff_ff_ff),
+            accent: rgb(0x00_7c_f7),
+            accent_hover: rgb(0x00_6a_d4),
+            accent_text: rgb(0x00_64_c8),
+            accent_soft: alpha_of(rgb(0x00_7c_f7), 0.12),
+            accent_strong: alpha_of(rgb(0x00_7c_f7), 0.26),
+            on_accent: rgb(0xff_ff_ff),
+            success: rgb(0x1f_a8_5a),
+            success_text: rgb(0x18_7a_41),
+            warning: rgb(0xf0_8a_00),
+            warning_text: rgb(0x9c_52_00),
+            warning_soft: alpha_of(rgb(0xf0_8a_00), 0.14),
+            danger: rgb(0xe8_22_2d),
+            danger_hover: rgb(0xf0_4a_53),
+            danger_text: rgb(0xc0_14_1d),
+            danger_soft: alpha_of(rgb(0xe8_22_2d), 0.12),
+            danger_soft_hover: alpha_of(rgb(0xe8_22_2d), 0.2),
+            unread_surface: rgb(0x74_b9_ff),
+            unread_text: rgb(0x07_13_1f),
+            on_status: rgb(0x07_13_0c),
+            shadow_menu: alpha_of(rgb(0x00_00_00), 0.),
+            window_close: rgb(0xe8_11_20),
         }
+    }
+
+    pub fn menu_shadow(&self) -> Vec<BoxShadow> {
+        vec![
+            BoxShadow {
+                color: self.dialog_ring.into(),
+                offset: point(px(0.), px(0.)),
+                blur_radius: px(0.),
+                spread_radius: size::HAIRLINE,
+                inset: false,
+            },
+            BoxShadow {
+                color: self.shadow_menu.into(),
+                offset: point(px(0.), space::S3),
+                blur_radius: space::S8,
+                spread_radius: px(0.),
+                inset: false,
+            },
+        ]
     }
 }
 
-fn with_alpha(color: Rgba, alpha: f32) -> Rgba {
+fn alpha_of(color: Rgba, alpha: f32) -> Rgba {
     Rgba { a: alpha, ..color }
 }
 
-fn oklch(lightness: f32, chroma: f32, hue_degrees: f32) -> Rgba {
-    let hue = hue_degrees.to_radians();
-    let a = chroma * hue.cos();
-    let b = chroma * hue.sin();
-    let l = (lightness + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
-    let m = (lightness - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
-    let s = (lightness - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
-    Rgba {
-        r: encode(4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_93 * s),
-        g: encode(-1.268_438 * l + 2.609_757_4 * m - 0.341_319_4 * s),
-        b: encode(-0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s),
-        a: 1.,
+pub mod font {
+    use super::{Font, FontFallbacks};
+
+    pub const SANS: &str = "Inter";
+    pub const SANS_FALLBACKS: [&str; 3] = [".SystemUIFont", "Segoe UI", "Noto Sans Arabic"];
+    #[cfg(target_os = "windows")]
+    pub const MONO: &str = "Consolas";
+    #[cfg(target_os = "macos")]
+    pub const MONO: &str = "Menlo";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub const MONO: &str = "monospace";
+    pub const MONO_FALLBACKS: [&str; 4] = ["SF Mono", "Menlo", "Consolas", "monospace"];
+    pub const WINDOW_GLYPHS: &str = "Segoe Fluent Icons";
+    pub const WINDOW_GLYPHS_FALLBACK: &str = "Segoe MDL2 Assets";
+
+    fn with_fallbacks(family: &'static str, fallbacks: &[&str]) -> Font {
+        let mut font = gpui::font(family);
+        font.fallbacks = Some(FontFallbacks::from_fonts(
+            fallbacks.iter().map(|name| (*name).to_owned()).collect(),
+        ));
+        font
+    }
+
+    pub fn sans() -> Font {
+        with_fallbacks(SANS, &SANS_FALLBACKS)
+    }
+
+    pub fn mono() -> Font {
+        with_fallbacks(MONO, &MONO_FALLBACKS)
+    }
+
+    pub fn window_glyphs() -> Font {
+        with_fallbacks(WINDOW_GLYPHS, &[WINDOW_GLYPHS_FALLBACK])
     }
 }
 
-fn encode(linear: f32) -> f32 {
-    let linear = linear.clamp(0., 1.);
-    if linear <= 0.003_130_8 {
-        12.92 * linear
-    } else {
-        1.055 * linear.powf(1. / 2.4) - 0.055
+pub mod text {
+    use super::{Pixels, px};
+
+    #[derive(Clone, Copy)]
+    pub struct Step {
+        pub size: Pixels,
+        pub leading: Pixels,
     }
+
+    pub const SM: Step = Step {
+        size: px(12.),
+        leading: px(16.),
+    };
+    pub const MD: Step = Step {
+        size: px(13.),
+        leading: px(18.),
+    };
+    pub const LG: Step = Step {
+        size: px(14.),
+        leading: px(20.),
+    };
+    pub const XL: Step = Step {
+        size: px(16.),
+        leading: px(22.),
+    };
+    pub const XXL: Step = Step {
+        size: px(18.),
+        leading: px(24.),
+    };
+    pub const XXXL: Step = Step {
+        size: px(24.),
+        leading: px(30.),
+    };
+    pub const WINDOW_GLYPH: Pixels = px(10.);
+}
+
+pub mod space {
+    use super::{Pixels, px};
+
+    pub const S0_5: Pixels = px(2.);
+    pub const S1: Pixels = px(4.);
+    pub const S1_5: Pixels = px(6.);
+    pub const S2: Pixels = px(8.);
+    pub const S3: Pixels = px(12.);
+    pub const S4: Pixels = px(16.);
+    pub const S6: Pixels = px(24.);
+    pub const S8: Pixels = px(32.);
+}
+
+pub mod radius {
+    use super::{Pixels, px};
+
+    pub const SM: Pixels = px(6.);
+    pub const MD: Pixels = px(8.);
+    pub const LG: Pixels = px(12.);
+    pub const CARD: Pixels = px(14.);
+    pub const XL: Pixels = px(20.);
+    pub const BUBBLE: Pixels = px(22.);
+}
+
+pub mod control {
+    use super::{Pixels, px};
+
+    pub const XS: Pixels = px(24.);
+    pub const SM: Pixels = px(28.);
+    pub const MD: Pixels = px(32.);
+    pub const LG: Pixels = px(36.);
+    pub const XL: Pixels = px(40.);
+}
+
+pub mod icon {
+    use super::{Pixels, px};
+
+    pub const XS: Pixels = px(12.);
+    pub const SM: Pixels = px(14.);
+    pub const MD: Pixels = px(16.);
+    pub const LG: Pixels = px(20.);
+}
+
+pub mod duration {
+    use std::time::Duration;
+
+    pub const SPINNER: Duration = Duration::from_millis(900);
+    pub const WORKING: Duration = Duration::from_millis(960);
+    pub const WORKING_RISE: f32 = 0.4;
+    pub const WORKING_STAGGER: f32 = 0.135;
+}
+
+pub mod opacity {
+    pub const DISABLED: f32 = 0.45;
+}
+
+pub mod size {
+    use super::{Pixels, px};
+
+    pub const HAIRLINE: Pixels = px(1.);
+    pub const CURSOR: Pixels = px(1.5);
+    pub const SELECTION_OVERHANG: Pixels = px(4.);
+    pub const AVATAR_ROW: Pixels = px(46.);
+    pub const AVATAR_TILE: Pixels = px(56.);
+    pub const AVATAR_TILE_COMPACT: Pixels = px(48.);
+    pub const AVATAR_HEADER: Pixels = px(18.);
+    pub const AVATAR_HEADER_GLYPH: Pixels = px(10.);
+    pub const AVATAR_DIALOG: Pixels = px(44.);
+    pub const AVATAR_RING: Pixels = px(2.);
+    pub const BADGE: Pixels = px(18.);
+    pub const BADGE_WORKING_WIDTH: Pixels = px(30.);
+    pub const BADGE_DOT: Pixels = px(5.);
+    pub const BADGE_HOP: Pixels = px(3.);
+    pub const BADGE_OFFSET_X: Pixels = px(5.);
+    pub const BADGE_OFFSET_Y: Pixels = px(3.);
+    pub const BADGE_ICON: Pixels = px(10.);
+    pub const CHIP_ICON: Pixels = px(11.);
+    pub const CHIP_HEIGHT: Pixels = px(18.);
+    pub const CHIP_PADDING_START: Pixels = px(5.);
+    pub const CHIP_PADDING_END: Pixels = px(7.);
+    pub const CHIP_GAP: Pixels = px(3.);
+    pub const COUNT_BADGE: Pixels = px(16.);
+    pub const BADGE_PILL: Pixels = px(22.);
+    pub const DIVIDER_HEIGHT: Pixels = px(20.);
+}
+
+pub mod layout {
+    use super::{Pixels, px};
+
+    pub const TOP_ROW: Pixels = px(38.);
+    pub const SIDEBAR_DEFAULT: f32 = 280.;
+    pub const SIDEBAR_MIN: f32 = 128.;
+    pub const SIDEBAR_MAX: f32 = 400.;
+    pub const SIDEBAR_COMPACT: f32 = 88.;
+    pub const SIDEBAR_COLLAPSE_BELOW: f32 = 110.;
+    pub const SIDEBAR_EXPAND_ABOVE: f32 = 118.;
+    pub const SIDEBAR_KEY_STEP: f32 = 12.;
+    pub const CONVERSATION_MIN: f32 = 424.;
+    pub const RESIZER_HIT: Pixels = px(16.);
+    pub const CARD_INSET: Pixels = px(4.);
+    pub const WINDOW_WIDTH: Pixels = px(1080.);
+    pub const WINDOW_HEIGHT: Pixels = px(760.);
+    pub const WINDOW_MIN_WIDTH: Pixels = px(640.);
+    pub const WINDOW_MIN_HEIGHT: Pixels = px(420.);
+    pub const CAPTION_BUTTON: Pixels = px(46.);
+    pub const MAC_TRAFFIC_LIGHTS: Pixels = px(78.);
+    pub const TOPBAR_PADDING_START: Pixels = px(10.);
+    pub const TOPBAR_PADDING_END: Pixels = px(3.);
+    pub const SEARCH_PADDING_TOP: Pixels = px(11.);
+    pub const SEARCH_FIELD_PADDING: Pixels = px(9.);
+    pub const ROW_HEIGHT: Pixels = px(62.);
+    pub const TILE_WIDTH: Pixels = px(72.);
+    pub const TILE_HEIGHT: Pixels = px(102.);
+    pub const TILE_COMPACT: Pixels = px(60.);
+    pub const PINNED_MAX_WIDTH: Pixels = px(236.);
+    pub const SECTION_HEADER_PADDING: Pixels = px(7.);
+    pub const HEADER_PADDING_START: Pixels = px(12.);
+    pub const HEADER_TITLE_MIN: Pixels = px(52.);
+    pub const HEADER_NAME_MAX: Pixels = px(160.);
+    pub const HEADER_MODEL_MAX: Pixels = px(200.);
+    pub const HEADER_TITLE_SHRINK: f32 = 1000.;
+    pub const HEADER_CONTROLS_SHRINK: f32 = 10.;
+    pub const BADGE_HEIGHT: Pixels = px(22.);
+    pub const DIVIDER_MARGIN: Pixels = px(9.);
+    pub const SIDE_PANEL: Pixels = px(360.);
+    pub const SIDE_PANEL_HEADER: Pixels = px(39.);
+    pub const MENU_MIN_WIDTH: Pixels = px(192.);
+    pub const MENU_MAX_WIDTH: Pixels = px(288.);
+    pub const MENU_ITEM_PADDING_X: Pixels = px(10.);
+    pub const DIALOG_WIDTH: Pixels = px(460.);
+    pub const NOTICE_WIDTH: Pixels = px(520.);
+    pub const TOAST_WIDTH: Pixels = px(360.);
+    pub const TOOLTIP_PADDING_Y: Pixels = px(6.);
+    pub const TOOLTIP_MAX_WIDTH: Pixels = px(260.);
+    pub const COLUMN_WIDTH: Pixels = px(760.);
+    pub const BUBBLE_MAX_WIDTH: Pixels = px(608.);
+    pub const BUBBLE_PADDING_X: Pixels = px(14.);
+    pub const BUBBLE_PADDING_Y: Pixels = px(9.);
+    pub const LIST_OVERDRAW: Pixels = px(600.);
+    pub const COMPOSER_PADDING_Y: Pixels = px(5.);
+    pub const COMPOSER_BOTTOM: Pixels = px(20.);
+    pub const THOUGHT_INDENT: Pixels = px(10.);
+    pub const STATUS_ROW: Pixels = px(20.);
+    pub const COMPOSER_MAX_ROWS: f32 = 8.;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn over(top: Rgba, under: Rgba) -> Rgba {
+        let mix = |top_channel: f32, under_channel: f32| {
+            top_channel * top.a + under_channel * (1. - top.a)
+        };
+        Rgba {
+            r: mix(top.r, under.r),
+            g: mix(top.g, under.g),
+            b: mix(top.b, under.b),
+            a: 1.,
+        }
+    }
 
     fn luminance(color: Rgba) -> f32 {
         let linear = |channel: f32| {
@@ -123,59 +443,310 @@ mod tests {
         0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
     }
 
-    fn contrast(first: Rgba, second: Rgba) -> f32 {
-        let (first, second) = (luminance(first), luminance(second));
+    fn contrast(text: Rgba, surface: Rgba) -> f32 {
+        let (first, second) = (luminance(over(text, surface)), luminance(surface));
         (first.max(second) + 0.05) / (first.min(second) + 0.05)
     }
 
-    #[test]
-    fn white_and_black_convert_exactly() {
-        let white = oklch(1., 0., 0.);
-        let black = oklch(0., 0., 0.);
-        assert!((white.r - 1.).abs() < 0.001 && (white.g - 1.).abs() < 0.001);
-        assert!(black.r < 0.001 && black.b < 0.001);
+    fn hex(color: Rgba) -> String {
+        let channel = |value: f32| (value * 255.).round() as u8;
+        let solid = format!(
+            "#{:02x}{:02x}{:02x}",
+            channel(color.r),
+            channel(color.g),
+            channel(color.b)
+        );
+        if color.a >= 1. {
+            solid
+        } else {
+            format!("{solid}@{:.3}", color.a)
+        }
+    }
+
+    fn openbot_tokens(theme: &Theme) -> Vec<(&'static str, Rgba)> {
+        vec![
+            ("--openbot-bg-frame", theme.frame),
+            ("--openbot-bg-canvas", theme.canvas),
+            ("--openbot-bg-sidebar", theme.sidebar),
+            ("--openbot-bg-surface", theme.surface),
+            ("--openbot-bg-surface-raised", theme.surface_raised),
+            ("--openbot-bg-control", theme.control),
+            ("--openbot-bg-control-hover", theme.control_hover),
+            ("--openbot-bg-control-active", theme.control_active),
+            ("--openbot-bg-sheet", theme.sheet),
+            ("--openbot-dialog-overlay", theme.overlay),
+            ("--openbot-dialog-ring", theme.dialog_ring),
+            ("--openbot-border", theme.border),
+            ("--openbot-border-strong", theme.border_strong),
+            ("--openbot-hover", theme.hover),
+            ("--openbot-text-primary", theme.text),
+            ("--openbot-text-secondary", theme.text_secondary),
+            ("--openbot-text-muted", theme.text_muted),
+            ("--openbot-text-dim", theme.text_dim),
+            ("--openbot-text-readable", theme.text_readable),
+            ("--openbot-text-placeholder", theme.text_placeholder),
+            ("--openbot-surface-light", theme.inverse_surface),
+            ("--openbot-text-on-light", theme.inverse_text),
+            ("--openbot-accent", theme.accent),
+            ("--openbot-accent-hover", theme.accent_hover),
+            ("--openbot-accent-text", theme.accent_text),
+            ("--openbot-accent-soft", theme.accent_soft),
+            ("--openbot-accent-strong", theme.accent_strong),
+            ("--openbot-text-on-accent", theme.on_accent),
+            ("--openbot-success", theme.success),
+            ("--openbot-success-text", theme.success_text),
+            ("--openbot-warning", theme.warning),
+            ("--openbot-warning-text", theme.warning_text),
+            ("--openbot-warning-soft", theme.warning_soft),
+            ("--openbot-danger", theme.danger),
+            ("--openbot-danger-hover", theme.danger_hover),
+            ("--openbot-danger-text", theme.danger_text),
+            ("--openbot-danger-soft", theme.danger_soft),
+            ("--openbot-danger-soft-hover", theme.danger_soft_hover),
+            ("--openbot-unread-surface", theme.unread_surface),
+            ("--openbot-unread-text", theme.unread_text),
+            ("--openbot-text-on-status", theme.on_status),
+            ("--openbot-shadow-menu", theme.shadow_menu),
+        ]
+    }
+
+    fn css_color(value: &str) -> Option<Rgba> {
+        let value = value.trim();
+        if value == "transparent" {
+            return Some(alpha_of(rgb(0), 0.));
+        }
+        if let Some(digits) = value.strip_prefix('#') {
+            return u32::from_str_radix(digits, 16).ok().map(rgb);
+        }
+        let numbers: Vec<f32> = value
+            .strip_prefix("rgba(")?
+            .strip_suffix(')')?
+            .split(',')
+            .map(|part| part.trim().parse().ok())
+            .collect::<Option<_>>()?;
+        match numbers[..] {
+            [red, green, blue, alpha] => Some(Rgba {
+                r: red / 255.,
+                g: green / 255.,
+                b: blue / 255.,
+                a: alpha,
+            }),
+            _ => None,
+        }
+    }
+
+    fn css_declarations(css: &str) -> std::collections::HashMap<String, String> {
+        css.lines()
+            .filter_map(|line| {
+                let (name, value) = line.trim().strip_suffix(';')?.split_once(':')?;
+                name.starts_with("--openbot-")
+                    .then(|| (name.to_owned(), value.trim().to_owned()))
+            })
+            .collect()
     }
 
     #[test]
-    fn a_known_blue_converts_to_its_srgb_value() {
-        let blue = oklch(0.452, 0.313, 264.05);
-        assert!(blue.r < 0.02 && blue.g < 0.02 && (blue.b - 1.).abs() < 0.02);
+    #[ignore = "needs the OpenBot repository: set OPENBOT_DIR"]
+    fn the_color_tokens_have_the_values_of_the_two_openbot_token_files() {
+        let openbot = std::path::PathBuf::from(
+            std::env::var("OPENBOT_DIR").expect("OPENBOT_DIR is the OpenBot repository"),
+        )
+        .join("packages/brand/src");
+        let dark = css_declarations(&std::fs::read_to_string(openbot.join("tokens.css")).unwrap());
+        let mut light = dark.clone();
+        light.extend(css_declarations(
+            &std::fs::read_to_string(openbot.join("tokens-light.css")).unwrap(),
+        ));
+        let mut compared = 0;
+        for (declared, theme) in [(&dark, Theme::dark()), (&light, Theme::light())] {
+            for (name, ours) in openbot_tokens(&theme) {
+                let theirs = declared
+                    .get(name)
+                    .and_then(|value| css_color(value))
+                    .unwrap_or_else(|| panic!("{name} has no color in the OpenBot file"));
+                assert_eq!(hex(ours), hex(theirs), "{name}");
+                compared += 1;
+            }
+            let focus = declared.get("--openbot-border-focus").unwrap();
+            assert_eq!(focus, "var(--openbot-text-muted)");
+            assert_eq!(hex(theme.border_focus), hex(theme.text_muted));
+        }
+        assert_eq!(compared, 84);
+    }
+
+    const VIEWS: [&str; 9] = [
+        "main.rs",
+        "composer.rs",
+        "ui.rs",
+        "workspace.rs",
+        "workspace/bot_list.rs",
+        "workspace/header.rs",
+        "workspace/conversation.rs",
+        "workspace/overlays.rs",
+        "workspace/screens.rs",
+    ];
+
+    fn literal_values(source: &str) -> Vec<String> {
+        let code = source
+            .split(
+                "#[cfg(test)]
+mod tests {",
+            )
+            .next()
+            .unwrap_or_default();
+        let mut found = Vec::new();
+        for (line_number, line) in code.lines().enumerate() {
+            let mut report = |what: &str| found.push(format!("line {}: {what}", line_number + 1));
+            for (at, _) in line.match_indices("px(") {
+                let method = line[..at].chars().next_back().is_some_and(|before| {
+                    before == '.' || before == '_' || before.is_alphanumeric()
+                });
+                let argument = &line[at + 3..];
+                let literal = argument.starts_with(|first: char| first.is_ascii_digit());
+                if !method && literal && !argument.starts_with("0.)") {
+                    report("a size in pixels");
+                }
+            }
+            for color in [
+                "rgb(",
+                "rgba(",
+                "hsla(",
+                "hsl(",
+                "Rgba {",
+                "Hsla {",
+                "gpui::white(",
+                "gpui::black(",
+                "gpui::red(",
+                "gpui::green(",
+                "gpui::blue(",
+                "gpui::yellow(",
+            ] {
+                if line.contains(color) {
+                    report("a color");
+                }
+            }
+            for (at, _) in line.match_indices("opacity(") {
+                if line[at + 8..].starts_with(|first: char| first.is_ascii_digit()) {
+                    report("an opacity");
+                }
+            }
+            if line.contains("rems(") {
+                report("a size in rems");
+            }
+            if line.contains("Duration::from") || line.contains("from_millis(") {
+                report("a duration");
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_views_hold_no_literal_color_size_or_duration() {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for view in VIEWS {
+            let text = std::fs::read_to_string(source.join(view)).unwrap();
+            assert_eq!(literal_values(&text), Vec::<String>::new(), "{view}");
+        }
+        let seeded = "div().w(px(12.)).bg(rgb(0x00_00_00)).opacity(0.5).h(px(0.)).px(space::S1)";
+        assert_eq!(literal_values(seeded).len(), 3);
+        assert_eq!(
+            literal_values("with_animation(Duration::from_millis(5))").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_appearance_preference_wins_over_the_system_and_system_follows_it() {
+        let (dark, light) = (WindowAppearance::Dark, WindowAppearance::Light);
+        assert_eq!(Theme::resolve(Appearance::Light, dark), Theme::light());
+        assert_eq!(Theme::resolve(Appearance::Dark, light), Theme::dark());
+        assert_eq!(Theme::resolve(Appearance::System, dark), Theme::dark());
+        assert_eq!(Theme::resolve(Appearance::System, light), Theme::light());
+        assert_eq!(
+            Theme::resolve(Appearance::System, WindowAppearance::VibrantDark),
+            Theme::dark()
+        );
+        assert_eq!(
+            Theme::resolve(Appearance::default(), WindowAppearance::VibrantLight),
+            Theme::light()
+        );
+    }
+
+    #[test]
+    fn the_interface_font_is_inter_then_the_system_stack() {
+        let sans = font::sans();
+        assert_eq!(sans.family.as_ref(), "Inter");
+        let fallbacks = sans.fallbacks.unwrap();
+        assert_eq!(fallbacks.fallback_list()[0], ".SystemUIFont");
+        let mono = font::mono();
+        assert!(["Consolas", "Menlo", "monospace"].contains(&mono.family.as_ref()));
     }
 
     #[test]
     fn text_meets_wcag_contrast_on_every_surface_it_sits_on() {
         for theme in [Theme::light(), Theme::dark()] {
+            let sidebar_hover = over(theme.hover, theme.sidebar);
             for surface in [
-                theme.background,
+                theme.frame,
+                theme.canvas,
                 theme.sidebar,
-                theme.raised,
-                theme.hover,
-                theme.selected,
+                theme.surface,
+                theme.control_hover,
+                theme.control_active,
+                theme.sheet,
+                sidebar_hover,
             ] {
                 assert!(contrast(theme.text, surface) >= 4.5);
                 assert!(contrast(theme.text_secondary, surface) >= 4.5);
             }
-            for text in [theme.danger_text, theme.success_text] {
-                assert!(contrast(text, theme.background) >= 4.5);
-                assert!(contrast(text, theme.raised) >= 4.5);
+            for surface in [
+                theme.canvas,
+                theme.sidebar,
+                theme.surface,
+                theme.control_hover,
+                theme.sheet,
+            ] {
+                assert!(
+                    contrast(theme.text_muted, surface) >= 4.5,
+                    "muted on {}",
+                    hex(surface)
+                );
             }
-            assert!(contrast(theme.on_accent, theme.accent_solid) >= 4.5);
-            assert!(contrast(theme.on_accent, theme.accent_solid_hover) >= 4.5);
-            assert!(contrast(theme.attention_text, theme.attention_surface) >= 4.5);
-            assert!(contrast(theme.text, theme.attention_surface) >= 4.5);
+            for surface in [theme.canvas, theme.sidebar] {
+                assert!(contrast(theme.text_readable, surface) >= 4.5);
+            }
+            for surface in [theme.canvas, theme.sidebar, theme.frame, sidebar_hover] {
+                assert!(contrast(theme.text_placeholder, surface) >= 4.5);
+            }
+            let review_chip = over(theme.warning_soft, theme.sidebar);
+            assert!(contrast(theme.warning_text, review_chip) >= 4.5);
+            assert!(contrast(theme.warning_text, theme.canvas) >= 4.5);
+            let next_model = over(theme.accent_soft, theme.frame);
+            assert!(contrast(theme.text, next_model) >= 4.5);
+            assert!(contrast(theme.accent_text, next_model) >= 3.);
+            for surface in [theme.canvas, theme.surface, theme.sheet] {
+                assert!(contrast(theme.danger_text, surface) >= 4.5);
+                assert!(contrast(theme.success_text, surface) >= 4.5);
+            }
+            assert!(contrast(theme.inverse_text, theme.inverse_surface) >= 4.5);
+            assert!(contrast(theme.unread_text, theme.unread_surface) >= 4.5);
+            assert!(contrast(theme.on_status, theme.warning) >= 4.5);
+            assert!(
+                contrast(theme.danger_text, over(theme.danger_soft, theme.canvas)) >= 4.5,
+                "danger text on its soft fill"
+            );
         }
     }
 
     #[test]
-    fn control_edges_and_focus_rings_meet_non_text_contrast() {
+    fn focus_rings_and_status_marks_meet_non_text_contrast() {
         for theme in [Theme::light(), Theme::dark()] {
-            assert!(contrast(theme.control_border, theme.raised) >= 3.);
-            assert!(contrast(theme.control_border, theme.background) >= 3.);
-            assert!(contrast(theme.focus_ring, theme.background) >= 3.);
-            assert!(contrast(theme.focus_ring, theme.sidebar) >= 3.);
-            assert!(contrast(theme.focus_ring, theme.raised) >= 3.);
-            assert!(contrast(theme.attention_border, theme.attention_surface) >= 3.);
-            assert!(contrast(theme.accent_solid, theme.background) >= 3.);
+            for surface in [theme.frame, theme.canvas, theme.sidebar, theme.sheet] {
+                assert!(contrast(theme.border_focus, surface) >= 3.);
+            }
+            assert!(contrast(theme.text_muted, theme.frame) >= 3.);
+            assert!(contrast(theme.danger, theme.sidebar) >= 3.);
+            assert!(contrast(theme.on_accent, theme.danger) >= 3.);
         }
     }
 }
