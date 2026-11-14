@@ -3,16 +3,16 @@
     "file": "tasks/prd-crow-bot-desktop-core.md",
     "title": "Crow Bot desktop core",
     "created_at": "2026-11-14",
-    "status": "READY"
+    "status": "IN_PROGRESS"
   },
   "epics": [
     {
       "id": "EP-001",
       "title": "Daemon reliability and control",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 5,
-      "stories_done": 0
+      "stories_done": 5
     },
     {
       "id": "EP-002",
@@ -60,63 +60,63 @@
       "id": "US-001",
       "title": "The client starts the daemon",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-002",
       "title": "Only the same user reaches the daemon",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-003",
       "title": "A crash loses almost nothing",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-004",
       "title": "Stop a running turn",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-005",
       "title": "Messages sent during a turn wait in a queue",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-004"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-006",
