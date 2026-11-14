@@ -33,10 +33,10 @@
     {
       "id": "EP-004",
       "title": "Conversation experience",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 8,
-      "stories_done": 0
+      "stories_done": 8
     },
     {
       "id": "EP-005",
@@ -274,116 +274,116 @@
       "id": "US-017",
       "title": "Message rows and timeline",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-011"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-018",
       "title": "Markdown that streams",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-017"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-019",
       "title": "Select and copy text",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-018"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-020",
       "title": "Streaming reveal and scroll following",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-017"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-021",
       "title": "Steps for thinking and tool calls",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-017"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-022",
       "title": "Approval card",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-008",
         "US-017"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-023",
       "title": "Composer controls, drafts, and the queue panel",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-004",
         "US-005"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-024",
       "title": "Error and interrupted states in the timeline",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "size": "S",
       "blocked_by": [
         "US-003",
         "US-017"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-025",
