@@ -6,13 +6,22 @@ Crows learn by watching, use tools, and remember. So do the bots.
 
 ## Status
 
-First prototype. The daemon starts Claude through the Agent Client Protocol, sends one prompt, and prints the events of the turn.
+Prototype. The daemon starts Claude through the Agent Client Protocol, keeps a conversation across turns and restarts, and records every event in SQLite.
 
 ```sh
 cargo run -p crowbotd -- --cwd <dir> "<prompt>"
+cargo run -p crowbotd -- --conversation <id> "<prompt>"
+cargo run -p crowbotd -- --conversation <id> --history
 ```
 
-It needs Bun, Node.js 22 or later, and a signed-in Claude Code. The daemon declines every approval request unless you pass `--approve`. `--agent "<command>"` starts another ACP agent.
+- With a prompt, the daemon runs one turn. Without one, it reads one prompt per line from standard input.
+- `--conversation <id>` continues a conversation, in the folder where it started.
+- `--history` prints a conversation from the database and does not start the agent.
+- `--approve` allows each approval request once. Without it, the daemon declines them all.
+- `--db <path>` selects the database. The default is `~/.crowbot/crowbot.db`.
+- `--agent "<command>"` starts another ACP agent.
+
+It needs Bun, Node.js 22 or later, and a signed-in Claude Code.
 
 ## Shape
 

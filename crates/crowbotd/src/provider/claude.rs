@@ -2,6 +2,8 @@ use serde_json::{Map, Value, json};
 
 use crate::provider::acp::AgentProfile;
 
+pub const PROVIDER: &str = "claude";
+
 const COMMAND: &str = "bunx @agentclientprotocol/claude-agent-acp@0.107.0";
 const SESSION_MODE: &str = "default";
 
