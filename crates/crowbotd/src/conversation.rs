@@ -4,19 +4,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
-    ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, Interruption,
-    PermissionLevel, QueueState, ServerMessage,
+    ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
+    Interruption, MESSAGE_LENGTH, PermissionLevel, QueueState, ServerMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use crate::daemon::Daemon;
-use crate::provider::acp::{self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig};
+use crate::provider::acp::{
+    self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
+};
 use crate::store::{BotRow, Conversation, Recorder, SharedStore, StoreError};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const PAGE_EVENTS: usize = 200;
 
 pub type Sink = UnboundedSender<ServerMessage>;
 
@@ -29,6 +32,14 @@ pub enum Command {
         connection: u64,
     },
     Prompt {
+        text: String,
+        sink: Sink,
+    },
+    LoadOlder {
+        before: i64,
+        sink: Sink,
+    },
+    SetDraft {
         text: String,
         sink: Sink,
     },
@@ -78,7 +89,7 @@ enum Input {
     },
     SessionClosed {
         generation: u64,
-        result: Result<(), String>,
+        result: Result<(), SessionFailure>,
     },
 }
 
@@ -130,6 +141,8 @@ struct Session {
     /// The revision of the bot's session settings this session was started with.
     revision: i64,
     model: Option<String>,
+    provider: String,
+    folder: String,
     commands: UnboundedSender<SessionCommand>,
     task: AbortHandle,
 }
@@ -138,7 +151,40 @@ struct PendingApproval {
     id: String,
     tool_call_id: String,
     title: Option<String>,
+    cut: bool,
     reply: oneshot::Sender<ApprovalAnswer>,
+}
+
+struct TurnFailure {
+    message: String,
+    cause: Option<FailureCause>,
+    provider: Option<String>,
+}
+
+impl TurnFailure {
+    fn before_session(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cause: None,
+            provider: None,
+        }
+    }
+
+    fn of_provider(provider: &str, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cause: None,
+            provider: Some(provider.to_owned()),
+        }
+    }
+
+    fn into_event(self) -> Event {
+        Event::TurnFailed {
+            message: self.message,
+            cause: self.cause,
+            provider: self.provider,
+        }
+    }
 }
 
 struct Actor {
@@ -239,6 +285,12 @@ impl Actor {
                 sink,
             } => self.mark_read(connection, following, &sink),
             Command::Prompt { text, sink } => self.prompt(text, &sink),
+            Command::LoadOlder { before, sink } => self.load_older(before, &sink),
+            Command::SetDraft { text, sink } => {
+                if let Err(error) = self.store.with(|store| store.set_draft(self.id, &text)) {
+                    report(&sink, error.to_string());
+                }
+            }
             Command::ResolveApproval {
                 approval_id,
                 decision,
@@ -297,7 +349,13 @@ impl Actor {
         if self.stop_due.is_some() || self.permission_level() != PermissionLevel::FullAccess {
             return;
         }
-        for approval in std::mem::take(&mut self.approvals) {
+        // A request whose text was cut was shown as one that can only be
+        // declined: it keeps waiting for that answer.
+        let (cut, shown): (Vec<_>, Vec<_>) = std::mem::take(&mut self.approvals)
+            .into_iter()
+            .partition(|approval| approval.cut);
+        self.approvals = cut;
+        for approval in shown {
             if approval.reply.send(ApprovalAnswer::Allow).is_ok() {
                 self.emit(Event::ApprovalResolved {
                     id: Some(approval.id),
@@ -359,12 +417,13 @@ impl Actor {
 
     fn snapshot(&mut self) -> Result<ConversationSnapshot, String> {
         self.recorder.save().map_err(|error| error.to_string())?;
-        let (conversation, events, queue) = self
+        let (conversation, page, draft, queue) = self
             .store
             .with(|store| {
                 Ok((
                     store.summary(self.id)?,
-                    store.events(self.id)?,
+                    store.events_page(self.id, None, PAGE_EVENTS)?,
+                    store.draft(self.id)?,
                     store.queue(self.id)?,
                 ))
             })
@@ -373,7 +432,9 @@ impl Actor {
             conversation.ok_or_else(|| format!("conversation {} does not exist", self.id))?;
         Ok(ConversationSnapshot {
             conversation,
-            events,
+            events: page.events,
+            older: page.older,
+            draft,
             turn_active: self.turn_active,
             pending_approvals: self
                 .approvals
@@ -389,32 +450,74 @@ impl Actor {
         })
     }
 
+    fn load_older(&mut self, before: i64, sink: &Sink) {
+        let page = self
+            .store
+            .with(|store| store.events_page(self.id, Some(before), PAGE_EVENTS));
+        let answer = match page {
+            Ok(page) => ServerMessage::OlderEvents {
+                conversation_id: self.id,
+                events: page.events,
+                older: page.older,
+            },
+            Err(error) => ServerMessage::OlderEventsFailed {
+                conversation_id: self.id,
+                message: error.to_string(),
+            },
+        };
+        sink.send(answer).ok();
+    }
+
+    fn refuse_message(&self, sink: &Sink, message: impl Into<String>) {
+        sink.send(ServerMessage::MessageRefused {
+            conversation_id: self.id,
+            message: message.into(),
+        })
+        .ok();
+    }
+
+    fn accept_message(&mut self, sink: &Sink) {
+        sink.send(ServerMessage::MessageAccepted {
+            conversation_id: self.id,
+        })
+        .ok();
+        let cleared = self.store.with(|store| store.set_draft(self.id, ""));
+        self.report_store(cleared);
+    }
+
     fn prompt(&mut self, text: String, sink: &Sink) {
         if self.closing.is_some() {
-            return report(sink, "This bot is being deleted.");
+            return self.refuse_message(sink, "This bot is being deleted.");
         }
         if text.trim().is_empty() {
-            return report(sink, "A message needs some text.");
+            return self.refuse_message(sink, "A message needs some text.");
+        }
+        if text.len() > MESSAGE_LENGTH && text.chars().count() > MESSAGE_LENGTH {
+            return self.refuse_message(sink, "A message can hold 100,000 characters at most.");
         }
         // The conversation a person writes in is the one the bot opens on.
         match self.store.with(|store| store.make_current(self.id)) {
             Ok(true) => self.daemon.publish_bot(self.bot_id),
             Ok(false) => {}
-            Err(error) => return report(sink, error.to_string()),
+            Err(error) => return self.refuse_message(sink, error.to_string()),
         }
         let queue = match self.queue() {
             Ok(queue) => queue,
-            Err(error) => return report(sink, error.to_string()),
+            Err(error) => return self.refuse_message(sink, error.to_string()),
         };
         // A message never overtakes the ones that already wait.
         if self.turn_active || !queue.messages.is_empty() {
             match self.store.with(|store| store.enqueue(self.id, &text)) {
-                Ok(()) => self.broadcast_queue(),
-                Err(error) => report(sink, error.to_string()),
+                Ok(()) => {
+                    self.accept_message(sink);
+                    self.broadcast_queue();
+                }
+                Err(error) => self.refuse_message(sink, error.to_string()),
             }
             return;
         }
         self.turn_active = true;
+        self.accept_message(sink);
         self.emit(Event::UserText(text.clone()));
         self.give_title(&text);
         self.sync();
@@ -431,27 +534,37 @@ impl Actor {
                     });
                 }
             }
-            Err(message) => self.end_turn(Event::TurnFailed { message }),
+            Err(failure) => self.end_turn(failure.into_event()),
         }
     }
 
-    fn try_deliver(&mut self, text: String) -> Result<(), String> {
+    fn try_deliver(&mut self, text: String) -> Result<(), TurnFailure> {
         let (conversation, bot) = self
             .store
             .with(|store| {
                 Ok::<_, StoreError>((store.conversation(self.id)?, store.bot(self.bot_id)?))
             })
-            .map_err(|error| error.to_string())?;
-        let conversation =
-            conversation.ok_or_else(|| format!("conversation {} does not exist", self.id))?;
-        let bot = bot.ok_or_else(|| format!("bot {} does not exist", self.bot_id))?;
+            .map_err(|error| TurnFailure::before_session(error.to_string()))?;
+        let conversation = conversation.ok_or_else(|| {
+            TurnFailure::before_session(format!("conversation {} does not exist", self.id))
+        })?;
+        let bot = bot.ok_or_else(|| {
+            TurnFailure::before_session(format!("bot {} does not exist", self.bot_id))
+        })?;
         if !Path::new(&bot.bot.workspace).is_dir() {
             self.close_session();
-            return Err(format!(
+            return Err(TurnFailure::before_session(format!(
                 "The folder {} does not exist. Choose another one in the bot's settings.",
                 bot.bot.workspace
-            ));
+            )));
         }
+        let provider = bot.bot.provider.clone();
+        let not_delivered = || {
+            TurnFailure::of_provider(
+                &provider,
+                "the agent stopped before it received the message",
+            )
+        };
         // New instructions, a new model, or a new folder take a new provider
         // session: the one that runs keeps the old ones.
         if self
@@ -465,15 +578,17 @@ impl Actor {
             Some(session) => match session.commands.send(SessionCommand::Prompt(text)) {
                 Ok(()) => return Ok(()),
                 Err(mpsc::error::SendError(SessionCommand::Prompt(unsent))) => unsent,
-                Err(_) => return Err("the agent stopped before it received the message".to_owned()),
+                Err(_) => return Err(not_delivered()),
             },
             None => text,
         };
-        let session = self.start_session(conversation, bot)?;
+        let session = self
+            .start_session(conversation, bot)
+            .map_err(|message| TurnFailure::of_provider(&provider, message))?;
         session
             .commands
             .send(SessionCommand::Prompt(text))
-            .map_err(|_| "the agent stopped before it received the message".to_owned())?;
+            .map_err(|_| not_delivered())?;
         self.session = Some(session);
         Ok(())
     }
@@ -485,6 +600,8 @@ impl Actor {
     ) -> Result<Session, String> {
         let revision = bot.session_revision;
         let model = bot.bot.model.clone();
+        let provider = bot.bot.provider.clone();
+        let folder = bot.bot.workspace.clone();
         let config = SessionConfig {
             agent: self.daemon.agent_profile(&bot.bot.provider)?,
             cwd: PathBuf::from(bot.bot.workspace),
@@ -520,6 +637,8 @@ impl Actor {
             generation,
             revision,
             model,
+            provider,
+            folder,
             commands,
             task: task.abort_handle(),
         })
@@ -560,6 +679,8 @@ impl Actor {
             AgentEvent::ApprovalNeeded {
                 tool_call_id,
                 title,
+                target,
+                cut,
                 reply,
             } => {
                 let id = self.new_approval_id();
@@ -589,12 +710,17 @@ impl Actor {
                     id: id.clone(),
                     tool_call_id: tool_call_id.clone(),
                     title: title.clone(),
+                    cut,
                     reply,
                 });
+                let folder = self.session.as_ref().map(|session| session.folder.clone());
                 self.emit(Event::ApprovalRequested {
                     id,
                     tool_call_id,
                     title,
+                    target,
+                    folder,
+                    cut,
                 });
                 self.sync();
             }
@@ -617,20 +743,33 @@ impl Actor {
     }
 
     fn resolve_approval(&mut self, approval_id: &str, decision: ApprovalDecision, sink: &Sink) {
+        let conversation_id = self.id;
+        let refuse = |message: &str| {
+            sink.send(ServerMessage::ApprovalNotResolved {
+                conversation_id,
+                approval_id: approval_id.to_owned(),
+                message: message.to_owned(),
+            })
+            .ok();
+        };
         let Some(index) = self
             .approvals
             .iter()
             .position(|approval| approval.id == approval_id)
         else {
-            return report(sink, "This approval is no longer waiting for an answer.");
+            return refuse("This approval is no longer waiting for an answer.");
         };
+        if self.approvals[index].cut && decision == ApprovalDecision::Allowed {
+            return refuse("This request is too long to show in full, so it can only be declined.");
+        }
         let approval = self.approvals.remove(index);
         let answer = match decision {
             ApprovalDecision::Allowed => ApprovalAnswer::Allow,
             ApprovalDecision::Declined => ApprovalAnswer::Decline,
         };
         if approval.reply.send(answer).is_err() {
-            return report(sink, "The agent stopped waiting for this approval.");
+            self.sync();
+            return refuse("The agent stopped waiting for this approval.");
         }
         self.emit(Event::ApprovalResolved {
             id: Some(approval.id),
@@ -680,17 +819,25 @@ impl Actor {
         }
     }
 
-    fn session_closed(&mut self, generation: u64, result: Result<(), String>) {
+    fn session_closed(&mut self, generation: u64, result: Result<(), SessionFailure>) {
         if !self.is_current(generation) {
             return;
         }
-        self.session = None;
+        let provider = self.session.take().map(|session| session.provider);
         if self.turn_active {
-            self.end_turn(Event::TurnFailed {
-                message: result
-                    .err()
-                    .unwrap_or_else(|| "the agent stopped before the turn ended".to_owned()),
-            });
+            let failure = match result {
+                Err(failure) => TurnFailure {
+                    message: failure.message,
+                    cause: failure.cause,
+                    provider,
+                },
+                Ok(()) => TurnFailure {
+                    message: "the agent stopped before the turn ended".to_owned(),
+                    cause: None,
+                    provider,
+                },
+            };
+            self.end_turn(failure.into_event());
         }
     }
 
@@ -751,6 +898,7 @@ impl Actor {
                 self.broadcast(ServerMessage::ConversationEvent {
                     conversation_id: self.id,
                     event: Event::UserText(text.clone()),
+                    at_ms: at_ms(),
                 });
                 self.broadcast_queue();
                 self.give_title(&text);
@@ -850,6 +998,7 @@ impl Actor {
         self.broadcast(ServerMessage::ConversationEvent {
             conversation_id: self.id,
             event,
+            at_ms: at_ms(),
         });
     }
 
@@ -882,6 +1031,10 @@ fn report(sink: &Sink, message: impl Into<String>) {
         message: message.into(),
     })
     .ok();
+}
+
+fn at_ms() -> i64 {
+    i64::try_from(now_ms()).unwrap_or(i64::MAX)
 }
 
 fn now_ms() -> u64 {

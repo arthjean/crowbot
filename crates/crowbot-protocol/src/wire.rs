@@ -68,6 +68,7 @@ mod tests {
         let message = ServerMessage::ConversationEvent {
             conversation_id: 3,
             event: Event::MessageText("caw".to_owned()),
+            at_ms: 1_700_000_000_000,
         };
         let line = encode(&message).unwrap();
         assert_eq!(decode::<ServerMessage>(&line).unwrap(), message);

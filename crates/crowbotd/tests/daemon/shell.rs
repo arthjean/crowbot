@@ -1,6 +1,6 @@
 use crowbot_protocol::{
     Appearance, BotPatch, ClientMessage, PROTOCOL_VERSION, Preferences, PreferencesPatch,
-    ServerMessage,
+    SendShortcut, ServerMessage,
 };
 
 use crate::support::{Client, Daemon};
@@ -48,6 +48,7 @@ async fn preferences_start_as_defaults_reach_every_client_and_outlive_the_daemon
         appearance: Appearance::Light,
         sidebar_width: Some(320),
         sidebar_collapsed: false,
+        send_shortcut: SendShortcut::Enter,
     };
     assert_eq!(until_preferences(&mut client).await, expected);
     assert_eq!(until_preferences(&mut other).await, expected);

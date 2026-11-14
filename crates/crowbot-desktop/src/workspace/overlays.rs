@@ -218,6 +218,107 @@ impl Workspace {
         )
     }
 
+    pub(super) fn render_full_access_dialog(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.confirm_full_access.as_ref()?;
+        let name = self.selected_bot()?.bot.name.clone();
+        let title = SharedString::from(format!("Always allow {name}?"));
+        let description = SharedString::from(format!(
+            "{name} moves to Full access. It then runs every tool without asking, in this conversation and in the next ones, and this request is allowed."
+        ));
+        let dialog = div()
+            .id("full-access-dialog")
+            .debug_selector(|| "full-access-dialog".into())
+            .occlude()
+            .role(Role::AlertDialog)
+            .aria_label(title.clone())
+            .aria_description(description.clone())
+            .w(layout::DIALOG_WIDTH)
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .rounded(radius::XL)
+            .bg(theme.canvas)
+            .border_1()
+            .border_color(theme.dialog_ring)
+            .shadow(theme.menu_shadow())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.cancel_full_access(window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .p(space::S6)
+                    .flex()
+                    .flex_col()
+                    .gap(space::S2)
+                    .child(
+                        div()
+                            .text_size(text::XL.size)
+                            .line_height(text::XL.leading)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "full-access-description".into())
+                            .text_size(text::LG.size)
+                            .line_height(text::LG.leading)
+                            .text_color(theme.text_muted)
+                            .child(description),
+                    ),
+            )
+            .child(
+                div()
+                    .px(space::S6)
+                    .py(space::S4)
+                    .flex()
+                    .justify_end()
+                    .gap(space::S2)
+                    .border_t_1()
+                    .border_color(theme.border_strong)
+                    .child(
+                        ui::button("cancel-full-access", "Cancel", ButtonKind::Ghost, theme)
+                            .track_focus(&self.full_access_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.cancel_full_access(window, cx);
+                            })),
+                    )
+                    .child(
+                        ui::button(
+                            "confirm-full-access",
+                            "Move to Full access",
+                            ButtonKind::Primary,
+                            theme,
+                        )
+                        .track_focus(&self.full_access_confirm_focus)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.full_access_confirmed(window, cx);
+                        })),
+                    ),
+            );
+        Some(
+            div()
+                .id("full-access-overlay")
+                .occlude()
+                .absolute()
+                .inset_0()
+                .p(space::S6)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.overlay)
+                .on_click(cx.listener(|this, _, window, cx| this.cancel_full_access(window, cx)))
+                .child(dialog)
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_toast(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let notice = self.notice.clone()?;
         Some(

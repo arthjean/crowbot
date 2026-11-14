@@ -30,6 +30,31 @@ impl Appearance {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendShortcut {
+    ModEnter,
+    #[default]
+    #[serde(other)]
+    Enter,
+}
+
+impl SendShortcut {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::ModEnter => "mod_enter",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "mod_enter" => Self::ModEnter,
+            _ => Self::Enter,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default)]
@@ -38,6 +63,8 @@ pub struct Preferences {
     pub sidebar_width: Option<u32>,
     #[serde(default)]
     pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub send_shortcut: SendShortcut,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +75,8 @@ pub struct PreferencesPatch {
     pub sidebar_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_collapsed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_shortcut: Option<SendShortcut>,
 }
 
 #[cfg(test)]
@@ -61,6 +90,20 @@ mod tests {
         assert_eq!(preferences.appearance, Appearance::System);
         assert_eq!(preferences.sidebar_width, None);
         assert!(!preferences.sidebar_collapsed);
+        assert_eq!(preferences.send_shortcut, SendShortcut::Enter);
+    }
+
+    #[test]
+    fn a_send_shortcut_keeps_its_name_and_an_unknown_one_is_enter() {
+        for shortcut in [SendShortcut::Enter, SendShortcut::ModEnter] {
+            let wire = serde_json::to_string(&shortcut).unwrap();
+            assert_eq!(wire, format!("\"{}\"", shortcut.name()));
+            assert_eq!(SendShortcut::from_name(shortcut.name()), shortcut);
+        }
+        let preferences: Preferences =
+            serde_json::from_str(r#"{"send_shortcut":"double_tap"}"#).unwrap();
+        assert_eq!(preferences.send_shortcut, SendShortcut::Enter);
+        assert_eq!(SendShortcut::from_name(""), SendShortcut::Enter);
     }
 
     #[test]

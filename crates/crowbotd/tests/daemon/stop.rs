@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use crowbot_protocol::{ApprovalClosure, ClientMessage, Event, Interruption, TurnEnd};
 
-use crate::support::Daemon;
+use crate::support::{self, Daemon};
 
 #[tokio::test]
 async fn a_stop_ends_the_running_turn_as_cancelled_within_two_seconds() {
@@ -27,7 +27,7 @@ async fn a_stop_ends_the_running_turn_as_cancelled_within_two_seconds() {
     let snapshot = client.open(id).await;
     assert!(!snapshot.turn_active);
     assert_eq!(
-        snapshot.events.last(),
+        snapshot.events.last().map(|timed| &timed.event),
         Some(&Event::TurnEnded(TurnEnd::Cancelled))
     );
 }
@@ -42,6 +42,7 @@ async fn a_stop_answers_a_waiting_approval_as_cancelled_and_records_it() {
         id: approval,
         tool_call_id,
         title,
+        ..
     } = client
         .until_event(|event| matches!(event, Event::ApprovalRequested { .. }))
         .await
@@ -75,16 +76,18 @@ async fn a_stop_answers_a_waiting_approval_as_cancelled_and_records_it() {
 
     let snapshot = client.open(id).await;
     assert!(snapshot.pending_approvals.is_empty());
-    assert!(snapshot.events.contains(&closed));
+    assert!(support::events(&snapshot).contains(&closed));
 
     client
         .send(ClientMessage::ResolveApproval {
             conversation_id: id,
-            approval_id: approval,
+            approval_id: approval.clone(),
             decision: crowbot_protocol::ApprovalDecision::Allowed,
         })
         .await;
-    assert!(client.until_error().await.contains("no longer waiting"));
+    let (conversation, refused, why) = client.until_not_resolved().await;
+    assert_eq!((conversation, refused), (id, approval));
+    assert!(why.contains("no longer waiting"), "{why}");
 }
 
 #[tokio::test]

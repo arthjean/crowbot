@@ -1,4 +1,4 @@
-use crowbot_protocol::{Appearance, Preferences, PreferencesPatch};
+use crowbot_protocol::{Appearance, Preferences, PreferencesPatch, SendShortcut};
 use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
@@ -6,6 +6,7 @@ use super::{Store, StoreError};
 const APPEARANCE: &str = "appearance";
 const SIDEBAR_WIDTH: &str = "sidebar_width";
 const SIDEBAR_COLLAPSED: &str = "sidebar_collapsed";
+const SEND_SHORTCUT: &str = "send_shortcut";
 
 impl Store {
     fn preference(&self, key: &str) -> Result<Option<String>, StoreError> {
@@ -39,6 +40,10 @@ impl Store {
                 .preference(SIDEBAR_WIDTH)?
                 .and_then(|width| width.parse().ok()),
             sidebar_collapsed: self.preference(SIDEBAR_COLLAPSED)?.as_deref() == Some("1"),
+            send_shortcut: self
+                .preference(SEND_SHORTCUT)?
+                .map(|name| SendShortcut::from_name(&name))
+                .unwrap_or_default(),
         })
     }
 
@@ -52,6 +57,9 @@ impl Store {
         }
         if let Some(collapsed) = patch.sidebar_collapsed {
             self.set_preference(SIDEBAR_COLLAPSED, if collapsed { "1" } else { "0" })?;
+        }
+        if let Some(shortcut) = patch.send_shortcut {
+            self.set_preference(SEND_SHORTCUT, shortcut.name())?;
         }
         let preferences = self.preferences()?;
         transaction.commit()?;
@@ -112,12 +120,48 @@ mod tests {
     }
 
     #[test]
+    fn the_send_shortcut_is_stored_by_its_name_and_other_patches_leave_it() {
+        let store = store();
+        assert_eq!(
+            store.preferences().unwrap().send_shortcut,
+            SendShortcut::Enter
+        );
+        let changed = store
+            .update_preferences(&PreferencesPatch {
+                send_shortcut: Some(SendShortcut::ModEnter),
+                ..PreferencesPatch::default()
+            })
+            .unwrap();
+        assert_eq!(changed.send_shortcut, SendShortcut::ModEnter);
+        assert_eq!(
+            store.preference(SEND_SHORTCUT).unwrap().as_deref(),
+            Some("mod_enter")
+        );
+        let later = store
+            .update_preferences(&PreferencesPatch {
+                sidebar_width: Some(280),
+                ..PreferencesPatch::default()
+            })
+            .unwrap();
+        assert_eq!(later.send_shortcut, SendShortcut::ModEnter);
+        let back = store
+            .update_preferences(&PreferencesPatch {
+                send_shortcut: Some(SendShortcut::Enter),
+                ..PreferencesPatch::default()
+            })
+            .unwrap();
+        assert_eq!(back.send_shortcut, SendShortcut::Enter);
+        assert_eq!(store.preferences().unwrap(), back);
+    }
+
+    #[test]
     fn a_stored_value_that_cannot_be_read_gives_the_default() {
         let store = store();
         for (key, value) in [
             (APPEARANCE, "sepia"),
             (SIDEBAR_WIDTH, "wide"),
             (SIDEBAR_COLLAPSED, "maybe"),
+            (SEND_SHORTCUT, "double_tap"),
         ] {
             store.set_preference(key, value).unwrap();
         }

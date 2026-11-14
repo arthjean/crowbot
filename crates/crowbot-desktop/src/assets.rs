@@ -28,19 +28,32 @@ macro_rules! icons {
 }
 
 icons! {
+    ArrowDown => "arrow_down.svg",
+    ArrowUp => "arrow_up.svg",
+    Check => "check.svg",
     ChevronDown => "chevron_down.svg",
     ChevronRight => "chevron_right.svg",
+    CircleAlert => "circle_alert.svg",
     Clock => "clock.svg",
+    Copy => "copy.svg",
+    FileText => "file_text.svg",
+    Globe => "globe.svg",
     History => "history.svg",
+    Lightbulb => "lightbulb.svg",
     Loader => "loader_circle.svg",
     PanelLeft => "panel_left.svg",
     PanelRight => "panel_right.svg",
+    Pencil => "pencil.svg",
     Plus => "plus.svg",
     Refresh => "refresh_cw.svg",
     Search => "search.svg",
     ShieldCheck => "shield_check.svg",
+    Square => "square.svg",
     SquarePen => "square_pen.svg",
+    Terminal => "terminal.svg",
+    Trash => "trash.svg",
     TriangleAlert => "triangle_alert.svg",
+    Wrench => "wrench.svg",
     X => "x.svg",
 }
 

@@ -59,7 +59,9 @@ mod tests {
         assert!(!marks_read(&Event::ThoughtText("hm".to_owned())));
         assert!(marks_read(&Event::TurnEnded(TurnEnd::Completed)));
         assert!(marks_read(&Event::TurnFailed {
-            message: "gone".to_owned()
+            message: "gone".to_owned(),
+            cause: None,
+            provider: None,
         }));
         assert!(marks_read(&Event::UserText("go".to_owned())));
     }

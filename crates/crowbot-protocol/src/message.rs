@@ -4,7 +4,9 @@ use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event};
 use crate::preferences::{Preferences, PreferencesPatch};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
+
+pub const MESSAGE_LENGTH: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -43,6 +45,14 @@ pub enum ClientMessage {
         conversation_id: i64,
     },
     SendMessage {
+        conversation_id: i64,
+        text: String,
+    },
+    LoadOlderEvents {
+        conversation_id: i64,
+        before: i64,
+    },
+    SetDraft {
         conversation_id: i64,
         text: String,
     },
@@ -122,6 +132,29 @@ pub enum ServerMessage {
     ConversationEvent {
         conversation_id: i64,
         event: Event,
+        #[serde(default)]
+        at_ms: i64,
+    },
+    OlderEvents {
+        conversation_id: i64,
+        events: Vec<TimedEvent>,
+        older: Option<i64>,
+    },
+    OlderEventsFailed {
+        conversation_id: i64,
+        message: String,
+    },
+    MessageAccepted {
+        conversation_id: i64,
+    },
+    MessageRefused {
+        conversation_id: i64,
+        message: String,
+    },
+    ApprovalNotResolved {
+        conversation_id: i64,
+        approval_id: String,
+        message: String,
     },
     QueueChanged {
         conversation_id: i64,
@@ -156,9 +189,19 @@ pub struct ConversationSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedEvent {
+    pub at_ms: i64,
+    pub event: Event,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationSnapshot {
     pub conversation: ConversationSummary,
-    pub events: Vec<Event>,
+    pub events: Vec<TimedEvent>,
+    #[serde(default)]
+    pub older: Option<i64>,
+    #[serde(default)]
+    pub draft: String,
     pub turn_active: bool,
     pub pending_approvals: Vec<String>,
     #[serde(default)]
@@ -197,6 +240,8 @@ mod tests {
                 last_activity_ms: 0,
             },
             events: Vec::new(),
+            older: None,
+            draft: String::new(),
             turn_active: turn_model.is_some(),
             pending_approvals: Vec::new(),
             queue: QueueState::default(),
@@ -223,5 +268,25 @@ mod tests {
         let read: ConversationSnapshot = serde_json::from_str(wire).unwrap();
         assert_eq!(read.turn_model, None);
         assert!(read.turn_active);
+        assert_eq!(read.older, None);
+        assert_eq!(read.draft, "");
+    }
+
+    #[test]
+    fn a_page_of_events_carries_the_time_of_each_and_where_older_ones_start() {
+        let sent = ServerMessage::OlderEvents {
+            conversation_id: 3,
+            events: vec![TimedEvent {
+                at_ms: 1_700_000_000_000,
+                event: Event::UserText("hi".to_owned()),
+            }],
+            older: Some(41),
+        };
+        let wire = serde_json::to_string(&sent).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"type":"older_events","data":{"conversation_id":3,"events":[{"at_ms":1700000000000,"event":{"type":"user_text","data":"hi"}}],"older":41}}"#
+        );
+        assert_eq!(serde_json::from_str::<ServerMessage>(&wire).unwrap(), sent);
     }
 }

@@ -10,10 +10,14 @@ use agent_client_protocol::v1::schema::{
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue, SessionId,
     SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, SystemPrompt, TextContent,
-    ToolCallStatus,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdateFields,
+    ToolKind as AgentToolKind,
 };
-use agent_client_protocol::{AcpAgent, Agent, Client, Error};
-use crowbot_protocol::{Event, ToolStatus, TurnEnd};
+use agent_client_protocol::{AcpAgent, Agent, Client, Error, ErrorCode};
+use crowbot_protocol::{
+    APPROVAL_TARGET_BYTES, Event, FailureCause, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolKind,
+    ToolStatus, TurnEnd, cut_text,
+};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -54,6 +58,8 @@ pub enum AgentEvent {
     ApprovalNeeded {
         tool_call_id: String,
         title: Option<String>,
+        target: Option<String>,
+        cut: bool,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
     /// The agent asked for an approval that the daemon cannot grant, because the
@@ -83,11 +89,25 @@ pub enum ApprovalAnswer {
     Cancel,
 }
 
+pub struct SessionFailure {
+    pub message: String,
+    pub cause: Option<FailureCause>,
+}
+
+impl From<Error> for SessionFailure {
+    fn from(error: Error) -> Self {
+        Self {
+            cause: failure_cause(&error),
+            message: failure_message(&error),
+        }
+    }
+}
+
 pub async fn run_session(
     config: SessionConfig,
     mut commands: UnboundedReceiver<SessionCommand>,
     events: UnboundedSender<AgentEvent>,
-) -> Result<(), String> {
+) -> Result<(), SessionFailure> {
     let SessionConfig {
         agent,
         cwd,
@@ -95,7 +115,10 @@ pub async fn run_session(
         instructions,
         model,
     } = config;
-    let process = AcpAgent::from_str(&agent.command).map_err(|error| error.to_string())?;
+    let process = AcpAgent::from_str(&agent.command).map_err(|error| SessionFailure {
+        message: error.to_string(),
+        cause: None,
+    })?;
     let update_events = events.clone();
     let approval_events = events.clone();
 
@@ -116,6 +139,7 @@ pub async fn run_session(
                         connection: ConnectionTo<Agent>| {
                 let tool_call_id = request.tool_call.tool_call_id.0.to_string();
                 let title = request.tool_call.fields.title.clone();
+                let (target, cut) = approval_target(&request.tool_call.fields);
                 let decline = decline_outcome(&request);
                 let Some(allow) = allow_once_outcome(&request) else {
                     approval_events
@@ -131,6 +155,8 @@ pub async fn run_session(
                     .send(AgentEvent::ApprovalNeeded {
                         tool_call_id,
                         title,
+                        target,
+                        cut,
                         reply,
                     })
                     .ok();
@@ -260,7 +286,36 @@ pub async fn run_session(
             Ok(())
         })
         .await
-        .map_err(|error| error.to_string())
+        .map_err(SessionFailure::from)
+}
+
+const SIGN_IN_KINDS: [&str; 2] = ["authentication_failed", "oauth_org_not_allowed"];
+const USAGE_LIMIT_KINDS: [&str; 3] = ["rate_limit", "billing_error", "account_on_hold"];
+
+fn error_kind(error: &Error) -> Option<&str> {
+    error.data.as_ref()?.get("errorKind")?.as_str()
+}
+
+fn failure_cause(error: &Error) -> Option<FailureCause> {
+    if error.code == ErrorCode::AUTH_REQUIRED {
+        return Some(FailureCause::SignInRequired);
+    }
+    let kind = error_kind(error)?;
+    if SIGN_IN_KINDS.contains(&kind) {
+        Some(FailureCause::SignInRequired)
+    } else if USAGE_LIMIT_KINDS.contains(&kind) {
+        Some(FailureCause::UsageLimit)
+    } else {
+        None
+    }
+}
+
+fn failure_message(error: &Error) -> String {
+    if error_kind(error).is_some() && !error.message.is_empty() {
+        error.message.clone()
+    } else {
+        error.to_string()
+    }
 }
 
 fn failure(message: &str) -> Error {
@@ -333,19 +388,131 @@ fn translate(update: SessionUpdate) -> Option<Event> {
         SessionUpdate::AgentThoughtChunk(chunk) => text(chunk.content).map(Event::ThoughtText),
         SessionUpdate::ToolCall(call) => Some(Event::ToolCallStarted {
             id: call.tool_call_id.0.to_string(),
-            title: call.title,
             status: tool_status(call.status),
+            kind: Some(tool_kind(call.kind)),
+            input: tool_input(call.raw_input.as_ref(), &call.locations),
+            title: call.title,
         }),
         SessionUpdate::ToolCallUpdate(update) => {
-            let title = update.fields.title;
-            let status = update.fields.status.and_then(tool_status);
-            (title.is_some() || status.is_some()).then(|| Event::ToolCallUpdated {
+            let fields = update.fields;
+            let input = tool_input(
+                fields.raw_input.as_ref(),
+                fields.locations.as_deref().unwrap_or_default(),
+            );
+            let output = tool_output(
+                fields.content.as_deref().unwrap_or_default(),
+                fields.raw_output.as_ref(),
+            );
+            let title = fields.title;
+            let status = fields.status.and_then(tool_status);
+            let kind = fields.kind.map(tool_kind);
+            let changed = title.is_some()
+                || status.is_some()
+                || kind.is_some()
+                || input.is_some()
+                || output.is_some();
+            changed.then(|| Event::ToolCallUpdated {
                 id: update.tool_call_id.0.to_string(),
                 title,
                 status,
+                kind,
+                input,
+                output,
             })
         }
         _ => None,
+    }
+}
+
+fn tool_kind(kind: AgentToolKind) -> ToolKind {
+    match kind {
+        AgentToolKind::Read => ToolKind::Read,
+        AgentToolKind::Edit => ToolKind::Edit,
+        AgentToolKind::Delete => ToolKind::Delete,
+        AgentToolKind::Move => ToolKind::Move,
+        AgentToolKind::Search => ToolKind::Search,
+        AgentToolKind::Execute => ToolKind::Execute,
+        AgentToolKind::Think => ToolKind::Think,
+        AgentToolKind::Fetch => ToolKind::Fetch,
+        _ => ToolKind::Other,
+    }
+}
+
+fn string_field(fields: Option<&Map<String, Value>>, names: &[&str]) -> Option<String> {
+    let fields = fields?;
+    names
+        .iter()
+        .filter_map(|name| fields.get(*name)?.as_str())
+        .find(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn first_location(locations: &[ToolCallLocation]) -> Option<String> {
+    locations
+        .first()
+        .map(|location| location.path.to_string_lossy().into_owned())
+        .filter(|path| !path.is_empty())
+}
+
+fn tool_input(raw_input: Option<&Value>, locations: &[ToolCallLocation]) -> Option<String> {
+    let fields = raw_input.and_then(Value::as_object);
+    let mut input = string_field(fields, &["command"])
+        .or_else(|| string_field(fields, &["file_path", "path", "abs_path"]))
+        .or_else(|| first_location(locations))
+        .or_else(|| string_field(fields, &["pattern", "query", "url"]))
+        .or_else(|| {
+            fields
+                .filter(|fields| !fields.is_empty())
+                .and_then(|fields| serde_json::to_string(fields).ok())
+        })?;
+    cut_text(&mut input, TOOL_INPUT_BYTES);
+    Some(input)
+}
+
+fn content_text(content: &ToolCallContent) -> Option<String> {
+    match content {
+        ToolCallContent::Content(content) => match &content.content {
+            ContentBlock::Text(text) => Some(text.text.clone()),
+            _ => None,
+        },
+        ToolCallContent::Diff(diff) => Some(format!("{}\n{}", diff.path.display(), diff.new_text)),
+        _ => None,
+    }
+}
+
+fn tool_output(content: &[ToolCallContent], raw_output: Option<&Value>) -> Option<String> {
+    let shown = content
+        .iter()
+        .filter_map(content_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut output = if shown.is_empty() {
+        match raw_output? {
+            Value::Null => return None,
+            Value::String(text) => text.clone(),
+            other => serde_json::to_string(other).ok()?,
+        }
+    } else {
+        shown
+    };
+    if output.is_empty() {
+        return None;
+    }
+    cut_text(&mut output, TOOL_OUTPUT_BYTES);
+    Some(output)
+}
+
+fn approval_target(fields: &ToolCallUpdateFields) -> (Option<String>, bool) {
+    let input = fields.raw_input.as_ref().and_then(Value::as_object);
+    let target = string_field(input, &["command"])
+        .or_else(|| first_location(fields.locations.as_deref().unwrap_or_default()))
+        .or_else(|| string_field(input, &["file_path", "path"]));
+    match target {
+        Some(mut target) => {
+            let cut = cut_text(&mut target, APPROVAL_TARGET_BYTES);
+            (Some(target), cut)
+        }
+        None => (None, false),
     }
 }
 
@@ -380,9 +547,10 @@ fn turn_end(reason: StopReason) -> TurnEnd {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::v1::schema::{
-        ContentChunk, PermissionOption, SessionConfigSelectOption, SessionMode, ToolCallUpdate,
-        ToolCallUpdateFields,
+        Content, ContentChunk, Diff, PermissionOption, SessionConfigSelectOption, SessionMode,
+        Terminal, ToolCall, ToolCallUpdate,
     };
+    use serde_json::json;
 
     use super::*;
 
@@ -542,5 +710,344 @@ mod tests {
         assert_eq!(turn_end(StopReason::EndTurn), TurnEnd::Completed);
         assert_eq!(turn_end(StopReason::Cancelled), TurnEnd::Cancelled);
         assert_eq!(turn_end(StopReason::Refusal), TurnEnd::Refused);
+    }
+
+    fn text_item(text: &str) -> ToolCallContent {
+        ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
+    }
+
+    fn updated(fields: ToolCallUpdateFields) -> Option<Event> {
+        translate(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "t1", fields,
+        )))
+    }
+
+    #[test]
+    fn a_tool_call_starts_with_its_kind_and_a_summary_of_its_input() {
+        let call = ToolCall::new("t1", "Run tests")
+            .kind(AgentToolKind::Execute)
+            .status(ToolCallStatus::InProgress)
+            .raw_input(json!({ "command": "cargo test", "timeout": 60 }));
+        assert_eq!(
+            translate(SessionUpdate::ToolCall(call)),
+            Some(Event::ToolCallStarted {
+                id: "t1".to_owned(),
+                title: "Run tests".to_owned(),
+                status: Some(ToolStatus::InProgress),
+                kind: Some(ToolKind::Execute),
+                input: Some("cargo test".to_owned()),
+            })
+        );
+        assert_eq!(
+            translate(SessionUpdate::ToolCall(ToolCall::new("t2", "Think"))),
+            Some(Event::ToolCallStarted {
+                id: "t2".to_owned(),
+                title: "Think".to_owned(),
+                status: Some(ToolStatus::Pending),
+                kind: Some(ToolKind::Other),
+                input: None,
+            })
+        );
+    }
+
+    #[test]
+    fn every_agent_tool_kind_has_a_kind_and_the_ones_unknown_here_are_other() {
+        for (agent, kind) in [
+            (AgentToolKind::Read, ToolKind::Read),
+            (AgentToolKind::Edit, ToolKind::Edit),
+            (AgentToolKind::Delete, ToolKind::Delete),
+            (AgentToolKind::Move, ToolKind::Move),
+            (AgentToolKind::Search, ToolKind::Search),
+            (AgentToolKind::Execute, ToolKind::Execute),
+            (AgentToolKind::Think, ToolKind::Think),
+            (AgentToolKind::Fetch, ToolKind::Fetch),
+            (AgentToolKind::SwitchMode, ToolKind::Other),
+            (AgentToolKind::Other, ToolKind::Other),
+        ] {
+            assert_eq!(tool_kind(agent), kind);
+        }
+    }
+
+    #[test]
+    fn the_input_summary_is_the_command_then_a_path_then_a_search() {
+        let locations = [
+            ToolCallLocation::new("src/lib.rs"),
+            ToolCallLocation::new("src/main.rs"),
+        ];
+        let summary =
+            |input: Value, locations: &[ToolCallLocation]| tool_input(Some(&input), locations);
+        assert_eq!(
+            summary(
+                json!({ "command": "ls", "file_path": "a.txt", "pattern": "x" }),
+                &locations
+            )
+            .as_deref(),
+            Some("ls")
+        );
+        assert_eq!(
+            summary(json!({ "file_path": "a.txt", "path": "b.txt" }), &locations).as_deref(),
+            Some("a.txt")
+        );
+        assert_eq!(
+            summary(json!({ "path": "b.txt", "abs_path": "/c.txt" }), &[]).as_deref(),
+            Some("b.txt")
+        );
+        assert_eq!(
+            summary(
+                json!({ "abs_path": "/c.txt", "url": "https://example.com" }),
+                &[]
+            )
+            .as_deref(),
+            Some("/c.txt")
+        );
+        assert_eq!(
+            summary(json!({ "pattern": "TODO", "limit": 5 }), &locations).as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            summary(json!({ "pattern": "TODO", "query": "q" }), &[]).as_deref(),
+            Some("TODO")
+        );
+        assert_eq!(
+            summary(
+                json!({ "query": "crows", "url": "https://example.com" }),
+                &[]
+            )
+            .as_deref(),
+            Some("crows")
+        );
+        assert_eq!(
+            summary(json!({ "url": "https://example.com" }), &[]).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            summary(json!({ "command": 7, "limit": 5 }), &[]).as_deref(),
+            Some(r#"{"command":7,"limit":5}"#)
+        );
+        assert_eq!(summary(json!({}), &[]), None);
+        assert_eq!(summary(json!("ls"), &[]), None);
+        assert_eq!(
+            summary(json!(["ls"]), &locations).as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(tool_input(None, &[]), None);
+        assert_eq!(tool_input(None, &locations).as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn a_long_input_summary_is_cut() {
+        let command = "é".repeat(TOOL_INPUT_BYTES);
+        let input = tool_input(Some(&json!({ "command": command })), &[]).unwrap();
+        assert_eq!(input.len(), TOOL_INPUT_BYTES);
+        assert!(command.starts_with(&input));
+        let exact = "x".repeat(TOOL_INPUT_BYTES);
+        assert_eq!(
+            tool_input(Some(&json!({ "command": exact })), &[]),
+            Some(exact)
+        );
+    }
+
+    #[test]
+    fn the_output_is_the_text_of_the_content_then_the_raw_output() {
+        let content = [
+            text_item("line one"),
+            ToolCallContent::Terminal(Terminal::new("terminal-1")),
+            ToolCallContent::Diff(Diff::new("src/main.rs", "fn main() {}")),
+            text_item("line two"),
+        ];
+        assert_eq!(
+            tool_output(&content, Some(&json!("ignored"))).as_deref(),
+            Some("line one\nsrc/main.rs\nfn main() {}\nline two")
+        );
+        let nothing = [ToolCallContent::Terminal(Terminal::new("terminal-1"))];
+        assert_eq!(
+            tool_output(&nothing, Some(&json!("raw text"))).as_deref(),
+            Some("raw text")
+        );
+        assert_eq!(
+            tool_output(&[], Some(&json!({ "code": 1, "stderr": "boom" }))).as_deref(),
+            Some(r#"{"code":1,"stderr":"boom"}"#)
+        );
+        assert_eq!(tool_output(&[], Some(&json!(3))).as_deref(), Some("3"));
+        assert_eq!(tool_output(&[], Some(&Value::Null)), None);
+        assert_eq!(tool_output(&[], Some(&json!(""))), None);
+        assert_eq!(tool_output(&nothing, None), None);
+        assert_eq!(tool_output(&[], None), None);
+    }
+
+    #[test]
+    fn a_long_output_is_cut() {
+        let long = "x".repeat(TOOL_OUTPUT_BYTES + 1);
+        let cut = tool_output(&[text_item(&long)], None).unwrap();
+        assert_eq!(cut.len(), TOOL_OUTPUT_BYTES);
+        let raw = tool_output(&[], Some(&json!(long))).unwrap();
+        assert_eq!(raw.len(), TOOL_OUTPUT_BYTES);
+        let exact = "x".repeat(TOOL_OUTPUT_BYTES);
+        assert_eq!(tool_output(&[text_item(&exact)], None), Some(exact));
+    }
+
+    #[test]
+    fn a_tool_call_update_carries_what_changed_and_nothing_else() {
+        let failed = ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Failed)
+            .content(vec![text_item("error: 1 test failed")]);
+        assert_eq!(
+            updated(failed),
+            Some(Event::ToolCallUpdated {
+                id: "t1".to_owned(),
+                title: None,
+                status: Some(ToolStatus::Failed),
+                kind: None,
+                input: None,
+                output: Some("error: 1 test failed".to_owned()),
+            })
+        );
+        let detailed = ToolCallUpdateFields::new()
+            .title("Read notes.txt".to_owned())
+            .kind(AgentToolKind::Read)
+            .raw_input(json!({ "file_path": "notes.txt" }));
+        assert_eq!(
+            updated(detailed),
+            Some(Event::ToolCallUpdated {
+                id: "t1".to_owned(),
+                title: Some("Read notes.txt".to_owned()),
+                status: None,
+                kind: Some(ToolKind::Read),
+                input: Some("notes.txt".to_owned()),
+                output: None,
+            })
+        );
+        let output_only = ToolCallUpdateFields::new().raw_output(json!("done"));
+        assert_eq!(
+            updated(output_only),
+            Some(Event::ToolCallUpdated {
+                id: "t1".to_owned(),
+                title: None,
+                status: None,
+                kind: None,
+                input: None,
+                output: Some("done".to_owned()),
+            })
+        );
+        let located = ToolCallUpdateFields::new().locations(vec![ToolCallLocation::new("a.rs")]);
+        assert_eq!(
+            updated(located),
+            Some(Event::ToolCallUpdated {
+                id: "t1".to_owned(),
+                title: None,
+                status: None,
+                kind: None,
+                input: Some("a.rs".to_owned()),
+                output: None,
+            })
+        );
+        assert_eq!(updated(ToolCallUpdateFields::new()), None);
+        assert_eq!(
+            updated(ToolCallUpdateFields::new().content(Vec::<ToolCallContent>::new())),
+            None
+        );
+    }
+
+    #[test]
+    fn an_approval_targets_the_command_then_the_location_then_the_path() {
+        let location = || vec![ToolCallLocation::new("src/main.rs")];
+        let command = ToolCallUpdateFields::new()
+            .raw_input(json!({ "command": "rm -rf build", "file_path": "a.txt" }))
+            .locations(location());
+        assert_eq!(
+            approval_target(&command),
+            (Some("rm -rf build".to_owned()), false)
+        );
+        let located = ToolCallUpdateFields::new()
+            .raw_input(json!({ "file_path": "a.txt" }))
+            .locations(location());
+        assert_eq!(
+            approval_target(&located),
+            (Some("src/main.rs".to_owned()), false)
+        );
+        let file =
+            ToolCallUpdateFields::new().raw_input(json!({ "file_path": "a.txt", "path": "b" }));
+        assert_eq!(approval_target(&file), (Some("a.txt".to_owned()), false));
+        let path = ToolCallUpdateFields::new().raw_input(json!({ "path": "b.txt" }));
+        assert_eq!(approval_target(&path), (Some("b.txt".to_owned()), false));
+        let search = ToolCallUpdateFields::new().raw_input(json!({ "pattern": "TODO" }));
+        assert_eq!(approval_target(&search), (None, false));
+        assert_eq!(approval_target(&ToolCallUpdateFields::new()), (None, false));
+    }
+
+    #[test]
+    fn an_approval_target_over_the_cap_is_cut_and_says_so() {
+        let exact = "x".repeat(APPROVAL_TARGET_BYTES);
+        let whole = ToolCallUpdateFields::new().raw_input(json!({ "command": exact }));
+        assert_eq!(approval_target(&whole), (Some(exact), false));
+        let long = "x".repeat(APPROVAL_TARGET_BYTES + 1);
+        let over = ToolCallUpdateFields::new().raw_input(json!({ "command": long }));
+        let (target, cut) = approval_target(&over);
+        assert!(cut);
+        assert_eq!(
+            target.map(|target| target.len()),
+            Some(APPROVAL_TARGET_BYTES)
+        );
+    }
+
+    fn kind_error(kind: &str) -> Error {
+        Error::internal_error().data(json!({ "errorKind": kind }))
+    }
+
+    #[test]
+    fn a_failure_is_a_sign_in_or_a_usage_limit_only_when_the_agent_says_so() {
+        assert_eq!(
+            failure_cause(&Error::auth_required()),
+            Some(FailureCause::SignInRequired)
+        );
+        assert_eq!(
+            failure_cause(&Error::auth_required().data(json!({ "errorKind": "rate_limit" }))),
+            Some(FailureCause::SignInRequired)
+        );
+        for kind in ["authentication_failed", "oauth_org_not_allowed"] {
+            assert_eq!(
+                failure_cause(&kind_error(kind)),
+                Some(FailureCause::SignInRequired),
+                "{kind}"
+            );
+        }
+        for kind in ["rate_limit", "billing_error", "account_on_hold"] {
+            assert_eq!(
+                failure_cause(&kind_error(kind)),
+                Some(FailureCause::UsageLimit),
+                "{kind}"
+            );
+        }
+        for kind in ["worker_shutdown", "server_error", "", "RATE_LIMIT"] {
+            assert_eq!(failure_cause(&kind_error(kind)), None, "{kind}");
+        }
+        assert_eq!(failure_cause(&Error::internal_error()), None);
+        assert_eq!(failure_cause(&failure("rate_limit")), None);
+        assert_eq!(
+            failure_cause(&Error::internal_error().data(json!({ "errorKind": 7 }))),
+            None
+        );
+        assert_eq!(
+            failure_cause(&Error::internal_error().data(json!({ "kind": "rate_limit" }))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_failure_carries_the_message_and_the_cause() {
+        let limit = SessionFailure::from(
+            Error::new(-32603, "You have reached your usage limit.")
+                .data(json!({ "errorKind": "rate_limit", "rateLimit": { "resetsAt": 1 } })),
+        );
+        assert_eq!(limit.message, "You have reached your usage limit.");
+        assert_eq!(limit.cause, Some(FailureCause::UsageLimit));
+
+        let sign_in = SessionFailure::from(Error::auth_required());
+        assert_eq!(sign_in.message, "Authentication required");
+        assert_eq!(sign_in.cause, Some(FailureCause::SignInRequired));
+
+        let other = SessionFailure::from(failure("the agent cannot resume a session"));
+        assert!(other.message.contains("the agent cannot resume a session"));
+        assert_eq!(other.cause, None);
     }
 }

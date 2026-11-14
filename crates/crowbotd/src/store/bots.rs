@@ -515,6 +515,8 @@ mod tests {
     fn failed() -> Event {
         Event::TurnFailed {
             message: "gone".to_owned(),
+            cause: None,
+            provider: None,
         }
     }
 

@@ -174,6 +174,39 @@ pub fn icon_button(
         )
 }
 
+pub fn small_icon_button(
+    id: impl Into<ElementId>,
+    glyph: Icon,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let label = label.into();
+    let (focus, hover, hover_text) = (theme.border_focus, theme.hover, theme.text);
+    div()
+        .id(id)
+        .group(ICON_BUTTON_GROUP)
+        .focusable()
+        .tab_stop(true)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .flex_none()
+        .size(control::XS)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(radius::SM)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .focus_visible(move |style| style.border_color(focus))
+        .tooltip(tooltip(label))
+        .child(
+            icon(glyph, size::ACTION_ICON, theme.text_muted)
+                .group_hover(ICON_BUTTON_GROUP, move |style| style.text_color(hover_text)),
+        )
+}
+
 pub fn avatar(bot: &Bot, diameter: Pixels, glyph: Pixels, theme: &Theme) -> Div {
     div()
         .flex_none()

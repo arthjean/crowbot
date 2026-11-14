@@ -1,15 +1,15 @@
 use std::time::{Duration, Instant};
 
-use crowbot_protocol::{ApprovalClosure, Event, Interruption, ServerMessage, TurnEnd};
+use crowbot_protocol::{ApprovalClosure, Event, Interruption, ServerMessage, TimedEvent, TurnEnd};
 
-use crate::support::Daemon;
+use crate::support::{self, Daemon};
 
 const LOSS_BOUND: Duration = Duration::from_millis(500);
 
-fn message_text(events: &[Event]) -> String {
+fn message_text(events: &[TimedEvent]) -> String {
     events
         .iter()
-        .filter_map(|event| match event {
+        .filter_map(|timed| match &timed.event {
             Event::MessageText(text) => Some(text.as_str()),
             _ => None,
         })
@@ -59,7 +59,7 @@ async fn a_killed_daemon_keeps_the_text_streamed_until_half_a_second_before() {
     );
     assert!(!snapshot.turn_active);
     assert_eq!(
-        snapshot.events.last(),
+        snapshot.events.last().map(|timed| &timed.event),
         Some(&Event::TurnInterrupted {
             cause: Interruption::DaemonRestarted
         })
@@ -76,6 +76,7 @@ async fn a_restart_expires_a_waiting_approval_and_the_next_message_resumes_the_s
         id: approval,
         tool_call_id,
         title,
+        ..
     } = client
         .until_event(|event| matches!(event, Event::ApprovalRequested { .. }))
         .await
@@ -90,7 +91,7 @@ async fn a_restart_expires_a_waiting_approval_and_the_next_message_resumes_the_s
     assert!(!snapshot.turn_active);
     assert!(snapshot.pending_approvals.is_empty());
     assert_eq!(
-        snapshot.events[snapshot.events.len() - 2..],
+        support::events(&snapshot)[snapshot.events.len() - 2..],
         [
             Event::ApprovalClosed {
                 id: approval,

@@ -35,6 +35,7 @@ async fn turn(client: &mut Client, conversation_id: i64, text: &str) -> Vec<Even
         if let ServerMessage::ConversationEvent {
             conversation_id: about,
             event,
+            ..
         } = client.next().await
             && about == conversation_id
         {
@@ -365,7 +366,7 @@ async fn a_database_from_before_bots_migrates_when_the_daemon_starts() {
     // Every stored event is still there, and the conversation goes on.
     let snapshot = client.open(1).await;
     assert_eq!(
-        snapshot.events,
+        support::events(&snapshot),
         [
             Event::UserText("Plan the trip".to_owned()),
             Event::MessageText("Done.".to_owned()),
@@ -567,7 +568,7 @@ async fn a_model_the_agent_does_not_offer_fails_the_turn_and_the_bot_stays_usabl
     let conversation = bot.current_conversation_id;
     client.open(conversation).await;
     client.say(conversation, "config").await;
-    let Event::TurnFailed { message } = client.until_turn_ends().await else {
+    let Event::TurnFailed { message, .. } = client.until_turn_ends().await else {
         panic!("the turn did not fail");
     };
     assert!(message.contains("bogus"), "{message}");
@@ -596,7 +597,7 @@ async fn a_missing_folder_fails_the_turn_by_name_and_the_bot_works_once_it_has_a
     std::fs::remove_dir(&bot.bot.workspace).unwrap();
 
     client.say(conversation, "config").await;
-    let Event::TurnFailed { message } = client.until_turn_ends().await else {
+    let Event::TurnFailed { message, .. } = client.until_turn_ends().await else {
         panic!("the turn did not fail");
     };
     assert_eq!(
@@ -720,7 +721,7 @@ async fn full_access_allows_a_request_at_once_and_records_why() {
 
     // The answer is part of the stored conversation.
     let snapshot = client.open(conversation).await;
-    assert!(snapshot.events.contains(allowed[0]));
+    assert!(support::events(&snapshot).contains(allowed[0]));
     assert!(snapshot.pending_approvals.is_empty());
 }
 
@@ -862,7 +863,7 @@ async fn a_new_chat_becomes_current_and_the_history_lists_the_latest_activity_fi
         snapshot
             .events
             .iter()
-            .filter(|event| event.ends_turn())
+            .filter(|timed| timed.event.ends_turn())
             .count(),
         2
     );

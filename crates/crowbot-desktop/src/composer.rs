@@ -47,6 +47,7 @@ actions!(
     composer,
     [
         Submit,
+        SubmitWithModifier,
         InsertLineBreak,
         Backspace,
         Delete,
@@ -92,6 +93,7 @@ pub fn bind_keys(cx: &mut App) {
     let context = Some(KEY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("enter", Submit, context),
+        KeyBinding::new(secondary!("enter"), SubmitWithModifier, context),
         KeyBinding::new("shift-enter", InsertLineBreak, context),
         KeyBinding::new("backspace", Backspace, context),
         KeyBinding::new("delete", Delete, context),
@@ -136,6 +138,7 @@ pub struct Composer {
     reveal_cursor: bool,
     style: InputStyle,
     enabled: bool,
+    enter_submits: bool,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -286,6 +289,7 @@ impl Composer {
             reveal_cursor: false,
             style,
             enabled: true,
+            enter_submits: true,
         }
     }
 
@@ -298,6 +302,10 @@ impl Composer {
             self.enabled = enabled;
             cx.notify();
         }
+    }
+
+    pub fn set_enter_submits(&mut self, enter_submits: bool) {
+        self.enter_submits = enter_submits;
     }
 
     fn accepted(&self, text: &str) -> String {
@@ -435,7 +443,20 @@ impl Composer {
         }
     }
 
-    fn submit(&mut self, _: &Submit, _window: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enter_submits || self.style.single_line {
+            cx.emit(ComposerEvent::Submit);
+        } else {
+            self.replace_text_in_range(None, "\n", window, cx);
+        }
+    }
+
+    fn submit_with_modifier(
+        &mut self,
+        _: &SubmitWithModifier,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.emit(ComposerEvent::Submit);
     }
 
@@ -570,6 +591,8 @@ impl Composer {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_owned(),
             ));
+        } else {
+            cx.propagate();
         }
     }
 
@@ -1089,6 +1112,7 @@ impl Render for Composer {
             })
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::submit_with_modifier))
             .on_action(cx.listener(Self::insert_line_break))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))

@@ -5,6 +5,7 @@
 
 mod bots;
 mod claude;
+mod conversation;
 mod endpoint;
 mod queue;
 mod recovery;

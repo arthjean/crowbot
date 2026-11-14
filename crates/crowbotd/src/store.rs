@@ -10,10 +10,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
     ApprovalClosure, ConversationSummary, Event, Interruption, QueueState, QueuedMessage,
+    TimedEvent,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -90,6 +91,10 @@ CREATE TABLE preferences (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+";
+
+const SCHEMA_V5: &str = "
+ALTER TABLE conversations ADD COLUMN draft TEXT NOT NULL DEFAULT '';
 ";
 
 const UNFINISHED_TURNS: &str = "
@@ -172,6 +177,11 @@ pub struct Conversation {
     pub session_revision: Option<i64>,
 }
 
+pub struct EventsPage {
+    pub events: Vec<TimedEvent>,
+    pub older: Option<i64>,
+}
+
 pub struct Store {
     connection: Connection,
 }
@@ -218,6 +228,9 @@ impl Store {
         }
         if version < 4 {
             transaction.execute_batch(SCHEMA_V4)?;
+        }
+        if version < 5 {
+            transaction.execute_batch(SCHEMA_V5)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -285,6 +298,7 @@ impl Store {
                     id,
                     tool_call_id,
                     title,
+                    ..
                 } => open.push((id, tool_call_id, title)),
                 Event::ApprovalResolved {
                     id: Some(settled), ..
@@ -508,6 +522,67 @@ impl Store {
         Ok(())
     }
 
+    pub fn events_page(
+        &self,
+        conversation_id: i64,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<EventsPage, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, payload, created_at_ms FROM events
+             WHERE conversation_id = ?1 AND id < ?2
+             ORDER BY id DESC LIMIT ?3",
+        )?;
+        let wanted = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut rows = statement
+            .query_map(
+                params![conversation_id, before.unwrap_or(i64::MAX), wanted],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        rows.reverse();
+        let older = rows.first().map(|(id, ..)| *id).filter(|_| more);
+        let events = rows
+            .into_iter()
+            .map(|(_, payload, at_ms)| {
+                Ok(TimedEvent {
+                    at_ms,
+                    event: serde_json::from_str(&payload)?,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok(EventsPage { events, older })
+    }
+
+    pub fn draft(&self, conversation_id: i64) -> Result<String, StoreError> {
+        let draft = self
+            .connection
+            .query_row(
+                "SELECT draft FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(draft.unwrap_or_default())
+    }
+
+    pub fn set_draft(&self, conversation_id: i64, text: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE conversations SET draft = ?2 WHERE id = ?1 AND draft IS NOT ?2",
+            params![conversation_id, text],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn events(&self, conversation_id: i64) -> Result<Vec<Event>, StoreError> {
         let mut statement = self
             .connection
@@ -726,6 +801,8 @@ mod tests {
                 id: "t1".to_owned(),
                 title: "Read".to_owned(),
                 status: Some(ToolStatus::Pending),
+                kind: Some(crowbot_protocol::ToolKind::Read),
+                input: Some("notes.txt".to_owned()),
             },
             Event::MessageText("hi".to_owned()),
             Event::TurnEnded(TurnEnd::Completed),
@@ -1003,6 +1080,9 @@ mod tests {
             id: id.to_owned(),
             tool_call_id: format!("tool-{id}"),
             title: Some("Write notes.txt".to_owned()),
+            target: Some("notes.txt".to_owned()),
+            folder: Some("/work".to_owned()),
+            cut: false,
         }
     }
 
@@ -1140,6 +1220,181 @@ mod tests {
         store.delete_queued(id, queued).unwrap();
         store.enqueue(id, "two").unwrap();
         assert!(!store.queue(id).unwrap().paused);
+    }
+
+    fn page_texts(page: &EventsPage) -> Vec<String> {
+        page.events
+            .iter()
+            .map(|timed| match &timed.event {
+                Event::UserText(text) => text.clone(),
+                other => panic!("unexpected event {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_page_holds_the_newest_events_in_order_and_tells_where_older_ones_start() {
+        let store = store();
+        let id = conversation(&store);
+        let other = conversation(&store);
+        let mut rows = Vec::new();
+        for index in 0..7 {
+            store
+                .append(other, &Event::UserText(format!("other {index}")))
+                .unwrap();
+            rows.push(
+                store
+                    .append(id, &Event::UserText(format!("m{index}")))
+                    .unwrap(),
+            );
+        }
+
+        let newest = store.events_page(id, None, 3).unwrap();
+        assert_eq!(page_texts(&newest), ["m4", "m5", "m6"]);
+        assert_eq!(newest.older, Some(rows[4]));
+        assert!(newest.events.iter().all(|timed| timed.at_ms > 0));
+
+        let middle = store.events_page(id, newest.older, 3).unwrap();
+        assert_eq!(page_texts(&middle), ["m1", "m2", "m3"]);
+        assert_eq!(middle.older, Some(rows[1]));
+
+        let oldest = store.events_page(id, middle.older, 3).unwrap();
+        assert_eq!(page_texts(&oldest), ["m0"]);
+        assert_eq!(oldest.older, None);
+
+        let exact = store.events_page(id, None, 7).unwrap();
+        assert_eq!(exact.events.len(), 7);
+        assert_eq!(exact.older, None);
+        let nothing = store.events_page(id, Some(rows[0]), 3).unwrap();
+        assert!(nothing.events.is_empty());
+        assert_eq!(nothing.older, None);
+        assert!(store.events_page(42, None, 3).unwrap().events.is_empty());
+    }
+
+    #[test]
+    fn a_page_gives_each_event_the_time_it_was_stored() {
+        let store = store();
+        let id = conversation(&store);
+        for (payload, at_ms) in [("first", 1_000), ("second", 2_500)] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, 'user_text', ?2, ?3)",
+                    params![
+                        id,
+                        serde_json::to_string(&Event::UserText(payload.to_owned())).unwrap(),
+                        at_ms
+                    ],
+                )
+                .unwrap();
+        }
+        let page = store.events_page(id, None, 10).unwrap();
+        assert_eq!(
+            page.events,
+            vec![
+                TimedEvent {
+                    at_ms: 1_000,
+                    event: Event::UserText("first".to_owned()),
+                },
+                TimedEvent {
+                    at_ms: 2_500,
+                    event: Event::UserText("second".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_draft_is_stored_with_its_conversation() {
+        let store = store();
+        let id = conversation(&store);
+        let other = conversation(&store);
+        assert_eq!(store.draft(id).unwrap(), "");
+        store.set_draft(id, "half a thought\nand a line").unwrap();
+        assert_eq!(store.draft(id).unwrap(), "half a thought\nand a line");
+        assert_eq!(store.draft(other).unwrap(), "");
+        store.set_draft(id, "").unwrap();
+        assert_eq!(store.draft(id).unwrap(), "");
+        store.set_draft(42, "nowhere").unwrap();
+        assert_eq!(store.draft(42).unwrap(), "");
+    }
+
+    #[test]
+    fn a_version_4_database_gains_drafts_and_keeps_its_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection.execute_batch(SCHEMA_V2).unwrap();
+        connection.execute_batch(SCHEMA_V3).unwrap();
+        connection.execute_batch(SCHEMA_V4).unwrap();
+        connection.pragma_update(None, "user_version", 4).unwrap();
+        connection
+            .execute_batch(
+                r#"INSERT INTO bots (name, avatar_color, avatar_glyph, provider, workspace, created_at_ms)
+                    VALUES ('Atlas', '#3b82f6', 'A', 'claude', '/work', 5);
+                 INSERT INTO conversations (bot_id, provider, cwd, created_at_ms)
+                    VALUES (1, 'claude', '/work', 6);
+                 UPDATE bots SET current_conversation_id = 1;
+                 INSERT INTO preferences (key, value) VALUES ('appearance', 'dark');
+                 INSERT INTO queue (conversation_id, text, created_at_ms) VALUES (1, 'later', 9);
+                 INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES
+                    (1, 'user_text', '{"type":"user_text","data":"kept"}', 7),
+                    (1, 'tool_call_started', '{"type":"tool_call_started","data":{"id":"t1","title":"Read","status":"pending"}}', 8),
+                    (1, 'tool_call_updated', '{"type":"tool_call_updated","data":{"id":"t1","title":null,"status":"completed"}}', 9),
+                    (1, 'approval_requested', '{"type":"approval_requested","data":{"id":"a1","tool_call_id":"t1","title":"Write"}}', 10),
+                    (1, 'turn_failed', '{"type":"turn_failed","data":{"message":"gone"}}', 11);"#,
+            )
+            .unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        assert_eq!(store.bots().unwrap().len(), 1);
+        assert_eq!(texts(&store, 1), ["later"]);
+        assert_eq!(
+            store.preferences().unwrap().appearance,
+            crowbot_protocol::Appearance::Dark
+        );
+        assert_eq!(store.draft(1).unwrap(), "");
+        store.set_draft(1, "new").unwrap();
+        assert_eq!(store.draft(1).unwrap(), "new");
+
+        let page = store.events_page(1, None, 200).unwrap();
+        assert_eq!(page.older, None);
+        let times: Vec<i64> = page.events.iter().map(|timed| timed.at_ms).collect();
+        assert_eq!(times, [7, 8, 9, 10, 11]);
+        let events: Vec<Event> = page.events.into_iter().map(|timed| timed.event).collect();
+        assert_eq!(
+            events,
+            vec![
+                Event::UserText("kept".to_owned()),
+                Event::ToolCallStarted {
+                    id: "t1".to_owned(),
+                    title: "Read".to_owned(),
+                    status: Some(ToolStatus::Pending),
+                    kind: None,
+                    input: None,
+                },
+                Event::ToolCallUpdated {
+                    id: "t1".to_owned(),
+                    title: None,
+                    status: Some(ToolStatus::Completed),
+                    kind: None,
+                    input: None,
+                    output: None,
+                },
+                Event::ApprovalRequested {
+                    id: "a1".to_owned(),
+                    tool_call_id: "t1".to_owned(),
+                    title: Some("Write".to_owned()),
+                    target: None,
+                    folder: None,
+                    cut: false,
+                },
+                Event::TurnFailed {
+                    message: "gone".to_owned(),
+                    cause: None,
+                    provider: None,
+                },
+            ]
+        );
     }
 
     #[test]

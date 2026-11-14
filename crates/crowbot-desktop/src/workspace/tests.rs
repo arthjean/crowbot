@@ -1,6 +1,9 @@
+mod conversation;
+
 use crowbot_protocol::{
     Appearance, BotPatch, BotState, BotSummary, ClientMessage, ConversationSnapshot,
-    ConversationSummary, Event, Preferences, PreferencesPatch, QueueState, ServerMessage, TurnEnd,
+    ConversationSummary, Event, Preferences, PreferencesPatch, QueueState, ServerMessage,
+    TimedEvent, TurnEnd,
 };
 use gpui::{
     Bounds, Entity, KeyUpEvent, Keystroke, Modifiers, MouseButton, Pixels, TestAppContext,
@@ -11,6 +14,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use super::*;
 use crate::sidebar::tests::summary;
 use crate::theme::layout;
+use crate::transcript::tests::NOON;
 
 struct Daemon {
     events: UnboundedSender<ConnectionEvent>,
@@ -53,6 +57,17 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, Daemon, &mut VisualTestC
 }
 
 fn snapshot(id: i64, bot_id: i64, events: Vec<Event>) -> ConversationSnapshot {
+    let timed = events
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| TimedEvent {
+            at_ms: NOON + index as i64 * 1_000,
+            event,
+        });
+    timed_snapshot(id, bot_id, timed.collect())
+}
+
+fn timed_snapshot(id: i64, bot_id: i64, events: Vec<TimedEvent>) -> ConversationSnapshot {
     ConversationSnapshot {
         conversation: ConversationSummary {
             id,
@@ -62,6 +77,8 @@ fn snapshot(id: i64, bot_id: i64, events: Vec<Event>) -> ConversationSnapshot {
             last_activity_ms: 0,
         },
         events,
+        older: None,
+        draft: String::new(),
         turn_active: false,
         pending_approvals: Vec::new(),
         queue: QueueState::default(),
@@ -204,7 +221,7 @@ fn a_dropped_link_leaves_the_panes_inert_and_a_reconnect_reloads_without_duplica
     );
     let items = |cx: &mut VisualTestContext| {
         workspace.read_with(cx, |this, _| {
-            this.open.as_ref().map(|open| open.transcript.items().len())
+            this.open.as_ref().map(|open| open.transcript.rows().len())
         })
     };
     let before = items(cx);
@@ -640,6 +657,7 @@ fn the_badge_names_the_model_of_the_next_turn_while_a_turn_runs(cx: &mut TestApp
         ServerMessage::ConversationEvent {
             conversation_id: 10,
             event: Event::TurnEnded(TurnEnd::Completed),
+            at_ms: NOON,
         },
         cx,
     );
@@ -690,6 +708,7 @@ fn the_sidebar_is_restored_from_the_preferences_and_saved_when_it_changes(cx: &m
             appearance: Appearance::Light,
             sidebar_width: Some(320),
             sidebar_collapsed: false,
+            ..Preferences::default()
         }),
         cx,
     );
@@ -701,6 +720,7 @@ fn the_sidebar_is_restored_from_the_preferences_and_saved_when_it_changes(cx: &m
             appearance: Appearance::Dark,
             sidebar_width: Some(320),
             sidebar_collapsed: true,
+            ..Preferences::default()
         }),
         cx,
     );

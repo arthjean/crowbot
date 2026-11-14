@@ -38,7 +38,7 @@ async fn a_claude_bot_answers_from_its_instructions_on_its_model() {
         if let ServerMessage::ConversationEvent { event, .. } = client.next_within_minutes().await {
             match event {
                 Event::MessageText(text) => answer.push_str(&text),
-                Event::TurnFailed { message } => panic!("the turn failed: {message}"),
+                Event::TurnFailed { message, .. } => panic!("the turn failed: {message}"),
                 event if event.ends_turn() => break,
                 _ => {}
             }

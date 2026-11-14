@@ -1,43 +1,59 @@
 mod bot_list;
+mod compose;
 mod conversation;
 mod header;
 mod overlays;
+mod rows;
 mod screens;
+mod steps;
 #[cfg(test)]
 mod tests;
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::time::Instant;
 
 use crowbot_protocol::{
     ApprovalDecision, BotDraft, BotPatch, BotState, BotSummary, ClientMessage, ConversationSummary,
-    Event, Preferences, QueueState, ServerMessage,
+    Event, MESSAGE_LENGTH, PermissionLevel, Preferences, QueueState, SendShortcut, ServerMessage,
+    TimedEvent,
 };
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FollowMode, KeyBinding, KeyDownEvent,
-    ListAlignment, ListState, Pixels, Point, Role, SharedString, Subscription, Task, Window,
-    actions, div, prelude::*,
+    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, KeyBinding,
+    KeyDownEvent, ListAlignment, ListOffset, ListState, Pixels, Point, Role, ScrollHandle,
+    SharedString, Subscription, Task, Window, actions, div, prelude::*,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::bots;
-use crate::composer::{Composer, ComposerEvent, InputStyle};
+use crate::composer::{self, Composer, ComposerEvent, InputStyle};
 use crate::connection::{Connection, ConnectionEvent};
+use crate::frames::{self, FrameLog};
 use crate::layout::SidebarLayout;
+use crate::markdown::{Document, SharedSelection};
 use crate::menu::{self, MenuAction, MenuEntry};
+use crate::reveal::Reveal;
 use crate::sidebar;
-use crate::theme::{Theme, font, layout, text};
-use crate::transcript::Transcript;
+use crate::theme::{Theme, duration, font, layout, text};
+use crate::transcript::{RowKind, Transcript};
 
-actions!(workspace, [FocusNext, FocusPrevious]);
+actions!(workspace, [FocusNext, FocusPrevious, CopySelection]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrevious, None),
+        KeyBinding::new(COPY_KEYS, CopySelection, None),
     ]);
 }
+
+#[cfg(target_os = "macos")]
+const COPY_KEYS: &str = "cmd-c";
+#[cfg(not(target_os = "macos"))]
+const COPY_KEYS: &str = "ctrl-c";
+
+const HEAD: usize = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Link {
@@ -63,6 +79,17 @@ enum Screen {
     Shell,
 }
 
+struct RowText {
+    document: Document,
+    reveal: Reveal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Copied {
+    Message(i64),
+    Code(i64, usize),
+}
+
 struct OpenConversation {
     id: i64,
     title: Option<String>,
@@ -71,6 +98,31 @@ struct OpenConversation {
     queue: QueueState,
     at_end: Rc<Cell<bool>>,
     turn_model: Option<Option<String>>,
+    texts: HashMap<i64, RowText>,
+    toggled_steps: HashSet<i64>,
+    shown_outputs: HashSet<(i64, usize)>,
+    step_lists: HashMap<i64, ScrollHandle>,
+    answering: HashSet<String>,
+    new_messages: usize,
+    loading_older: bool,
+    older_error: Option<SharedString>,
+}
+
+impl OpenConversation {
+    fn distance_from_end(&self) -> f32 {
+        f32::from(
+            self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y,
+        )
+    }
+
+    fn away_from_end(&self) -> bool {
+        !self.list.is_following_tail() && self.distance_from_end() > layout::STICK_THRESHOLD
+    }
+
+    fn messages(&self) -> usize {
+        let rows = self.transcript.rows().iter();
+        rows.filter(|row| row.is_message()).count()
+    }
 }
 
 struct PendingChange {
@@ -120,6 +172,20 @@ pub struct Workspace {
     composer: Entity<Composer>,
     search: Entity<Composer>,
     editing: Option<i64>,
+    selection: SharedSelection,
+    copied: Option<Copied>,
+    copied_reset: Option<Task<()>>,
+    send_error: Option<SharedString>,
+    unconfirmed: VecDeque<(i64, String)>,
+    saved_draft: String,
+    typed: String,
+    draft_save: Option<Task<()>>,
+    composer_text: Option<String>,
+    confirm_full_access: Option<String>,
+    clock: Rc<dyn Fn() -> Instant>,
+    frames: Option<Rc<FrameLog>>,
+    full_access_focus: FocusHandle,
+    full_access_confirm_focus: FocusHandle,
     notice: Option<SharedString>,
     menu: Option<Menu>,
     menu_focus: FocusHandle,
@@ -154,7 +220,12 @@ impl Workspace {
                 },
             ),
             cx.observe(&search, |_, _, cx| cx.notify()),
+            cx.observe(&composer, |this, _, cx| this.schedule_draft_save(cx)),
             cx.observe_window_appearance(window, |this, _, cx| this.apply_theme(cx)),
+            cx.on_app_quit(|this, cx| {
+                this.save_draft();
+                cx.background_executor().timer(duration::QUIT_FLUSH)
+            }),
         ];
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
@@ -186,6 +257,20 @@ impl Workspace {
             composer,
             search,
             editing: None,
+            selection: SharedSelection::default(),
+            copied: None,
+            copied_reset: None,
+            send_error: None,
+            unconfirmed: VecDeque::new(),
+            saved_draft: String::new(),
+            typed: String::new(),
+            draft_save: None,
+            composer_text: None,
+            confirm_full_access: None,
+            clock: Rc::new(Instant::now),
+            frames: FrameLog::from_environment(),
+            full_access_focus: cx.focus_handle(),
+            full_access_confirm_focus: cx.focus_handle(),
             notice: None,
             menu: None,
             menu_focus: cx.focus_handle(),
@@ -238,6 +323,8 @@ impl Workspace {
         if !live {
             self.menu = None;
             self.confirm_delete = None;
+            self.confirm_full_access = None;
+            self.link_lost();
         }
         self.composer
             .update(cx, |composer, cx| composer.set_enabled(live, cx));
@@ -362,12 +449,14 @@ impl Workspace {
                 if self.selected != Some(id) {
                     return;
                 }
+                let reopened = self.open.as_ref().is_some_and(|open| open.id == id);
                 let title = snapshot.conversation.title.clone();
                 let queue = snapshot.queue.clone();
                 let turn_model = snapshot.turn_model.clone();
+                let draft = snapshot.draft.clone();
                 let transcript = Transcript::from_snapshot(snapshot);
                 let list = ListState::new(
-                    transcript.items().len(),
+                    transcript.rows().len() + HEAD,
                     ListAlignment::Top,
                     layout::LIST_OVERDRAW,
                 );
@@ -391,7 +480,22 @@ impl Workspace {
                     queue,
                     at_end,
                     turn_model,
+                    texts: HashMap::new(),
+                    toggled_steps: HashSet::new(),
+                    shown_outputs: HashSet::new(),
+                    step_lists: HashMap::new(),
+                    answering: HashSet::new(),
+                    new_messages: 0,
+                    loading_older: false,
+                    older_error: None,
                 });
+                self.selection.take();
+                self.confirm_full_access = None;
+                if !reopened {
+                    self.saved_draft.clone_from(&draft);
+                    self.typed.clone_from(&draft);
+                    self.composer_text = Some(draft);
+                }
                 self.load_error = None;
                 self.conversation_shown();
                 self.forget_started_edit();
@@ -408,7 +512,95 @@ impl Workspace {
             ServerMessage::ConversationEvent {
                 conversation_id,
                 event,
-            } => self.apply(conversation_id, event),
+                at_ms,
+            } => self.apply(conversation_id, event, at_ms),
+            ServerMessage::OlderEvents {
+                conversation_id,
+                events,
+                older,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    let top = open.list.logical_scroll_top();
+                    let first = top.item_ix.saturating_sub(HEAD);
+                    let rows = open.transcript.rows().iter().enumerate();
+                    let anchor = rows
+                        .skip(first)
+                        .find(|(_, row)| !matches!(row.kind, RowKind::Day))
+                        .map(|(index, row)| (index, index + HEAD == top.item_ix, row.key));
+                    let added = open.transcript.prepend(events, older);
+                    open.list.splice(HEAD..HEAD, added);
+                    open.list.remeasure();
+                    let rows = open.transcript.rows();
+                    if let Some((old_index, same_row, key)) = anchor
+                        && !open.list.is_following_tail()
+                    {
+                        // A row that the older page completes (the steps or the
+                        // answer of a turn the page cut) takes a new key: it
+                        // still sits as far from the end as before.
+                        let index = rows
+                            .iter()
+                            .position(|row| row.key == key)
+                            .unwrap_or(old_index + added)
+                            .min(rows.len().saturating_sub(1));
+                        open.list.scroll_to(ListOffset {
+                            item_ix: HEAD + index,
+                            offset_in_item: if same_row {
+                                top.offset_in_item
+                            } else {
+                                Pixels::ZERO
+                            },
+                        });
+                    }
+                    open.loading_older = false;
+                    open.older_error = None;
+                }
+            }
+            ServerMessage::OlderEventsFailed {
+                conversation_id,
+                message,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    open.loading_older = false;
+                    open.older_error = Some(message.into());
+                    open.list.remeasure_items(0..HEAD);
+                }
+            }
+            ServerMessage::MessageAccepted { conversation_id } => {
+                // Two conversations answer in no fixed order: the accepted
+                // message is the oldest one sent to this conversation.
+                if let Some(index) = self
+                    .unconfirmed
+                    .iter()
+                    .position(|(sent_to, _)| *sent_to == conversation_id)
+                {
+                    self.unconfirmed.remove(index);
+                }
+            }
+            ServerMessage::MessageRefused {
+                conversation_id,
+                message,
+            } => {
+                let refused = self
+                    .unconfirmed
+                    .iter()
+                    .position(|(sent_to, _)| *sent_to == conversation_id)
+                    .and_then(|index| self.unconfirmed.remove(index));
+                if let Some((_, text)) = refused {
+                    self.give_back(text);
+                }
+                self.send_error = Some(message.into());
+            }
+            ServerMessage::ApprovalNotResolved {
+                conversation_id,
+                approval_id,
+                message,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    open.answering.remove(&approval_id);
+                    open.list.remeasure();
+                }
+                self.notice = Some(format!("The answer was not sent: {message}").into());
+            }
             ServerMessage::TurnModel {
                 conversation_id,
                 model,
@@ -427,7 +619,47 @@ impl Workspace {
         self.selected.is_some() && self.open.is_none() && self.load_error.is_none()
     }
 
+    fn give_back(&mut self, text: String) {
+        let typed = self
+            .composer_text
+            .clone()
+            .unwrap_or_else(|| self.typed.clone());
+        self.composer_text = Some(if typed.is_empty() {
+            text
+        } else {
+            format!("{text}\n{typed}")
+        });
+    }
+
+    fn link_lost(&mut self) {
+        let open_id = self.open.as_ref().map(|open| open.id);
+        let unsent: Vec<String> = std::mem::take(&mut self.unconfirmed)
+            .into_iter()
+            .filter(|(sent_to, _)| Some(*sent_to) == open_id)
+            .map(|(_, text)| text)
+            .collect();
+        if !unsent.is_empty() {
+            self.composer_text = Some(unsent.join("\n"));
+            self.send_error =
+                Some("The message was not sent: the daemon cannot be reached.".into());
+        }
+        if let Some(open) = self.open.as_mut() {
+            open.loading_older = false;
+            if !open.answering.is_empty() {
+                open.answering.clear();
+                open.list.remeasure();
+                self.notice = Some("The answer was not sent: the daemon cannot be reached.".into());
+            }
+        }
+    }
+
     fn fail(&mut self, message: String) {
+        if let Some(open) = self.open.as_mut()
+            && !open.answering.is_empty()
+        {
+            open.answering.clear();
+            open.list.remeasure();
+        }
         if !self.pending.is_empty() {
             self.roll_back();
             self.notice = Some(format!("The change was not saved: {message}").into());
@@ -502,22 +734,80 @@ impl Workspace {
         self.select(current);
     }
 
-    fn apply(&mut self, conversation_id: i64, event: Event) {
+    fn apply(&mut self, conversation_id: i64, event: Event, at_ms: i64) {
         let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) else {
             return;
         };
+        let now = (self.clock)();
         let marks_read = bots::marks_read(&event);
-        if event.ends_turn() {
+        let ends = event.ends_turn();
+        if ends {
             open.turn_model = None;
         }
-        let before = open.transcript.items().len();
-        let first_changed = open.transcript.apply(event);
-        let after = open.transcript.items().len();
-        if first_changed < before {
-            open.list.remeasure_items(first_changed..before);
+        let streamed = match &event {
+            Event::MessageText(text) => Some(text.len()),
+            _ => None,
+        };
+        match &event {
+            Event::ApprovalResolved { id: Some(id), .. } | Event::ApprovalClosed { id, .. } => {
+                open.answering.remove(id);
+                // A request that was settled elsewhere no longer backs the
+                // confirmation to move the bot to Full access.
+                if self.confirm_full_access.as_ref() == Some(id) {
+                    self.confirm_full_access = None;
+                }
+            }
+            _ => {}
         }
-        if after > before {
-            open.list.splice(before..before, after - before);
+        if ends {
+            self.confirm_full_access = None;
+        }
+        let away = (!open.list.is_following_tail()).then(|| open.messages());
+        let change = open.transcript.apply(TimedEvent { at_ms, event });
+        if change.first < change.before {
+            open.list
+                .remeasure_items(change.first + HEAD..change.before + HEAD);
+        }
+        if change.after > change.before {
+            let end = change.before + HEAD;
+            open.list.splice(end..end, change.after - change.before);
+        }
+        if let Some(length) = streamed {
+            let rows = open.transcript.rows().iter().rev();
+            let answer = rows.take_while(|row| !matches!(row.kind, RowKind::User { .. }));
+            let streaming = answer.into_iter().find_map(|row| match &row.kind {
+                RowKind::Answer { text, .. } => Some((row.key, text.len())),
+                _ => None,
+            });
+            if let Some((key, received)) = streaming {
+                let text = open.texts.entry(key).or_insert_with(|| RowText {
+                    document: Document::default(),
+                    reveal: Reveal::shown_from(received.saturating_sub(length), now),
+                });
+                text.reveal.receive(received, now);
+            }
+        }
+        if ends {
+            for text in open.texts.values_mut() {
+                text.reveal.finish(now);
+            }
+            let rows = open.transcript.rows();
+            for row in &rows[change.first.min(rows.len())..] {
+                open.toggled_steps.remove(&row.key);
+            }
+        }
+        if let Some(before) = away {
+            if open.distance_from_end() <= layout::STICK_THRESHOLD {
+                open.list.set_follow_mode(FollowMode::Tail);
+                if !open.at_end.replace(true) && self.history.is_none() {
+                    self.connection.send(ClientMessage::MarkRead {
+                        conversation_id,
+                        following: true,
+                    });
+                }
+            } else {
+                open.new_messages += open.messages().saturating_sub(before);
+            }
         }
         if !marks_read {
             return;
@@ -546,6 +836,7 @@ impl Workspace {
             return;
         }
         if let Some(previous) = self.selected {
+            self.save_draft();
             self.connection.send(ClientMessage::CloseConversation {
                 conversation_id: previous,
             });
@@ -554,6 +845,12 @@ impl Workspace {
         self.open = None;
         self.load_error = None;
         self.editing = None;
+        self.send_error = None;
+        self.confirm_full_access = None;
+        self.composer_text = Some(String::new());
+        self.saved_draft.clear();
+        self.typed.clear();
+        self.selection.take();
         self.connection
             .send(ClientMessage::OpenConversation { conversation_id });
     }
@@ -579,6 +876,171 @@ impl Workspace {
             && self.open.is_some()
             && self.history.is_none()
             && !self.composer.read(cx).text().trim().is_empty()
+    }
+
+    fn schedule_draft_save(&mut self, cx: &mut Context<Self>) {
+        self.typed = self.composer.read(cx).text().to_owned();
+        self.draft_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration::DRAFT_SAVE).await;
+            this.update(cx, |this, _| this.save_draft()).ok();
+        }));
+        cx.notify();
+    }
+
+    fn save_draft(&mut self) {
+        self.draft_save = None;
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        if !self.live()
+            || self.editing.is_some()
+            || self.typed == self.saved_draft
+            || self.typed.chars().count() > MESSAGE_LENGTH
+        {
+            return;
+        }
+        self.saved_draft.clone_from(&self.typed);
+        self.connection.send(ClientMessage::SetDraft {
+            conversation_id: open.id,
+            text: self.typed.clone(),
+        });
+    }
+
+    fn load_older(&mut self) {
+        let live = self.live();
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        if let Some(before) = open.transcript.older()
+            && live
+            && !open.loading_older
+        {
+            open.loading_older = true;
+            open.older_error = None;
+            open.list.remeasure_items(0..HEAD);
+            self.connection.send(ClientMessage::LoadOlderEvents {
+                conversation_id: open.id,
+                before,
+            });
+        }
+    }
+
+    fn follow_scroll(&mut self) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        if open.list.is_following_tail() {
+            open.new_messages = 0;
+        }
+        let fits = open.list.viewport_bounds().size.height > Pixels::ZERO
+            && open.list.max_offset_for_scrollbar().y <= Pixels::ZERO;
+        let at_top =
+            !open.list.is_following_tail() && open.list.logical_scroll_top().item_ix < HEAD;
+        if (at_top || fits) && open.older_error.is_none() {
+            self.load_older();
+        }
+    }
+
+    fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            open.list.set_follow_mode(FollowMode::Tail);
+            open.new_messages = 0;
+            if !open.at_end.replace(true) && self.history.is_none() {
+                self.connection.send(ClientMessage::MarkRead {
+                    conversation_id: open.id,
+                    following: true,
+                });
+            }
+            cx.notify();
+        }
+    }
+
+    fn toggle_steps(&mut self, key: i64, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            if !open.toggled_steps.remove(&key) {
+                open.toggled_steps.insert(key);
+            }
+            open.list.remeasure();
+            cx.notify();
+        }
+    }
+
+    fn toggle_output(&mut self, key: i64, step: usize, cx: &mut Context<Self>) {
+        if let Some(open) = self.open.as_mut() {
+            if !open.shown_outputs.remove(&(key, step)) {
+                open.shown_outputs.insert((key, step));
+            }
+            open.list.remeasure();
+            cx.notify();
+        }
+    }
+
+    fn copy(&mut self, what: Copied, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied = Some(what);
+        self.copied_reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(duration::COPIED).await;
+            this.update(cx, |this, cx| {
+                this.copied = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn copy_message(&mut self, key: i64, cx: &mut Context<Self>) {
+        let source = self.open.as_ref().and_then(|open| {
+            let row = open.transcript.rows().iter().find(|row| row.key == key)?;
+            match &row.kind {
+                RowKind::User { text }
+                | RowKind::Answer { text, .. }
+                | RowKind::Thought { text } => Some(text.trim_matches('\n').to_owned()),
+                _ => None,
+            }
+        });
+        if let Some(source) = source {
+            self.copy(Copied::Message(key), source, cx);
+        }
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let selection = (*self.selection.borrow())?;
+        let rendered = self
+            .open
+            .as_ref()?
+            .texts
+            .get(&selection.key)?
+            .document
+            .text();
+        let clamp = |offset: usize| {
+            let mut offset = offset.min(rendered.len());
+            while !rendered.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            offset
+        };
+        let range = selection.range();
+        let (start, end) = (clamp(range.start), clamp(range.end));
+        (start < end).then(|| rendered[start..end].to_owned())
+    }
+
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selected_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn open_link(&mut self, target: &str, cx: &mut Context<Self>) {
+        let scheme = target
+            .split_once(':')
+            .map(|(scheme, _)| scheme.to_ascii_lowercase());
+        if matches!(scheme.as_deref(), Some("http" | "https" | "mailto")) {
+            cx.open_url(target);
+        } else {
+            self.notice = Some(format!("This link was not opened: {target}").into());
+        }
+        cx.notify();
     }
 
     fn can_stop(&self, cx: &App) -> bool {
@@ -635,23 +1097,41 @@ impl Workspace {
         if !self.can_send(cx) {
             return;
         }
-        let Some(open) = self.open.as_ref() else {
+        let Some(open) = self.open.as_mut() else {
             return;
         };
         let text = self.composer.read(cx).text().to_owned();
+        let length = text.chars().count();
+        if length > MESSAGE_LENGTH {
+            self.send_error = Some(
+                format!(
+                    "A message can hold 100,000 characters at most. This one has {}.",
+                    grouped(length)
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
         self.connection.send(match self.editing.take() {
             Some(queue_id) => ClientMessage::EditQueuedMessage {
                 conversation_id: open.id,
                 queue_id,
                 text,
             },
-            None => ClientMessage::SendMessage {
-                conversation_id: open.id,
-                text,
-            },
+            None => {
+                self.unconfirmed.push_back((open.id, text.clone()));
+                self.saved_draft.clear();
+                ClientMessage::SendMessage {
+                    conversation_id: open.id,
+                    text,
+                }
+            }
         });
         open.list.set_follow_mode(FollowMode::Tail);
+        open.new_messages = 0;
         self.notice = None;
+        self.send_error = None;
         self.composer
             .update(cx, |composer, cx| composer.clear(window, cx));
         self.focus_composer(window, cx);
@@ -733,13 +1213,60 @@ impl Workspace {
     }
 
     fn resolve_approval(&mut self, approval_id: String, decision: ApprovalDecision) {
-        if let Some(open) = self.open.as_ref()
-            && self.live()
+        let live = self.live();
+        if let Some(open) = self.open.as_mut()
+            && live
+            && open.answering.insert(approval_id.clone())
         {
+            open.list.remeasure();
             self.connection.send(ClientMessage::ResolveApproval {
                 conversation_id: open.id,
                 approval_id,
                 decision,
+            });
+        }
+    }
+
+    fn ask_full_access(
+        &mut self,
+        approval_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.live() {
+            self.confirm_full_access = Some(approval_id);
+            window.focus(&self.full_access_focus, cx);
+            cx.notify();
+        }
+    }
+
+    fn cancel_full_access(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_full_access.take().is_some() {
+            self.focus_composer(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn full_access_confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(approval_id) = self.confirm_full_access.take() else {
+            return;
+        };
+        self.focus_composer(window, cx);
+        cx.notify();
+        let (Some(bot_id), true) = (self.selected_bot, self.live()) else {
+            return;
+        };
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        if open.answering.insert(approval_id) {
+            open.list.remeasure();
+            self.connection.send(ClientMessage::UpdateBot {
+                bot_id,
+                patch: BotPatch {
+                    permission_level: Some(PermissionLevel::FullAccess),
+                    ..BotPatch::default()
+                },
             });
         }
     }
@@ -1005,6 +1532,18 @@ impl Workspace {
     }
 }
 
+fn grouped(number: usize) -> String {
+    let digits = number.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 fn model_label(model: &Option<String>) -> SharedString {
     match model {
         Some(model) => model.clone().into(),
@@ -1024,9 +1563,20 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(frames) = &self.frames {
+            frames.start();
+        }
         if self.resizing && !cx.has_active_drag() {
             self.finish_resize();
         }
+        if let Some(text) = self.composer_text.take() {
+            self.composer
+                .update(cx, |composer, cx| composer.set_text(&text, window, cx));
+        }
+        let enter_sends = self.preferences.send_shortcut == SendShortcut::Enter;
+        self.composer
+            .update(cx, |composer, _| composer.set_enter_submits(enter_sends));
+        self.follow_scroll();
         let theme = Theme::of(cx);
         let root = div()
             .id("workspace")
@@ -1038,6 +1588,13 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &FocusPrevious, window, cx| {
                 this.focus_step(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &composer::Copy, _, cx| this.copy_selection(cx)))
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if this.selection.take().is_some() {
+                    cx.notify();
+                }
             }))
             .on_drag_move::<ResizeSidebar>(cx.listener(
                 |this, event: &gpui::DragMoveEvent<ResizeSidebar>, window, cx| {
@@ -1057,9 +1614,16 @@ impl Render for Workspace {
             Screen::Shell => self.render_shell(root, &theme, window, cx),
             screen => root.child(self.render_screen(&screen, &theme, window, cx)),
         };
-        root.children(self.render_floating_menu(&theme, cx))
+        let root = root
+            .children(self.render_floating_menu(&theme, cx))
             .children(self.render_delete_dialog(&theme, cx))
+            .children(self.render_full_access_dialog(&theme, cx))
             .children(self.render_toast(&theme, cx))
+            .into_any_element();
+        match &self.frames {
+            Some(log) => frames::timed(root, log.clone()).into_any_element(),
+            None => root,
+        }
     }
 }
 
@@ -1077,6 +1641,14 @@ impl Workspace {
                 &self.dialog_confirm_focus
             } else {
                 &self.dialog_focus
+            };
+            window.focus(next, cx);
+        } else if self.confirm_full_access.is_some() {
+            let cancel = self.full_access_focus.is_focused(window);
+            let next = if cancel {
+                &self.full_access_confirm_focus
+            } else {
+                &self.full_access_focus
             };
             window.focus(next, cx);
         } else if forward {

@@ -12,11 +12,14 @@ pub use bot::{
 };
 pub use endpoint::Endpoint;
 pub use event::{
-    ApprovalClosure, ApprovalDecision, ApprovalReason, Event, Interruption, ToolStatus, TurnEnd,
+    APPROVAL_TARGET_BYTES, ApprovalClosure, ApprovalDecision, ApprovalReason, Event, FailureCause,
+    Interruption, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
 };
 pub use message::{
-    ClientMessage, ConversationSnapshot, ConversationSummary, PROTOCOL_VERSION, QueueState,
-    QueuedMessage, ServerMessage,
+    ClientMessage, ConversationSnapshot, ConversationSummary, MESSAGE_LENGTH, PROTOCOL_VERSION,
+    QueueState, QueuedMessage, ServerMessage, TimedEvent,
 };
-pub use preferences::{Appearance, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT};
+pub use preferences::{
+    Appearance, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, SendShortcut,
+};
 pub use wire::{WireError, decode, encode};

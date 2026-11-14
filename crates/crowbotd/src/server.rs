@@ -200,10 +200,42 @@ impl ClientState {
             ClientMessage::SendMessage {
                 conversation_id,
                 text,
+            } => {
+                match daemon.conversation(conversation_id) {
+                    Ok(handle) => handle.send(Command::Prompt {
+                        text,
+                        sink: sink.clone(),
+                    }),
+                    Err(message) => reply(ServerMessage::MessageRefused {
+                        conversation_id,
+                        message,
+                    }),
+                }
+                Ok(())
+            }
+            ClientMessage::LoadOlderEvents {
+                conversation_id,
+                before,
+            } => {
+                match daemon.conversation(conversation_id) {
+                    Ok(handle) => handle.send(Command::LoadOlder {
+                        before,
+                        sink: sink.clone(),
+                    }),
+                    Err(message) => reply(ServerMessage::OlderEventsFailed {
+                        conversation_id,
+                        message,
+                    }),
+                }
+                Ok(())
+            }
+            ClientMessage::SetDraft {
+                conversation_id,
+                text,
             } => daemon
                 .conversation(conversation_id)
                 .map(|handle| {
-                    handle.send(Command::Prompt {
+                    handle.send(Command::SetDraft {
                         text,
                         sink: sink.clone(),
                     });
@@ -213,16 +245,21 @@ impl ClientState {
                 conversation_id,
                 approval_id,
                 decision,
-            } => daemon
-                .conversation(conversation_id)
-                .map(|handle| {
-                    handle.send(Command::ResolveApproval {
+            } => {
+                match daemon.conversation(conversation_id) {
+                    Ok(handle) => handle.send(Command::ResolveApproval {
                         approval_id,
                         decision,
                         sink: sink.clone(),
-                    });
-                })
-                .map_err(failed),
+                    }),
+                    Err(message) => reply(ServerMessage::ApprovalNotResolved {
+                        conversation_id,
+                        approval_id,
+                        message,
+                    }),
+                }
+                Ok(())
+            }
             ClientMessage::StopTurn { conversation_id } => daemon
                 .conversation(conversation_id)
                 .map(|handle| handle.send(Command::Stop))

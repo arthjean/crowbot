@@ -267,6 +267,10 @@ pub mod text {
         size: px(24.),
         leading: px(30.),
     };
+    pub const CODE: Step = Step {
+        size: px(12.),
+        leading: px(19.),
+    };
     pub const WINDOW_GLYPH: Pixels = px(10.);
 }
 
@@ -320,10 +324,17 @@ pub mod duration {
     pub const WORKING: Duration = Duration::from_millis(960);
     pub const WORKING_RISE: f32 = 0.4;
     pub const WORKING_STAGGER: f32 = 0.135;
+    pub const COPIED: Duration = Duration::from_secs(2);
+    pub const SHINE: Duration = Duration::from_millis(2250);
+    pub const DRAFT_SAVE: Duration = Duration::from_millis(400);
+    pub const QUIT_FLUSH: Duration = Duration::from_millis(60);
 }
 
 pub mod opacity {
     pub const DISABLED: f32 = 0.45;
+    pub const SHINE_LOW: f32 = 0.55;
+    pub const HIDDEN: f32 = 0.;
+    pub const SHOWN: f32 = 1.;
 }
 
 pub mod size {
@@ -354,6 +365,15 @@ pub mod size {
     pub const COUNT_BADGE: Pixels = px(16.);
     pub const BADGE_PILL: Pixels = px(22.);
     pub const DIVIDER_HEIGHT: Pixels = px(20.);
+    pub const AVATAR_MESSAGE: Pixels = px(32.);
+    pub const AVATAR_MESSAGE_GLYPH: Pixels = px(14.);
+    pub const AVATAR_EMPTY: Pixels = px(64.);
+    pub const AVATAR_EMPTY_GLYPH: Pixels = px(28.);
+    pub const QUOTE_BAR: Pixels = px(2.);
+    pub const CHECKBOX: Pixels = px(14.);
+    pub const JUMP: Pixels = px(44.);
+    pub const SEND: Pixels = px(28.);
+    pub const ACTION_ICON: Pixels = px(17.);
 }
 
 pub mod layout {
@@ -406,12 +426,30 @@ pub mod layout {
     pub const TOOLTIP_MAX_WIDTH: Pixels = px(260.);
     pub const COLUMN_WIDTH: Pixels = px(760.);
     pub const BUBBLE_MAX_WIDTH: Pixels = px(608.);
-    pub const BUBBLE_PADDING_X: Pixels = px(14.);
-    pub const BUBBLE_PADDING_Y: Pixels = px(9.);
+    pub const BUBBLE_PADDING_X: Pixels = px(12.);
+    pub const BUBBLE_PADDING_Y: Pixels = px(8.);
+    pub const AVATAR_GUTTER: Pixels = px(36.);
+    pub const ROW_GAP: Pixels = px(12.);
+    pub const ROW_GAP_GROUPED: Pixels = px(4.);
+    pub const DAY_ROW: Pixels = px(24.);
+    pub const ACTION_ROW: Pixels = px(24.);
+    pub const STICK_THRESHOLD: f32 = 80.;
+    pub const JUMP_BOTTOM: Pixels = px(14.);
+    pub const BLOCK_GAP: Pixels = px(12.);
+    pub const LIST_INDENT: Pixels = px(24.);
+    pub const CODE_HEADER: Pixels = px(34.);
+    pub const CODE_MAX_HEIGHT: Pixels = px(420.);
+    pub const TABLE_MIN_COLUMN: Pixels = px(72.);
+    pub const STEPS_MAX_HEIGHT: Pixels = px(220.);
+    pub const STEP_ROW: Pixels = px(24.);
+    pub const STEP_ERROR_MAX_HEIGHT: Pixels = px(160.);
+    pub const APPROVAL_WIDTH: Pixels = px(540.);
+    pub const APPROVAL_TARGET_MAX_HEIGHT: Pixels = px(160.);
+    pub const QUEUE_ROW: Pixels = px(29.);
+    pub const QUEUE_MAX_HEIGHT: Pixels = px(132.);
     pub const LIST_OVERDRAW: Pixels = px(600.);
     pub const COMPOSER_PADDING_Y: Pixels = px(5.);
     pub const COMPOSER_BOTTOM: Pixels = px(20.);
-    pub const THOUGHT_INDENT: Pixels = px(10.);
     pub const STATUS_ROW: Pixels = px(20.);
     pub const COMPOSER_MAX_ROWS: f32 = 8.;
 }
@@ -574,14 +612,18 @@ mod tests {
         assert_eq!(compared, 84);
     }
 
-    const VIEWS: [&str; 9] = [
+    const VIEWS: [&str; 13] = [
         "main.rs",
         "composer.rs",
         "ui.rs",
+        "markdown/element.rs",
         "workspace.rs",
         "workspace/bot_list.rs",
         "workspace/header.rs",
         "workspace/conversation.rs",
+        "workspace/rows.rs",
+        "workspace/steps.rs",
+        "workspace/compose.rs",
         "workspace/overlays.rs",
         "workspace/screens.rs",
     ];

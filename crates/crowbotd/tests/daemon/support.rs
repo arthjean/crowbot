@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crowbot_protocol::transport::{self, MessageReader, MessageWriter};
 use crowbot_protocol::{
     BotDraft, BotPatch, BotSummary, ClientMessage, ConversationSnapshot, ConversationSummary,
-    Endpoint, Event, PROTOCOL_VERSION, QueueState, ServerMessage,
+    Endpoint, Event, PROTOCOL_VERSION, QueueState, ServerMessage, TimedEvent,
 };
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -148,6 +148,10 @@ impl Daemon {
             child: None,
             agent,
         }
+    }
+
+    pub fn database(&self) -> PathBuf {
+        self.dir.join("crowbot.db")
     }
 
     /// Where the daemon makes the folders of the bots that were given none.
@@ -299,6 +303,41 @@ impl Client {
         .await
     }
 
+    pub async fn until_accepted(&mut self) -> i64 {
+        self.until(|message| match message {
+            ServerMessage::MessageAccepted { conversation_id } => Some(conversation_id),
+            ServerMessage::MessageRefused { message, .. } => {
+                panic!("the daemon refused the message: {message}")
+            }
+            _ => None,
+        })
+        .await
+    }
+
+    pub async fn until_refused(&mut self) -> (i64, String) {
+        self.until(|message| match message {
+            ServerMessage::MessageRefused {
+                conversation_id,
+                message,
+            } => Some((conversation_id, message)),
+            ServerMessage::MessageAccepted { .. } => panic!("the daemon took the message"),
+            _ => None,
+        })
+        .await
+    }
+
+    pub async fn until_not_resolved(&mut self) -> (i64, String, String) {
+        self.until(|message| match message {
+            ServerMessage::ApprovalNotResolved {
+                conversation_id,
+                approval_id,
+                message,
+            } => Some((conversation_id, approval_id, message)),
+            _ => None,
+        })
+        .await
+    }
+
     pub async fn until_error(&mut self) -> String {
         self.until(|message| match message {
             ServerMessage::Error { message } => Some(message),
@@ -422,9 +461,10 @@ impl Client {
                 ServerMessage::ConversationEvent {
                     conversation_id: about,
                     event,
+                    ..
                 } if about == conversation_id => match event {
                     Event::MessageText(text) => reply.push_str(&text),
-                    Event::TurnFailed { message } => panic!("the turn failed: {message}"),
+                    Event::TurnFailed { message, .. } => panic!("the turn failed: {message}"),
                     event if event.ends_turn() => return reply,
                     _ => {}
                 },
@@ -467,10 +507,18 @@ pub async fn connect(endpoint: &Endpoint) -> (MessageReader, MessageWriter) {
     }
 }
 
-pub fn user_texts(events: &[Event]) -> Vec<&str> {
+pub fn events(snapshot: &ConversationSnapshot) -> Vec<Event> {
+    snapshot
+        .events
+        .iter()
+        .map(|timed| timed.event.clone())
+        .collect()
+}
+
+pub fn user_texts(events: &[TimedEvent]) -> Vec<&str> {
     events
         .iter()
-        .filter_map(|event| match event {
+        .filter_map(|timed| match &timed.event {
             Event::UserText(text) => Some(text.as_str()),
             _ => None,
         })

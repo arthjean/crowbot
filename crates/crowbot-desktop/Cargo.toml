@@ -27,6 +27,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crowbot-protocol = { path = "../crowbot-protocol", features = ["transport"] }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "0cfc4a483dfab6ca171df0ceedaaa2a9f7954d0e" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "0cfc4a483dfab6ca171df0ceedaaa2a9f7954d0e" }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 unicode-segmentation = "1"
 

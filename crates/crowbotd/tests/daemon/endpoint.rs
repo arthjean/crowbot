@@ -29,6 +29,8 @@ async fn a_turn_keeps_running_after_its_client_disconnects() {
     );
 }
 
+const BEFORE_INCOMPATIBLE: u32 = 3;
+
 #[tokio::test]
 async fn a_client_that_speaks_another_protocol_version_is_refused() {
     let dir = support::test_dir();
@@ -43,11 +45,20 @@ async fn a_client_that_speaks_another_protocol_version_is_refused() {
     let (mut reader, mut writer) = support::connect(&endpoint).await;
     writer
         .write(&ClientMessage::Hello {
-            protocol_version: PROTOCOL_VERSION - 1,
+            protocol_version: BEFORE_INCOMPATIBLE,
         })
         .await
         .unwrap();
     let refusal = reader.read::<ServerMessage>().await.unwrap();
+    let (mut reader, mut writer) = support::connect(&endpoint).await;
+    writer
+        .write(&ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION - 1,
+        })
+        .await
+        .unwrap();
+    let previous = reader.read::<ServerMessage>().await.unwrap();
+    let closed = reader.read::<ServerMessage>().await.unwrap();
     daemon.kill().unwrap();
     daemon.wait().unwrap();
     std::fs::remove_dir_all(&dir).ok();
@@ -59,9 +70,17 @@ async fn a_client_that_speaks_another_protocol_version_is_refused() {
         "{message}"
     );
     assert!(
-        message.contains(&format!("speaks {}", PROTOCOL_VERSION - 1)),
+        message.contains(&format!("speaks {BEFORE_INCOMPATIBLE}")),
         "{message}"
     );
+    let Some(ServerMessage::Incompatible {
+        protocol_version, ..
+    }) = previous
+    else {
+        panic!("expected a refusal with the versions, got {previous:?}");
+    };
+    assert_eq!(protocol_version, PROTOCOL_VERSION);
+    assert!(closed.is_none(), "{closed:?}");
 }
 
 #[tokio::test]

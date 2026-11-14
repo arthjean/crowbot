@@ -6,8 +6,25 @@
 //! - `say <text>`: answer with the text.
 //! - `stream <count> <interval ms>`: answer with `count` words, one per interval,
 //!   and end as cancelled when a cancel arrives.
-//! - `ask <title>`: request permission for a tool call, then report the outcome.
+//! - `ask <title>`: request permission for a tool call that runs the title as a
+//!   command, then report the outcome.
 //! - `demand <title>`: the same, with a request that offers no allow-once option.
+//! - `askfile <path>`: the same as `ask`, for a tool call titled `Edit <path>`
+//!   that edits the file at that path.
+//! - `asklong <bytes>`: the same as `ask`, for a command of that many `x` bytes.
+//! - `work`: think, read `notes.txt` with a tool call that completes, run tests
+//!   with a tool call that fails, then answer.
+//! - `hang <title>`: start a tool call that runs the title as a command, never
+//!   complete it, and end as cancelled when a cancel arrives.
+//! - `ponder <text>`: think the text, send no answer, and end as cancelled when
+//!   a cancel arrives.
+//! - `bigout <bytes>`: complete one tool call with an output of that many `x`
+//!   bytes, then answer `done`.
+//! - `fail auth`: fail the turn as a provider that needs a sign-in.
+//! - `fail limit`: fail the turn as a provider whose usage limit is reached.
+//! - `fail other`: fail the turn with an error kind that has no known cause.
+//! - `sample <interval ms>`: answer with a Markdown text that holds every kind
+//!   of block, one word per interval, and end as cancelled when a cancel arrives.
 //! - `deaf`: never end the turn, and ignore the cancel and the end of stdin.
 //! - `crash`: exit in the middle of the turn.
 //! - `session`: report the session id and whether the session was resumed.
@@ -38,6 +55,41 @@ const SYSTEM_PROMPT: &str = "FAKE_AGENT_SYSTEM_PROMPT";
 const MODELS: [&str; 2] = ["fast", "smart"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+const SAMPLE: &str = "## Release notes
+
+This build has **bold** text, *italic* text, ~~struck~~ text, `inline code`, and a [link](https://example.com/docs).
+
+- First item
+- Second item
+- Third item
+
+1. Step one
+2. Step two
+
+- [x] Done task
+- [ ] Open task
+
+> A quote that spans
+> two lines.
+
+| Name | Kind | Count |
+| --- | --- | ---: |
+| alpha | read | 1 |
+| beta | edit | 22 |
+
+---
+
+```rust
+fn main() {
+    let words = [\"caw\", \"caw\"];
+    for word in words {
+        println!(\"{word}\");
+    }
+}
+```
+
+Done.";
 
 #[derive(Default)]
 struct Agent {
@@ -95,6 +147,60 @@ impl Agent {
         }));
     }
 
+    fn update(&self, session: &Value, update: Value) {
+        self.send(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": session, "update": update }
+        }));
+    }
+
+    fn think(&self, session: &Value, text: &str) {
+        self.update(
+            session,
+            json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": { "type": "text", "text": text }
+            }),
+        );
+    }
+
+    fn start_tool(&self, session: &Value, mut call: Value) -> String {
+        let id = format!(
+            "call-{}",
+            1000 + self.next_request.fetch_add(1, Ordering::SeqCst)
+        );
+        call["sessionUpdate"] = "tool_call".into();
+        call["toolCallId"] = id.as_str().into();
+        self.update(session, call);
+        id
+    }
+
+    fn update_tool(&self, session: &Value, id: &str, status: &str, output: Option<&str>) {
+        let mut update = json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            "status": status
+        });
+        if let Some(output) = output {
+            update["content"] = json!([{
+                "type": "content",
+                "content": { "type": "text", "text": output }
+            }]);
+        }
+        self.update(session, update);
+    }
+
+    fn fail(&self, id: &Value, error: Value) {
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "error": error }));
+    }
+
+    fn wait_for_cancel(&self) {
+        while !self.cancelled.load(Ordering::SeqCst) {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
     fn end(&self, id: &Value) {
         let reason = if self.cancelled.load(Ordering::SeqCst) {
             "cancelled"
@@ -105,7 +211,7 @@ impl Agent {
     }
 
     /// Asks the client for permission and returns the option it selected.
-    fn ask(&self, session: &Value, title: &str, allow_once: bool) -> String {
+    fn ask(&self, session: &Value, mut tool_call: Value, allow_once: bool) -> String {
         let request = 1000 + self.next_request.fetch_add(1, Ordering::SeqCst);
         let mut options = vec![
             json!({ "optionId": "always", "name": "Always allow", "kind": "allow_always" }),
@@ -122,13 +228,14 @@ impl Agent {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(request, answer);
+        tool_call["toolCallId"] = format!("tool-{request}").into();
         self.send(&json!({
             "jsonrpc": "2.0",
             "id": request,
             "method": "session/request_permission",
             "params": {
                 "sessionId": session,
-                "toolCall": { "toolCallId": format!("tool-{request}"), "title": title },
+                "toolCall": tool_call,
                 "options": options
             }
         }));
@@ -191,9 +298,113 @@ impl Agent {
                     std::thread::sleep(interval);
                 }
             }
-            "ask" | "demand" => {
-                let outcome = self.ask(session, rest, command == "ask");
+            "ask" | "demand" | "askfile" | "asklong" => {
+                let tool_call = match command {
+                    "askfile" => json!({
+                        "title": format!("Edit {rest}"),
+                        "kind": "edit",
+                        "locations": [{ "path": rest }]
+                    }),
+                    "asklong" => json!({
+                        "title": "Run a long command",
+                        "kind": "execute",
+                        "rawInput": { "command": "x".repeat(rest.parse().unwrap_or(1)) }
+                    }),
+                    _ => json!({
+                        "title": rest,
+                        "kind": "execute",
+                        "rawInput": { "command": rest }
+                    }),
+                };
+                let outcome = self.ask(session, tool_call, command != "demand");
                 self.say(session, &format!("outcome={outcome}"));
+            }
+            "work" => {
+                self.think(session, "Looking at the files.");
+                let notes = format!("{}/notes.txt", self.session().cwd);
+                let read = self.start_tool(
+                    session,
+                    json!({
+                        "title": "Read notes.txt",
+                        "kind": "read",
+                        "status": "pending",
+                        "rawInput": { "file_path": notes }
+                    }),
+                );
+                self.update_tool(session, &read, "in_progress", None);
+                self.update_tool(session, &read, "completed", Some("line one\nline two"));
+                let tests = self.start_tool(
+                    session,
+                    json!({
+                        "title": "Run tests",
+                        "kind": "execute",
+                        "status": "in_progress",
+                        "rawInput": { "command": "cargo test" }
+                    }),
+                );
+                self.update_tool(session, &tests, "failed", Some("error: 1 test failed"));
+                self.say(session, "Done with **two** steps.");
+            }
+            "hang" => {
+                self.start_tool(
+                    session,
+                    json!({
+                        "title": rest,
+                        "kind": "execute",
+                        "status": "in_progress",
+                        "rawInput": { "command": rest }
+                    }),
+                );
+                self.wait_for_cancel();
+            }
+            "ponder" => {
+                self.think(session, rest);
+                self.wait_for_cancel();
+            }
+            "bigout" => {
+                let bytes = rest.parse().unwrap_or(1);
+                let call = self.start_tool(
+                    session,
+                    json!({
+                        "title": "Print output",
+                        "kind": "execute",
+                        "status": "in_progress",
+                        "rawInput": { "command": format!("print {bytes}") }
+                    }),
+                );
+                self.update_tool(session, &call, "completed", Some(&"x".repeat(bytes)));
+                self.say(session, "done");
+            }
+            "fail" => {
+                let error = match rest {
+                    "auth" => json!({ "code": -32000, "message": "Authentication required" }),
+                    "limit" => json!({
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": { "errorKind": "rate_limit" }
+                    }),
+                    _ => json!({
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": { "errorKind": "worker_shutdown" }
+                    }),
+                };
+                return self.fail(id, error);
+            }
+            "sample" => {
+                let interval = Duration::from_millis(rest.parse().unwrap_or(1));
+                let mut words = SAMPLE.split(' ').peekable();
+                while let Some(word) = words.next() {
+                    if self.cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let chunk = match words.peek() {
+                        Some(_) => format!("{word} "),
+                        None => word.to_owned(),
+                    };
+                    self.say(session, &chunk);
+                    std::thread::sleep(interval);
+                }
             }
             "deaf" => {
                 self.deaf.store(true, Ordering::SeqCst);
