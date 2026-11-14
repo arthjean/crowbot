@@ -1,0 +1,7 @@
+/target
+.env
+.env.*
+!.env.example
+TASKS.md
+.DS_Store
+Thumbs.db
