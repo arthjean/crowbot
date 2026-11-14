@@ -7,20 +7,25 @@ use std::process::ExitCode;
 
 use tokio::sync::mpsc;
 
-use crate::event::Event;
-use crate::provider::acp::{self, Turn};
+use crate::event::{ApprovalPolicy, Event};
+use crate::provider::acp::{self, AgentProfile, Turn};
+use crate::provider::claude;
 
-const DEFAULT_AGENT: &str = "bunx @agentclientprotocol/claude-agent-acp@0.107.0";
-const USAGE: &str = "usage: crowbotd [--agent <command>] [--cwd <dir>] <prompt>";
+const USAGE: &str = "usage: crowbotd [--agent <command>] [--cwd <dir>] [--approve] <prompt>";
 
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Turn, String> {
-    let mut command = DEFAULT_AGENT.to_owned();
+    let mut agent = None;
     let mut cwd = None;
     let mut prompt = None;
+    let mut approvals = ApprovalPolicy::Decline;
     while let Some(arg) = raw.next() {
         match arg.as_str() {
-            "--agent" => command = raw.next().ok_or("--agent needs a command")?,
+            "--agent" => {
+                let command = raw.next().ok_or("--agent needs a command")?;
+                agent = Some(AgentProfile::generic(command));
+            }
             "--cwd" => cwd = Some(PathBuf::from(raw.next().ok_or("--cwd needs a directory")?)),
+            "--approve" => approvals = ApprovalPolicy::AllowOnce,
             _ if prompt.is_none() => prompt = Some(arg),
             _ => return Err(format!("unexpected argument: {arg}")),
         }
@@ -31,9 +36,10 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Turn, String> {
         None => std::env::current_dir().map_err(|error| error.to_string())?,
     };
     Ok(Turn {
-        command,
+        agent: agent.unwrap_or_else(claude::profile),
         cwd,
         prompt,
+        approvals,
     })
 }
 
@@ -53,12 +59,13 @@ fn print_event(event: &Event) {
                 title.as_deref().unwrap_or("-")
             );
         }
-        Event::ApprovalDeclined {
+        Event::ApprovalResolved {
             tool_call_id,
             title,
+            decision,
         } => {
             eprintln!(
-                "[tool {tool_call_id}] approval declined: {}",
+                "[tool {tool_call_id}] approval {decision:?}: {}",
                 title.as_deref().unwrap_or("-")
             );
         }

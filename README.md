@@ -12,7 +12,7 @@ First prototype. The daemon starts Claude through the Agent Client Protocol, sen
 cargo run -p crowbotd -- --cwd <dir> "<prompt>"
 ```
 
-It needs Bun, Node.js 22 or later, and a signed-in Claude Code. `--agent "<command>"` starts another ACP agent.
+It needs Bun, Node.js 22 or later, and a signed-in Claude Code. The daemon declines every approval request unless you pass `--approve`. `--agent "<command>"` starts another ACP agent.
 
 ## Shape
 

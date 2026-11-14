@@ -12,9 +12,10 @@ pub enum Event {
         title: Option<String>,
         status: Option<ToolStatus>,
     },
-    ApprovalDeclined {
+    ApprovalResolved {
         tool_call_id: String,
         title: Option<String>,
+        decision: ApprovalDecision,
     },
 }
 
@@ -24,6 +25,18 @@ pub enum ToolStatus {
     InProgress,
     Completed,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPolicy {
+    Decline,
+    AllowOnce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Allowed,
+    Declined,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
