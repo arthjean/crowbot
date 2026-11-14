@@ -263,7 +263,7 @@ impl Composer {
         cx.notify();
     }
 
-    fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.content = text.replace("\r\n", "\n");
         let end = self.content.len();
         self.selected_range = end..end;

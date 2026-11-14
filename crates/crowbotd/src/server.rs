@@ -211,6 +211,43 @@ impl ClientState {
                     sink: sink.clone(),
                 });
             }),
+            ClientMessage::StopTurn { conversation_id } => daemon
+                .conversation(conversation_id)
+                .map(|handle| handle.send(Command::Stop)),
+            ClientMessage::EditQueuedMessage {
+                conversation_id,
+                queue_id,
+                text,
+            } => daemon.conversation(conversation_id).map(|handle| {
+                handle.send(Command::EditQueued {
+                    queue_id,
+                    text,
+                    sink: sink.clone(),
+                });
+            }),
+            ClientMessage::DeleteQueuedMessage {
+                conversation_id,
+                queue_id,
+            } => daemon.conversation(conversation_id).map(|handle| {
+                handle.send(Command::DeleteQueued {
+                    queue_id,
+                    sink: sink.clone(),
+                });
+            }),
+            ClientMessage::SendQueuedMessageNow {
+                conversation_id,
+                queue_id,
+            } => daemon.conversation(conversation_id).map(|handle| {
+                handle.send(Command::SendQueuedNow {
+                    queue_id,
+                    sink: sink.clone(),
+                });
+            }),
+            ClientMessage::ResumeQueue { conversation_id } => {
+                daemon.conversation(conversation_id).map(|handle| {
+                    handle.send(Command::ResumeQueue { sink: sink.clone() });
+                })
+            }
         };
         if let Err(message) = outcome {
             sink.send(ServerMessage::Error { message }).ok();

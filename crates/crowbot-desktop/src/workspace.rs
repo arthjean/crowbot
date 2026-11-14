@@ -1,5 +1,6 @@
 use crowbot_protocol::{
-    ApprovalDecision, ClientMessage, ConversationSummary, Event, ServerMessage, ToolStatus,
+    ApprovalDecision, ClientMessage, ConversationSummary, Event, QueueState, ServerMessage,
+    ToolStatus,
 };
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Focusable, FollowMode,
@@ -28,14 +29,20 @@ pub fn bind_keys(cx: &mut App) {
 
 enum Status {
     Connecting,
+    /// No daemon was listening, so the client is starting one.
+    Starting,
     Connected,
+    /// The connection dropped and the client reconnects on its own.
     Disconnected(SharedString),
+    /// The client cannot attach until the user retries.
+    Failed(SharedString),
 }
 
 struct OpenConversation {
     id: i64,
     transcript: Transcript,
     list: ListState,
+    queue: QueueState,
 }
 
 pub struct Workspace {
@@ -45,6 +52,8 @@ pub struct Workspace {
     selected: Option<i64>,
     open: Option<OpenConversation>,
     composer: Entity<Composer>,
+    /// The queued message that the composer is editing.
+    editing: Option<i64>,
     notice: Option<SharedString>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -94,6 +103,7 @@ impl Workspace {
             selected: None,
             open: None,
             composer,
+            editing: None,
             notice: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -112,9 +122,11 @@ impl Workspace {
                         .send(ClientMessage::OpenConversation { conversation_id });
                 }
             }
+            ConnectionEvent::Starting => self.status = Status::Starting,
             ConnectionEvent::Disconnected(reason) => {
                 self.status = Status::Disconnected(reason.into());
             }
+            ConnectionEvent::Failed(reason) => self.status = Status::Failed(reason.into()),
             ConnectionEvent::Message(message) => self.handle_message(message),
         }
         cx.notify();
@@ -143,6 +155,7 @@ impl Workspace {
                     return;
                 }
                 self.remember(snapshot.conversation.clone());
+                let queue = snapshot.queue.clone();
                 let transcript = Transcript::from_snapshot(snapshot);
                 let list = ListState::new(transcript.items().len(), ListAlignment::Top, px(600.));
                 list.set_follow_mode(FollowMode::Tail);
@@ -150,7 +163,18 @@ impl Workspace {
                     id,
                     transcript,
                     list,
+                    queue,
                 });
+                self.forget_started_edit();
+            }
+            ServerMessage::QueueChanged {
+                conversation_id,
+                queue,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    open.queue = queue;
+                    self.forget_started_edit();
+                }
             }
             ServerMessage::ConversationEvent {
                 conversation_id,
@@ -195,6 +219,19 @@ impl Workspace {
         }
     }
 
+    /// A queued message that started, or was deleted elsewhere, can no longer
+    /// be edited: the text in the composer then goes out as a new message.
+    fn forget_started_edit(&mut self) {
+        let queued = |id| {
+            self.open
+                .as_ref()
+                .is_some_and(|open| open.queue.messages.iter().any(|message| message.id == id))
+        };
+        if self.editing.is_some_and(|id| !queued(id)) {
+            self.editing = None;
+        }
+    }
+
     fn select(&mut self, conversation_id: i64) {
         if self.selected == Some(conversation_id) {
             return;
@@ -206,6 +243,7 @@ impl Workspace {
         }
         self.selected = Some(conversation_id);
         self.open = None;
+        self.editing = None;
         self.notice = None;
         self.connection
             .send(ClientMessage::OpenConversation { conversation_id });
@@ -213,11 +251,55 @@ impl Workspace {
 
     fn can_send(&self, cx: &App) -> bool {
         matches!(self.status, Status::Connected)
+            && self.open.is_some()
+            && !self.composer.read(cx).text().trim().is_empty()
+    }
+
+    /// The bot works and the composer is empty: the send control stops the turn.
+    fn can_stop(&self, cx: &App) -> bool {
+        matches!(self.status, Status::Connected)
             && self
                 .open
                 .as_ref()
-                .is_some_and(|open| !open.transcript.turn_active())
-            && !self.composer.read(cx).text().trim().is_empty()
+                .is_some_and(|open| open.transcript.turn_active())
+            && self.composer.read(cx).text().trim().is_empty()
+    }
+
+    fn stop_turn(&mut self) {
+        if let Some(open) = self.open.as_ref() {
+            self.connection.send(ClientMessage::StopTurn {
+                conversation_id: open.id,
+            });
+        }
+    }
+
+    fn edit_queued(&mut self, queue_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.open.as_ref().and_then(|open| {
+            let queued = open.queue.messages.iter();
+            let message = queued.into_iter().find(|message| message.id == queue_id)?;
+            Some(message.text.clone())
+        }) else {
+            return;
+        };
+        self.editing = Some(queue_id);
+        self.composer
+            .update(cx, |composer, cx| composer.set_text(&text, window, cx));
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing = None;
+        self.composer
+            .update(cx, |composer, cx| composer.clear(window, cx));
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    fn queue_action(&mut self, action: impl FnOnce(i64) -> ClientMessage) {
+        if let Some(open) = self.open.as_ref() {
+            self.connection.send(action(open.id));
+        }
     }
 
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -228,9 +310,16 @@ impl Workspace {
             return;
         };
         let text = self.composer.read(cx).text().to_owned();
-        self.connection.send(ClientMessage::SendMessage {
-            conversation_id: open.id,
-            text,
+        self.connection.send(match self.editing.take() {
+            Some(queue_id) => ClientMessage::EditQueuedMessage {
+                conversation_id: open.id,
+                queue_id,
+                text,
+            },
+            None => ClientMessage::SendMessage {
+                conversation_id: open.id,
+                text,
+            },
         });
         open.list.set_follow_mode(FollowMode::Tail);
         self.notice = None;
@@ -299,7 +388,9 @@ impl Workspace {
         let (status, status_color) = match &self.status {
             Status::Connected => ("Connected to the daemon", theme.text_secondary),
             Status::Connecting => ("Connecting to the daemon…", theme.text_secondary),
-            Status::Disconnected(_) => ("Daemon not connected", theme.danger_text),
+            Status::Starting => ("Starting the daemon…", theme.text_secondary),
+            Status::Disconnected(_) => ("Reconnecting to the daemon…", theme.danger_text),
+            Status::Failed(_) => ("Daemon not connected", theme.danger_text),
         };
         div()
             .w(px(SIDEBAR_WIDTH))
@@ -486,6 +577,7 @@ impl Workspace {
             (ApprovalState::Waiting, Some(id)) => id,
             (ApprovalState::Allowed, _) => return settled("Allowed", theme.success_text),
             (ApprovalState::Declined, _) => return settled("Declined", theme.danger_text),
+            (ApprovalState::Cancelled, _) => return settled("Cancelled", theme.text_secondary),
             (ApprovalState::Expired | ApprovalState::Waiting, _) => {
                 return settled("Not answered", theme.text_secondary);
             }
@@ -573,6 +665,118 @@ impl Workspace {
         }
     }
 
+    /// The messages that wait for the running turn to end, above the composer.
+    fn render_queue(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let queue = &self.open.as_ref()?.queue;
+        if queue.messages.is_empty() {
+            return None;
+        }
+        let heading = if queue.paused {
+            "Queue paused: the last turn did not finish."
+        } else if queue.messages.len() == 1 {
+            "1 message waits for the bot."
+        } else {
+            "Messages wait for the bot, in this order."
+        };
+        let rows = queue.messages.iter().enumerate().map(|(index, message)| {
+            let id = message.id;
+            let editing = self.editing == Some(id);
+            let label = SharedString::from(message.text.clone());
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .id(("queued", index))
+                        .role(Role::ListItem)
+                        .aria_label(label.clone())
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .when(editing, |text| text.text_color(theme.text_secondary))
+                        .child(label),
+                )
+                .child(
+                    button(("queue-edit", index), "Edit", ButtonStyle::Quiet, theme).on_click(
+                        cx.listener(move |this, _, window, cx| this.edit_queued(id, window, cx)),
+                    ),
+                )
+                .child(
+                    button(
+                        ("queue-send-now", index),
+                        "Send now",
+                        ButtonStyle::Quiet,
+                        theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, _| {
+                        this.queue_action(|conversation_id| ClientMessage::SendQueuedMessageNow {
+                            conversation_id,
+                            queue_id: id,
+                        });
+                    })),
+                )
+                .child(
+                    button(("queue-delete", index), "Delete", ButtonStyle::Quiet, theme).on_click(
+                        cx.listener(move |this, _, _, _| {
+                            this.queue_action(|conversation_id| {
+                                ClientMessage::DeleteQueuedMessage {
+                                    conversation_id,
+                                    queue_id: id,
+                                }
+                            });
+                        }),
+                    ),
+                )
+        });
+        Some(
+            div()
+                .id("queue")
+                .role(Role::List)
+                .aria_label("Queued messages")
+                .p(px(10.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(if queue.paused {
+                    theme.attention_border
+                } else {
+                    theme.separator
+                })
+                .when(queue.paused, |panel| panel.bg(theme.attention_surface))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(if queue.paused {
+                                    theme.attention_text
+                                } else {
+                                    theme.text_secondary
+                                })
+                                .child(heading),
+                        )
+                        .children(queue.paused.then(|| {
+                            button("queue-resume", "Resume", ButtonStyle::Solid, theme).on_click(
+                                cx.listener(|this, _, _, _| {
+                                    this.queue_action(|conversation_id| {
+                                        ClientMessage::ResumeQueue { conversation_id }
+                                    });
+                                }),
+                            )
+                        })),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
     fn render_composer(
         &self,
         theme: &Theme,
@@ -580,6 +784,29 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let can_send = self.can_send(cx);
+        let can_stop = self.can_stop(cx);
+        let send_control = if can_stop {
+            button("stop-turn", "Stop", ButtonStyle::Quiet, theme)
+                .on_click(cx.listener(|this, _, _, _| this.stop_turn()))
+        } else {
+            button(
+                "send-message",
+                if self.editing.is_some() {
+                    "Save"
+                } else {
+                    "Send"
+                },
+                if can_send {
+                    ButtonStyle::Solid
+                } else {
+                    ButtonStyle::Disabled
+                },
+                theme,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.send_message(window, cx);
+            }))
+        };
         let focused = self.composer.focus_handle(cx).is_focused(window);
         let activity = self.open.as_ref().and_then(|open| {
             if !open.transcript.turn_active() {
@@ -631,13 +858,26 @@ impl Workspace {
                         ),
                     )
             }))
+            .children(self.render_queue(theme, cx))
             .child(
                 div()
                     .id("activity")
                     .role(Role::Status)
                     .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
                     .text_color(theme.text_secondary)
-                    .children(activity),
+                    .children(if self.editing.is_some() {
+                        Some("Editing a queued message.")
+                    } else {
+                        activity
+                    })
+                    .children(self.editing.map(|_| {
+                        button("cancel-edit", "Cancel", ButtonStyle::Quiet, theme).on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)),
+                        )
+                    })),
             )
             .child(
                 div()
@@ -661,21 +901,7 @@ impl Workspace {
                             .py(px(5.))
                             .child(self.composer.clone()),
                     )
-                    .child(
-                        button(
-                            "send-message",
-                            "Send",
-                            if can_send {
-                                ButtonStyle::Solid
-                            } else {
-                                ButtonStyle::Disabled
-                            },
-                            theme,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.send_message(window, cx);
-                        })),
-                    ),
+                    .child(send_control),
             )
     }
 }
@@ -752,19 +978,42 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_appearance(window.appearance());
+        let banner = |text: SharedString, retry: bool| {
+            div()
+                .id("connection-notice")
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .px(px(24.))
+                .py(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .bg(theme.attention_surface)
+                .border_b_1()
+                .border_color(theme.attention_border)
+                .child(div().flex_1().min_w_0().child(text))
+                .children(retry.then(|| {
+                    button("retry-connection", "Retry", ButtonStyle::Solid, &theme).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.status = Status::Connecting;
+                            this.connection.retry();
+                            cx.notify();
+                        }),
+                    )
+                }))
+        };
         let banner = match &self.status {
-            Status::Disconnected(reason) => Some(
-                div()
-                    .px(px(24.))
-                    .py(px(10.))
-                    .bg(theme.attention_surface)
-                    .border_b_1()
-                    .border_color(theme.attention_border)
-                    .child(SharedString::from(format!(
-                        "{reason} Start crowbotd: the window reconnects on its own."
-                    ))),
-            ),
-            _ => None,
+            Status::Starting => Some(banner("Starting the daemon…".into(), false)),
+            Status::Disconnected(reason) if reason.is_empty() => Some(banner(
+                "The daemon is not reachable. Reconnecting.".into(),
+                false,
+            )),
+            Status::Disconnected(reason) => Some(banner(
+                format!("The daemon is not reachable. Reconnecting. ({reason})").into(),
+                false,
+            )),
+            Status::Failed(reason) => Some(banner(reason.clone(), true)),
+            Status::Connecting | Status::Connected => None,
         };
         div()
             .id("workspace")

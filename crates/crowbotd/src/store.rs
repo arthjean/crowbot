@@ -1,13 +1,22 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crowbot_protocol::{ConversationSummary, Event};
+use crowbot_protocol::{
+    ApprovalClosure, ConversationSummary, Event, Interruption, QueueState, QueuedMessage,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const TITLE_LENGTH: usize = 80;
+
+/// Streamed text waits at most this long in memory before it reaches the database.
+const SAVE_INTERVAL: Duration = Duration::from_millis(250);
+/// Streamed text that grew by this much is saved without waiting for the interval.
+const SAVE_BYTES: usize = 8 << 10;
+/// A text row that reached this size is closed, and the stream goes on in a new row.
+const ROW_BYTES: usize = 64 << 10;
 
 const SCHEMA_V1: &str = "
 BEGIN;
@@ -29,6 +38,34 @@ CREATE TABLE events (
 CREATE INDEX events_by_conversation ON events(conversation_id, id);
 PRAGMA user_version = 1;
 COMMIT;
+";
+
+const SCHEMA_V2: &str = "
+ALTER TABLE conversations ADD COLUMN queue_paused INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    position INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX queue_by_conversation ON queue(conversation_id, position, id);
+";
+
+const UNFINISHED_TURNS: &str = "
+SELECT turn.conversation_id, turn.started
+FROM (
+    SELECT conversation_id, MAX(id) AS started
+    FROM events
+    WHERE kind = 'user_text'
+    GROUP BY conversation_id
+) turn
+WHERE NOT EXISTS (
+    SELECT 1 FROM events
+    WHERE conversation_id = turn.conversation_id
+        AND id > turn.started
+        AND kind IN ('turn_ended', 'turn_failed', 'turn_interrupted')
+)
 ";
 
 const SUMMARIES: &str = "
@@ -125,7 +162,93 @@ impl Store {
         if version < 1 {
             self.connection.execute_batch(SCHEMA_V1)?;
         }
+        if version < 2 {
+            self.upgrade(SCHEMA_V2, 2)?;
+        }
         Ok(())
+    }
+
+    /// Applies one schema step and its version number together, or nothing at all.
+    fn upgrade(&self, statements: &str, version: i64) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute_batch(statements)?;
+        transaction.pragma_update(None, "user_version", version)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Closes what a daemon that stopped without warning left open: each turn that
+    /// was running ends as interrupted, each approval that waited expires, and each
+    /// queue that still holds messages pauses until a person resumes it.
+    pub fn recover(&self) -> Result<usize, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let unfinished = {
+            let mut statement = transaction.prepare(UNFINISHED_TURNS)?;
+            statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (conversation_id, started) in &unfinished {
+            for (id, tool_call_id, title) in self.open_approvals(*conversation_id, *started)? {
+                self.append(
+                    *conversation_id,
+                    &Event::ApprovalClosed {
+                        id,
+                        tool_call_id,
+                        title,
+                        reason: ApprovalClosure::Expired,
+                    },
+                )?;
+            }
+            self.append(
+                *conversation_id,
+                &Event::TurnInterrupted {
+                    cause: Interruption::DaemonRestarted,
+                },
+            )?;
+        }
+        transaction.execute(
+            "UPDATE conversations SET queue_paused = 1 WHERE id IN (SELECT conversation_id FROM queue)",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(unfinished.len())
+    }
+
+    fn open_approvals(
+        &self,
+        conversation_id: i64,
+        after: i64,
+    ) -> Result<Vec<(String, String, Option<String>)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT payload FROM events
+             WHERE conversation_id = ?1 AND id > ?2
+                AND kind IN ('approval_requested', 'approval_resolved', 'approval_closed')
+             ORDER BY id",
+        )?;
+        let payloads = statement
+            .query_map(params![conversation_id, after], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut open = Vec::new();
+        for payload in payloads {
+            match serde_json::from_str(&payload)? {
+                Event::ApprovalRequested {
+                    id,
+                    tool_call_id,
+                    title,
+                } => open.push((id, tool_call_id, title)),
+                Event::ApprovalResolved {
+                    id: Some(settled), ..
+                }
+                | Event::ApprovalClosed { id: settled, .. } => {
+                    open.retain(|(id, ..)| *id != settled);
+                }
+                _ => {}
+            }
+        }
+        Ok(open)
     }
 
     pub fn create_conversation(
@@ -206,7 +329,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn append(&self, conversation_id: i64, event: &Event) -> Result<(), StoreError> {
+    pub fn append(&self, conversation_id: i64, event: &Event) -> Result<i64, StoreError> {
         self.connection.execute(
             "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -215,6 +338,128 @@ impl Store {
                 serde_json::to_string(event)?,
                 now_ms()
             ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    fn rewrite(&self, row: i64, event: &Event) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE events SET payload = ?2 WHERE id = ?1",
+            params![row, serde_json::to_string(event)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn queue(&self, conversation_id: i64) -> Result<QueueState, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, text FROM queue WHERE conversation_id = ?1 ORDER BY position, id",
+        )?;
+        let messages = statement
+            .query_map(params![conversation_id], |row| {
+                Ok(QueuedMessage {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let paused = self
+            .connection
+            .query_row(
+                "SELECT queue_paused FROM conversations WHERE id = ?1",
+                params![conversation_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        Ok(QueueState {
+            paused: paused && !messages.is_empty(),
+            messages,
+        })
+    }
+
+    pub fn enqueue(&self, conversation_id: i64, text: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO queue (conversation_id, position, text, created_at_ms)
+             VALUES (?1, COALESCE((SELECT MAX(position) FROM queue WHERE conversation_id = ?1), 0), ?2, ?3)",
+            params![conversation_id, text, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn edit_queued(
+        &self,
+        conversation_id: i64,
+        queue_id: i64,
+        text: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE queue SET text = ?3 WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, queue_id, text],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_queued(&self, conversation_id: i64, queue_id: i64) -> Result<bool, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let deleted = transaction.execute(
+            "DELETE FROM queue WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, queue_id],
+        )?;
+        self.unpause_when_empty(conversation_id)?;
+        transaction.commit()?;
+        Ok(deleted > 0)
+    }
+
+    pub fn move_queued_first(
+        &self,
+        conversation_id: i64,
+        queue_id: i64,
+    ) -> Result<bool, StoreError> {
+        let moved = self.connection.execute(
+            "UPDATE queue
+             SET position = (SELECT MIN(position) FROM queue WHERE conversation_id = ?1) - 1
+             WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, queue_id],
+        )?;
+        Ok(moved > 0)
+    }
+
+    pub fn set_queue_paused(&self, conversation_id: i64, paused: bool) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE conversations SET queue_paused = ?2 WHERE id = ?1",
+            params![conversation_id, paused],
+        )?;
+        Ok(())
+    }
+
+    /// Takes the first queued message out of the queue and records it as the user
+    /// message of a new turn. Both happen together, so a message that left the
+    /// queue is in the conversation, and a daemon that stops in between starts
+    /// nothing twice.
+    pub fn start_queued(&self, conversation_id: i64) -> Result<Option<String>, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let first = transaction
+            .query_row(
+                "SELECT id, text FROM queue WHERE conversation_id = ?1 ORDER BY position, id LIMIT 1",
+                params![conversation_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((queue_id, text)) = first else {
+            return Ok(None);
+        };
+        transaction.execute("DELETE FROM queue WHERE id = ?1", params![queue_id])?;
+        self.append(conversation_id, &Event::UserText(text.clone()))?;
+        self.unpause_when_empty(conversation_id)?;
+        transaction.commit()?;
+        Ok(Some(text))
+    }
+
+    fn unpause_when_empty(&self, conversation_id: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE conversations SET queue_paused = 0
+             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM queue WHERE conversation_id = ?1)",
+            params![conversation_id],
         )?;
         Ok(())
     }
@@ -242,8 +487,10 @@ fn kind(event: &Event) -> &'static str {
         Event::ToolCallUpdated { .. } => "tool_call_updated",
         Event::ApprovalRequested { .. } => "approval_requested",
         Event::ApprovalResolved { .. } => "approval_resolved",
+        Event::ApprovalClosed { .. } => "approval_closed",
         Event::TurnEnded(_) => "turn_ended",
         Event::TurnFailed { .. } => "turn_failed",
+        Event::TurnInterrupted { .. } => "turn_interrupted",
     }
 }
 
@@ -273,10 +520,20 @@ impl SharedStore {
     }
 }
 
+/// Writes the events of one conversation. Streamed text grows one row in place:
+/// the row is saved on a short interval, so a daemon that stops without warning
+/// loses a fraction of a second of text at most.
 pub struct Recorder {
     store: SharedStore,
     conversation_id: i64,
-    pending: Option<Event>,
+    open: Option<OpenText>,
+}
+
+struct OpenText {
+    event: Event,
+    row: Option<i64>,
+    unsaved: usize,
+    unsaved_since: Option<Instant>,
 }
 
 impl Recorder {
@@ -284,37 +541,88 @@ impl Recorder {
         Self {
             store,
             conversation_id,
-            pending: None,
+            open: None,
         }
     }
 
     pub fn record(&mut self, event: Event) -> Result<(), StoreError> {
-        match (&mut self.pending, event) {
+        let chunk = match &event {
+            Event::MessageText(text) | Event::ThoughtText(text) => text.len(),
+            _ => {
+                self.close()?;
+                return self.append(&event).map(|_| ());
+            }
+        };
+        let grown = match (self.open.as_mut().map(|open| &mut open.event), &event) {
             (Some(Event::MessageText(buffer)), Event::MessageText(text))
             | (Some(Event::ThoughtText(buffer)), Event::ThoughtText(text)) => {
-                buffer.push_str(&text);
-                Ok(())
+                buffer.push_str(text);
+                Some(buffer.len())
             }
-            (_, event @ (Event::MessageText(_) | Event::ThoughtText(_))) => {
-                self.flush()?;
-                self.pending = Some(event);
-                Ok(())
+            _ => None,
+        };
+        let size = match grown {
+            Some(size) => size,
+            None => {
+                self.close()?;
+                self.open = Some(OpenText {
+                    event,
+                    row: None,
+                    unsaved: 0,
+                    unsaved_since: None,
+                });
+                chunk
             }
-            (_, event) => {
-                self.flush()?;
-                self.append(&event)
+        };
+        if let Some(open) = &mut self.open {
+            open.unsaved += chunk;
+            open.unsaved_since.get_or_insert_with(Instant::now);
+            if size >= ROW_BYTES {
+                return self.close();
+            }
+            if open.unsaved >= SAVE_BYTES {
+                return self.save();
+            }
+        }
+        Ok(())
+    }
+
+    /// When the text still in memory must reach the database.
+    pub fn save_due(&self) -> Option<Instant> {
+        let since = self.open.as_ref()?.unsaved_since?;
+        Some(since + SAVE_INTERVAL)
+    }
+
+    /// Writes the text received so far and keeps its row open for what follows.
+    pub fn save(&mut self) -> Result<(), StoreError> {
+        let Some(open) = &mut self.open else {
+            return Ok(());
+        };
+        if open.unsaved_since.take().is_none() {
+            return Ok(());
+        }
+        open.unsaved = 0;
+        let conversation_id = self.conversation_id;
+        match open.row {
+            Some(row) => self.store.with(|store| store.rewrite(row, &open.event)),
+            None => {
+                let row = self
+                    .store
+                    .with(|store| store.append(conversation_id, &open.event))?;
+                open.row = Some(row);
+                Ok(())
             }
         }
     }
 
-    pub fn flush(&mut self) -> Result<(), StoreError> {
-        match self.pending.take() {
-            Some(event) => self.append(&event),
-            None => Ok(()),
-        }
+    /// Writes the text received so far and ends its row: later text starts a new one.
+    pub fn close(&mut self) -> Result<(), StoreError> {
+        let saved = self.save();
+        self.open = None;
+        saved
     }
 
-    fn append(&self, event: &Event) -> Result<(), StoreError> {
+    fn append(&self, event: &Event) -> Result<i64, StoreError> {
         self.store
             .with(|store| store.append(self.conversation_id, event))
     }
@@ -474,6 +782,7 @@ mod tests {
         ] {
             recorder.record(event).unwrap();
         }
+        assert_eq!(recorder.save_due(), None);
         assert_eq!(
             events(&store, id),
             vec![
@@ -486,20 +795,284 @@ mod tests {
     }
 
     #[test]
-    fn the_recorder_keeps_pending_text_until_flush() {
+    fn a_save_writes_streamed_text_and_later_chunks_grow_the_same_row() {
+        let store = store();
+        let id = conversation(&store);
+        let store = SharedStore::new(store);
+        let mut recorder = Recorder::new(store.clone(), id);
+        assert_eq!(recorder.save_due(), None);
+        let before = Instant::now();
+        recorder
+            .record(Event::MessageText("partial".to_owned()))
+            .unwrap();
+        let due = recorder.save_due().unwrap();
+        assert!(due >= before + SAVE_INTERVAL);
+        assert!(due <= Instant::now() + SAVE_INTERVAL);
+        assert!(SAVE_INTERVAL <= Duration::from_millis(500));
+        assert!(events(&store, id).is_empty());
+
+        recorder.save().unwrap();
+        assert_eq!(recorder.save_due(), None);
+        assert_eq!(
+            events(&store, id),
+            vec![Event::MessageText("partial".to_owned())]
+        );
+
+        recorder
+            .record(Event::MessageText(" text".to_owned()))
+            .unwrap();
+        assert!(recorder.save_due().is_some());
+        recorder.save().unwrap();
+        assert_eq!(
+            events(&store, id),
+            vec![Event::MessageText("partial text".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_burst_of_text_is_saved_without_waiting_for_the_interval() {
         let store = store();
         let id = conversation(&store);
         let store = SharedStore::new(store);
         let mut recorder = Recorder::new(store.clone(), id);
         recorder
-            .record(Event::MessageText("partial".to_owned()))
+            .record(Event::MessageText("x".repeat(SAVE_BYTES)))
             .unwrap();
-        assert!(events(&store, id).is_empty());
-        recorder.flush().unwrap();
+        assert_eq!(recorder.save_due(), None);
         assert_eq!(
             events(&store, id),
-            vec![Event::MessageText("partial".to_owned())]
+            vec![Event::MessageText("x".repeat(SAVE_BYTES))]
         );
+    }
+
+    #[test]
+    fn a_long_stream_continues_in_a_new_row() {
+        let store = store();
+        let id = conversation(&store);
+        let store = SharedStore::new(store);
+        let mut recorder = Recorder::new(store.clone(), id);
+        recorder
+            .record(Event::MessageText("a".repeat(ROW_BYTES)))
+            .unwrap();
+        recorder
+            .record(Event::MessageText("tail".to_owned()))
+            .unwrap();
+        recorder.close().unwrap();
+        assert_eq!(
+            events(&store, id),
+            vec![
+                Event::MessageText("a".repeat(ROW_BYTES)),
+                Event::MessageText("tail".to_owned())
+            ]
+        );
+    }
+
+    fn version(store: &Store) -> i64 {
+        store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    fn version_1_database() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (provider, cwd, provider_session_id, created_at_ms) VALUES ('claude', '/work', 'session-1', 7)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (1, 'user_text', ?1, 8)",
+                params![serde_json::to_string(&Event::UserText("kept".to_owned())).unwrap()],
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn a_version_1_database_migrates_and_keeps_its_rows() {
+        let store = Store::from_connection(version_1_database()).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        let conversation = store.conversation(1).unwrap().unwrap();
+        assert_eq!(
+            conversation.provider_session_id.as_deref(),
+            Some("session-1")
+        );
+        assert_eq!(
+            store.events(1).unwrap(),
+            vec![Event::UserText("kept".to_owned())]
+        );
+        assert_eq!(store.queue(1).unwrap(), QueueState::default());
+    }
+
+    #[test]
+    fn a_migration_that_fails_halfway_leaves_the_previous_version() {
+        let connection = version_1_database();
+        connection
+            .execute_batch("CREATE TABLE queue (blocker INTEGER)")
+            .unwrap();
+        let store = Store { connection };
+        assert!(store.migrate().is_err());
+        assert_eq!(version(&store), 1);
+        let paused_column: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'queue_paused'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(paused_column, 0);
+        assert_eq!(
+            store.events(1).unwrap(),
+            vec![Event::UserText("kept".to_owned())]
+        );
+    }
+
+    fn request(id: &str) -> Event {
+        Event::ApprovalRequested {
+            id: id.to_owned(),
+            tool_call_id: format!("tool-{id}"),
+            title: Some("Write notes.txt".to_owned()),
+        }
+    }
+
+    #[test]
+    fn recovery_ends_a_running_turn_and_expires_its_waiting_approvals() {
+        let store = store();
+        let finished = conversation(&store);
+        let running = conversation(&store);
+        for event in [
+            Event::UserText("done".to_owned()),
+            Event::TurnEnded(TurnEnd::Completed),
+        ] {
+            store.append(finished, &event).unwrap();
+        }
+        for event in [
+            Event::UserText("first".to_owned()),
+            request("old"),
+            Event::TurnEnded(TurnEnd::Completed),
+            Event::UserText("second".to_owned()),
+            Event::MessageText("partial".to_owned()),
+            request("answered"),
+            Event::ApprovalResolved {
+                id: Some("answered".to_owned()),
+                tool_call_id: "tool-answered".to_owned(),
+                title: None,
+                decision: crowbot_protocol::ApprovalDecision::Allowed,
+            },
+            request("waiting"),
+        ] {
+            store.append(running, &event).unwrap();
+        }
+
+        assert_eq!(store.recover().unwrap(), 1);
+        assert_eq!(store.events(finished).unwrap().len(), 2);
+        let events = store.events(running).unwrap();
+        assert_eq!(
+            events[events.len() - 2..],
+            [
+                Event::ApprovalClosed {
+                    id: "waiting".to_owned(),
+                    tool_call_id: "tool-waiting".to_owned(),
+                    title: Some("Write notes.txt".to_owned()),
+                    reason: ApprovalClosure::Expired,
+                },
+                Event::TurnInterrupted {
+                    cause: Interruption::DaemonRestarted
+                },
+            ]
+        );
+
+        assert_eq!(store.recover().unwrap(), 0);
+        assert_eq!(store.events(running).unwrap(), events);
+    }
+
+    #[test]
+    fn recovery_pauses_a_queue_that_still_holds_messages() {
+        let store = store();
+        let waiting = conversation(&store);
+        let empty = conversation(&store);
+        store.enqueue(waiting, "later").unwrap();
+        store.recover().unwrap();
+        assert!(store.queue(waiting).unwrap().paused);
+        assert!(!store.queue(empty).unwrap().paused);
+        assert!(store.events(waiting).unwrap().is_empty());
+    }
+
+    fn texts(store: &Store, id: i64) -> Vec<String> {
+        store
+            .queue(id)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|message| message.text)
+            .collect()
+    }
+
+    #[test]
+    fn queued_messages_start_in_the_order_they_were_sent() {
+        let store = store();
+        let id = conversation(&store);
+        let other = conversation(&store);
+        store.enqueue(id, "one").unwrap();
+        store.enqueue(other, "elsewhere").unwrap();
+        store.enqueue(id, "two").unwrap();
+        assert_eq!(texts(&store, id), ["one", "two"]);
+        assert_eq!(store.start_queued(id).unwrap().as_deref(), Some("one"));
+        assert_eq!(store.start_queued(id).unwrap().as_deref(), Some("two"));
+        assert_eq!(store.start_queued(id).unwrap(), None);
+        assert_eq!(
+            store.events(id).unwrap(),
+            vec![
+                Event::UserText("one".to_owned()),
+                Event::UserText("two".to_owned())
+            ]
+        );
+        assert_eq!(texts(&store, other), ["elsewhere"]);
+    }
+
+    #[test]
+    fn a_queued_message_can_be_edited_deleted_and_moved_first() {
+        let store = store();
+        let id = conversation(&store);
+        for text in ["one", "two", "three"] {
+            store.enqueue(id, text).unwrap();
+        }
+        let ids: Vec<i64> = store
+            .queue(id)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert!(store.edit_queued(id, ids[1], "two, edited").unwrap());
+        assert!(store.delete_queued(id, ids[0]).unwrap());
+        assert!(store.move_queued_first(id, ids[2]).unwrap());
+        assert_eq!(texts(&store, id), ["three", "two, edited"]);
+        store.enqueue(id, "four").unwrap();
+        assert_eq!(texts(&store, id), ["three", "two, edited", "four"]);
+
+        assert!(!store.edit_queued(id, ids[0], "gone").unwrap());
+        assert!(!store.delete_queued(id, ids[0]).unwrap());
+        assert!(!store.move_queued_first(id, ids[0]).unwrap());
+        assert!(!store.edit_queued(id + 1, ids[1], "other").unwrap());
+    }
+
+    #[test]
+    fn a_queue_that_empties_is_no_longer_paused() {
+        let store = store();
+        let id = conversation(&store);
+        store.enqueue(id, "one").unwrap();
+        store.set_queue_paused(id, true).unwrap();
+        assert!(store.queue(id).unwrap().paused);
+        let queued = store.queue(id).unwrap().messages[0].id;
+        store.delete_queued(id, queued).unwrap();
+        store.enqueue(id, "two").unwrap();
+        assert!(!store.queue(id).unwrap().paused);
     }
 
     #[test]

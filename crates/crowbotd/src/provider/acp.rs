@@ -4,14 +4,14 @@ use std::str::FromStr;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind,
+    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionId, SessionModeId, SessionModeState,
     SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason, TextContent,
     ToolCallStatus,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, Error};
-use crowbot_protocol::{ApprovalDecision, Event, ToolStatus, TurnEnd};
+use crowbot_protocol::{Event, ToolStatus, TurnEnd};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -46,13 +46,38 @@ pub enum AgentEvent {
     ApprovalNeeded {
         tool_call_id: String,
         title: Option<String>,
-        reply: oneshot::Sender<ApprovalDecision>,
+        reply: oneshot::Sender<ApprovalAnswer>,
     },
+    /// The agent asked for an approval that the daemon cannot grant, because the
+    /// request offers no allow-once option. It was declined at once.
+    ApprovalRefused {
+        tool_call_id: String,
+        title: Option<String>,
+    },
+}
+
+pub enum SessionCommand {
+    Prompt(String),
+    /// Asks the agent to end the running turn, then answers the approvals that
+    /// waited as cancelled, in that order: an agent that reads its cancelled
+    /// requests already knows that the turn is stopping. The turn still ends
+    /// through the answer to its prompt, with the stop reason the agent gives.
+    Cancel {
+        approvals: Vec<oneshot::Sender<ApprovalAnswer>>,
+    },
+}
+
+/// What the daemon answers to a permission request.
+pub enum ApprovalAnswer {
+    Allow,
+    Decline,
+    /// The turn was stopped while the request waited.
+    Cancel,
 }
 
 pub async fn run_session(
     config: SessionConfig,
-    mut prompts: UnboundedReceiver<String>,
+    mut commands: UnboundedReceiver<SessionCommand>,
     events: UnboundedSender<AgentEvent>,
 ) -> Result<(), String> {
     let SessionConfig { agent, cwd, resume } = config;
@@ -80,12 +105,10 @@ pub async fn run_session(
                 let decline = decline_outcome(&request);
                 let Some(allow) = allow_once_outcome(&request) else {
                     approval_events
-                        .send(AgentEvent::Event(Event::ApprovalResolved {
-                            id: None,
+                        .send(AgentEvent::ApprovalRefused {
                             tool_call_id,
                             title,
-                            decision: ApprovalDecision::Declined,
-                        }))
+                        })
                         .ok();
                     return responder.respond(RequestPermissionResponse::new(decline));
                 };
@@ -99,8 +122,9 @@ pub async fn run_session(
                     .ok();
                 connection.spawn(async move {
                     let outcome = match decision.await {
-                        Ok(ApprovalDecision::Allowed) => allow,
-                        Ok(ApprovalDecision::Declined) | Err(_) => decline,
+                        Ok(ApprovalAnswer::Allow) => allow,
+                        Ok(ApprovalAnswer::Decline) | Err(_) => decline,
+                        Ok(ApprovalAnswer::Cancel) => RequestPermissionOutcome::Cancelled,
                     };
                     responder.respond(RequestPermissionResponse::new(outcome))
                 })
@@ -155,14 +179,35 @@ pub async fn run_session(
                 })
                 .ok();
 
-            while let Some(prompt) = prompts.recv().await {
-                let response = connection
-                    .send_request(PromptRequest::new(
-                        session_id.clone(),
-                        vec![ContentBlock::Text(TextContent::new(prompt))],
-                    ))
-                    .block_task()
-                    .await?;
+            while let Some(command) = commands.recv().await {
+                let SessionCommand::Prompt(prompt) = command else {
+                    continue;
+                };
+                let mut answer = std::pin::pin!(
+                    connection
+                        .send_request(PromptRequest::new(
+                            session_id.clone(),
+                            vec![ContentBlock::Text(TextContent::new(prompt))],
+                        ))
+                        .block_task()
+                );
+                let response = loop {
+                    tokio::select! {
+                        response = &mut answer => break response?,
+                        command = commands.recv() => match command {
+                            Some(SessionCommand::Cancel { approvals }) => {
+                                connection
+                                    .send_notification(CancelNotification::new(session_id.clone()))?;
+                                for approval in approvals {
+                                    approval.send(ApprovalAnswer::Cancel).ok();
+                                }
+                            }
+                            // The conversation sends one prompt at a time.
+                            Some(SessionCommand::Prompt(_)) => {}
+                            None => return Ok(()),
+                        },
+                    }
+                };
                 events
                     .send(AgentEvent::Event(Event::TurnEnded(turn_end(
                         response.stop_reason,

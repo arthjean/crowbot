@@ -72,13 +72,18 @@ async fn run(args: Args) -> Result<(), String> {
         }
     };
     let listener = Listener::bind(&endpoint).map_err(|error| match error.kind() {
-        ErrorKind::PermissionDenied | ErrorKind::AddrInUse => {
-            format!("another crowbotd is already listening on {endpoint}")
-        }
+        ErrorKind::PermissionDenied | ErrorKind::AddrInUse => format!(
+            "another program already holds the endpoint {endpoint}: another crowbotd is running, or another program took the name"
+        ),
         _ => format!("cannot listen on {endpoint}: {error}"),
     })?;
+    eprintln!("[crowbotd] process {}", std::process::id());
     let store = Store::open(&db).map_err(|error| error.to_string())?;
     eprintln!("[crowbotd] database {}", db.display());
+    let interrupted = store.recover().map_err(|error| error.to_string())?;
+    if interrupted > 0 {
+        eprintln!("[crowbotd] ended {interrupted} turn(s) that a previous daemon left running");
+    }
     eprintln!("[crowbotd] listening on {endpoint}");
     let daemon = Arc::new(Daemon::new(SharedStore::new(store), cwd, args.command));
     server::serve(daemon, listener).await;

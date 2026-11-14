@@ -1,4 +1,7 @@
-use crowbot_protocol::{ApprovalDecision, ConversationSnapshot, Event, ToolStatus, TurnEnd};
+use crowbot_protocol::{
+    ApprovalClosure, ApprovalDecision, ConversationSnapshot, Event, Interruption, ToolStatus,
+    TurnEnd,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
@@ -23,6 +26,7 @@ pub enum ApprovalState {
     Waiting,
     Allowed,
     Declined,
+    Cancelled,
     Expired,
 }
 
@@ -113,29 +117,29 @@ impl Transcript {
                     ApprovalDecision::Allowed => ApprovalState::Allowed,
                     ApprovalDecision::Declined => ApprovalState::Declined,
                 };
-                let waiting = self.items.iter().rposition(|item| {
-                    matches!(
-                        item,
-                        Item::Approval { id: waiting, state: ApprovalState::Waiting, .. }
-                            if id.is_some() && *waiting == id
-                    )
-                });
-                match waiting {
-                    Some(index) => {
-                        if let Item::Approval { state, .. } = &mut self.items[index] {
-                            *state = decided;
+                self.settle_approval(id, title, decided)
+            }
+            Event::ApprovalClosed {
+                id, title, reason, ..
+            } => {
+                let closed = match reason {
+                    ApprovalClosure::Cancelled => ApprovalState::Cancelled,
+                    ApprovalClosure::Expired => ApprovalState::Expired,
+                };
+                self.settle_approval(Some(id), title, closed)
+            }
+            Event::TurnInterrupted { cause } => {
+                let first = self.end_turn();
+                self.items.push(Item::Notice(
+                    match cause {
+                        Interruption::DaemonRestarted => "The daemon restarted during this turn.",
+                        Interruption::AgentUnresponsive => {
+                            "The bot did not stop in time, so its process was closed."
                         }
-                        index
                     }
-                    None => {
-                        self.items.push(Item::Approval {
-                            id,
-                            title,
-                            state: decided,
-                        });
-                        end
-                    }
-                }
+                    .to_owned(),
+                ));
+                first
             }
             Event::TurnEnded(reason) => {
                 let first = self.end_turn();
@@ -149,6 +153,37 @@ impl Transcript {
                 self.items
                     .push(Item::Notice(format!("The bot stopped: {message}")));
                 first
+            }
+        }
+    }
+
+    fn settle_approval(
+        &mut self,
+        id: Option<String>,
+        title: Option<String>,
+        settled: ApprovalState,
+    ) -> usize {
+        let waiting = self.items.iter().rposition(|item| {
+            matches!(
+                item,
+                Item::Approval { id: waiting, state: ApprovalState::Waiting, .. }
+                    if id.is_some() && *waiting == id
+            )
+        });
+        match waiting {
+            Some(index) => {
+                if let Item::Approval { state, .. } = &mut self.items[index] {
+                    *state = settled;
+                }
+                index
+            }
+            None => {
+                self.items.push(Item::Approval {
+                    id,
+                    title,
+                    state: settled,
+                });
+                self.items.len() - 1
             }
         }
     }
@@ -227,7 +262,7 @@ fn turn_end_notice(reason: TurnEnd) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use crowbot_protocol::ConversationSummary;
+    use crowbot_protocol::{ConversationSummary, QueueState};
 
     use super::*;
 
@@ -243,6 +278,7 @@ mod tests {
             events,
             turn_active,
             pending_approvals: pending.iter().map(|id| (*id).to_owned()).collect(),
+            queue: QueueState::default(),
         }
     }
 
@@ -380,6 +416,54 @@ mod tests {
         assert_eq!(
             transcript.items()[3],
             Item::Notice("The bot stopped: the agent exited".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_stop_closes_the_request_as_cancelled() {
+        let mut transcript = Transcript::default();
+        transcript.apply(Event::UserText("go".to_owned()));
+        transcript.apply(request("a1"));
+        let changed = transcript.apply(Event::ApprovalClosed {
+            id: "a1".to_owned(),
+            tool_call_id: "tool".to_owned(),
+            title: Some("Write notes.txt".to_owned()),
+            reason: ApprovalClosure::Cancelled,
+        });
+        assert_eq!(changed, 1);
+        transcript.apply(Event::TurnEnded(TurnEnd::Cancelled));
+        assert_eq!(
+            transcript.items()[1],
+            approval(Some("a1"), ApprovalState::Cancelled)
+        );
+        assert!(!transcript.turn_active());
+    }
+
+    #[test]
+    fn a_turn_interrupted_by_a_restart_is_over_and_says_why() {
+        let events = vec![
+            Event::UserText("go".to_owned()),
+            Event::MessageText("partial".to_owned()),
+            request("a1"),
+            Event::ApprovalClosed {
+                id: "a1".to_owned(),
+                tool_call_id: "tool".to_owned(),
+                title: Some("Write notes.txt".to_owned()),
+                reason: ApprovalClosure::Expired,
+            },
+            Event::TurnInterrupted {
+                cause: Interruption::DaemonRestarted,
+            },
+        ];
+        let transcript = Transcript::from_snapshot(snapshot(events, false, &[]));
+        assert!(!transcript.turn_active());
+        assert_eq!(
+            transcript.items()[1..],
+            [
+                Item::Assistant("partial".to_owned()),
+                approval(Some("a1"), ApprovalState::Expired),
+                Item::Notice("The daemon restarted during this turn.".to_owned()),
+            ]
         );
     }
 

@@ -11,12 +11,22 @@ publish.workspace = true
 workspace = true
 
 [features]
-transport = ["dep:tokio"]
+transport = ["dep:tokio", "dep:windows-sys"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "time"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }

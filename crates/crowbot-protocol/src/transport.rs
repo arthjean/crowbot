@@ -75,112 +75,12 @@ fn split(stream: BoxedStream, limit: usize) -> (MessageReader, MessageWriter) {
 }
 
 #[cfg(windows)]
-mod platform {
-    use std::io;
-    use std::time::Duration;
-
-    use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
-
-    use super::BoxedStream;
-    use crate::Endpoint;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    pub struct Listener {
-        address: String,
-        next: NamedPipeServer,
-    }
-
-    impl Listener {
-        pub fn bind(endpoint: &Endpoint) -> io::Result<Self> {
-            let next = ServerOptions::new()
-                .first_pipe_instance(true)
-                .reject_remote_clients(true)
-                .create(endpoint.address())?;
-            Ok(Self {
-                address: endpoint.address().to_owned(),
-                next,
-            })
-        }
-
-        pub async fn accept(&mut self) -> io::Result<BoxedStream> {
-            let connected = self.next.connect().await;
-            let fresh = ServerOptions::new()
-                .reject_remote_clients(true)
-                .create(&self.address)?;
-            let stream = std::mem::replace(&mut self.next, fresh);
-            connected?;
-            Ok(Box::new(stream))
-        }
-    }
-
-    pub async fn connect(endpoint: &Endpoint) -> io::Result<BoxedStream> {
-        loop {
-            match ClientOptions::new().open(endpoint.address()) {
-                Ok(stream) => return Ok(Box::new(stream)),
-                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-}
+#[path = "transport/windows.rs"]
+mod platform;
 
 #[cfg(unix)]
-mod platform {
-    use std::io;
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    use std::path::Path;
-
-    use tokio::net::{UnixListener, UnixStream};
-
-    use super::BoxedStream;
-    use crate::Endpoint;
-
-    pub struct Listener {
-        inner: UnixListener,
-        owner: u32,
-    }
-
-    impl Listener {
-        pub fn bind(endpoint: &Endpoint) -> io::Result<Self> {
-            let path = Path::new(endpoint.address());
-            if path.exists() {
-                if std::os::unix::net::UnixStream::connect(path).is_ok() {
-                    return Err(io::ErrorKind::AddrInUse.into());
-                }
-                std::fs::remove_file(path)?;
-            }
-            if let Some(parent) = path.parent() {
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(parent)?;
-            }
-            let inner = UnixListener::bind(path)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-            let owner = std::fs::metadata(path)?.uid();
-            Ok(Self { inner, owner })
-        }
-
-        pub async fn accept(&mut self) -> io::Result<BoxedStream> {
-            loop {
-                let (stream, _) = self.inner.accept().await?;
-                let same_user = stream
-                    .peer_cred()
-                    .is_ok_and(|peer| peer.uid() == self.owner);
-                if same_user {
-                    return Ok(Box::new(stream));
-                }
-            }
-        }
-    }
-
-    pub async fn connect(endpoint: &Endpoint) -> io::Result<BoxedStream> {
-        Ok(Box::new(UnixStream::connect(endpoint.address()).await?))
-    }
-}
+#[path = "transport/unix.rs"]
+mod platform;
 
 pub struct Listener {
     inner: platform::Listener,

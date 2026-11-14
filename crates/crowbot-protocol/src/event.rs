@@ -28,15 +28,27 @@ pub enum Event {
         title: Option<String>,
         decision: ApprovalDecision,
     },
+    ApprovalClosed {
+        id: String,
+        tool_call_id: String,
+        title: Option<String>,
+        reason: ApprovalClosure,
+    },
     TurnEnded(TurnEnd),
     TurnFailed {
         message: String,
+    },
+    TurnInterrupted {
+        cause: Interruption,
     },
 }
 
 impl Event {
     pub fn ends_turn(&self) -> bool {
-        matches!(self, Self::TurnEnded(_) | Self::TurnFailed { .. })
+        matches!(
+            self,
+            Self::TurnEnded(_) | Self::TurnFailed { .. } | Self::TurnInterrupted { .. }
+        )
     }
 }
 
@@ -54,6 +66,20 @@ pub enum ToolStatus {
 pub enum ApprovalDecision {
     Allowed,
     Declined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalClosure {
+    Cancelled,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Interruption {
+    DaemonRestarted,
+    AgentUnresponsive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,11 +124,38 @@ mod tests {
     }
 
     #[test]
-    fn only_turn_ends_and_failures_end_a_turn() {
+    fn an_interruption_and_a_closed_approval_have_a_stable_stored_shape() {
+        assert_eq!(
+            serde_json::to_string(&Event::TurnInterrupted {
+                cause: Interruption::DaemonRestarted
+            })
+            .unwrap(),
+            r#"{"type":"turn_interrupted","data":{"cause":"daemon_restarted"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::ApprovalClosed {
+                id: "a1".to_owned(),
+                tool_call_id: "t1".to_owned(),
+                title: None,
+                reason: ApprovalClosure::Expired,
+            })
+            .unwrap(),
+            r#"{"type":"approval_closed","data":{"id":"a1","tool_call_id":"t1","title":null,"reason":"expired"}}"#
+        );
+    }
+
+    #[test]
+    fn turn_ends_failures_and_interruptions_end_a_turn() {
         assert!(Event::TurnEnded(TurnEnd::Cancelled).ends_turn());
         assert!(
             Event::TurnFailed {
                 message: "gone".to_owned()
+            }
+            .ends_turn()
+        );
+        assert!(
+            Event::TurnInterrupted {
+                cause: Interruption::AgentUnresponsive
             }
             .ends_turn()
         );

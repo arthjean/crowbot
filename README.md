@@ -8,11 +8,11 @@ Crows learn by watching, use tools, and remember. So do the bots.
 
 Prototype. The daemon listens on a local endpoint, starts Claude through the Agent Client Protocol, and records every event in SQLite. The desktop client attaches to it, shows a conversation as it streams, and asks you to allow or decline each gated tool call.
 
-Start the daemon, then the client:
+Build the daemon, then start the client. The client starts the daemon when none is running:
 
 ```sh
-cargo run -p crowbotd -- --cwd <dir>
-cargo run --manifest-path crates/crowbot-desktop/Cargo.toml
+cargo build -p crowbotd
+cargo run --manifest-path crates/crowbot-desktop/Cargo.toml -- --daemon target/debug/crowbotd
 ```
 
 The client is its own Cargo workspace, so its commands run from `crates/crowbot-desktop` or with `--manifest-path`.
@@ -21,15 +21,16 @@ The daemon:
 
 - `--cwd <dir>` is the folder where new conversations work. The default is the folder the daemon starts in.
 - `--db <path>` selects the database. The default is `~/.crowbot/crowbot.db`.
-- `--endpoint <address>` selects where it listens. The default is the named pipe `\\.\pipe\crowbotd-<user>` on Windows and the socket `~/.crowbot/crowbotd.sock` elsewhere.
+- `--endpoint <address>` selects where it listens. The default is the named pipe `\\.\pipe\crowbotd-<user>` on Windows and the socket `~/.crowbot/crowbotd.sock` elsewhere. Only the user who runs the daemon can attach to it.
 - `--agent "<command>"` starts another ACP agent for new conversations.
 
 The client:
 
 - It opens the most recent conversation. Closing the window does not stop a turn: the daemon keeps working, and an approval request waits until a client answers it.
-- Enter sends the message, Shift+Enter adds a line.
+- Enter sends the message, Shift+Enter adds a line. A message sent while the bot works waits in a queue and runs next. Stop ends the running turn.
 - `--endpoint <address>` attaches to a daemon that listens somewhere else.
-- When no daemon is running, the window says so and reconnects on its own.
+- When no daemon is running, the client starts `crowbotd` from the folder of its own executable, or from `--daemon <path>`. The daemon keeps running after the window closes, works in your home folder, and logs to `~/.crowbot/crowbotd.log`. Arguments after `--` go to the daemon it starts.
+- When the daemon cannot start, the window states the reason and offers to retry. When the daemon stops, the client starts it again.
 
 It needs Bun, Node.js 22 or later, and a signed-in Claude Code.
 
