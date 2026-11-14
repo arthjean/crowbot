@@ -12,8 +12,10 @@ Start the daemon, then the client:
 
 ```sh
 cargo run -p crowbotd -- --cwd <dir>
-cargo run -p crowbot-desktop
+cargo run --manifest-path crates/crowbot-desktop/Cargo.toml
 ```
+
+The client is its own Cargo workspace, so its commands run from `crates/crowbot-desktop` or with `--manifest-path`.
 
 The daemon:
 
