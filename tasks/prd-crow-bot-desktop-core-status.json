@@ -25,10 +25,10 @@
     {
       "id": "EP-003",
       "title": "Desktop shell with OpenBot's layout",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 6,
-      "stories_done": 0
+      "stories_done": 6
     },
     {
       "id": "EP-004",
@@ -190,85 +190,85 @@
       "id": "US-011",
       "title": "Design tokens and theme",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-012",
       "title": "Window frame and resizable sidebar",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-011"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-013",
       "title": "Sidebar structure and bot rows",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-010",
         "US-012"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-014",
       "title": "Sidebar actions",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "size": "M",
       "blocked_by": [
         "US-013"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-015",
       "title": "Conversation header",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [
         "US-012"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-016",
       "title": "Connection and loading states",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [
         "US-001",
         "US-011"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-14",
+      "reviewed_at": "2026-11-14"
     },
     {
       "id": "US-017",
