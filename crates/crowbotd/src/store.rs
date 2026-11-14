@@ -1,5 +1,9 @@
+mod bots;
+
+pub use bots::{BotRow, NewBot};
+
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -8,7 +12,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -52,6 +56,34 @@ CREATE TABLE queue (
 CREATE INDEX queue_by_conversation ON queue(conversation_id, position, id);
 ";
 
+/// Bots own the conversations. The columns `provider`, `command`, and `cwd` of a
+/// conversation stay as a record of where it started: the daemon reads the
+/// provider and the folder from the bot.
+const SCHEMA_V3: &str = "
+CREATE TABLE bots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL DEFAULT '',
+    avatar_color TEXT NOT NULL,
+    avatar_glyph TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT,
+    permission_level TEXT NOT NULL DEFAULT 'ask_first',
+    workspace TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    current_conversation_id INTEGER,
+    session_revision INTEGER NOT NULL DEFAULT 1,
+    created_at_ms INTEGER NOT NULL
+);
+ALTER TABLE conversations ADD COLUMN bot_id INTEGER REFERENCES bots(id);
+ALTER TABLE conversations ADD COLUMN title TEXT;
+ALTER TABLE conversations ADD COLUMN session_revision INTEGER;
+ALTER TABLE conversations ADD COLUMN read_event_id INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX conversations_by_bot ON conversations(bot_id);
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -71,13 +103,12 @@ WHERE NOT EXISTS (
 const SUMMARIES: &str = "
 SELECT
     c.id,
-    c.cwd,
+    c.bot_id,
+    c.title,
     c.created_at_ms,
-    (SELECT payload FROM events
-        WHERE conversation_id = c.id AND kind = 'user_text' ORDER BY id LIMIT 1),
     COALESCE((SELECT MAX(created_at_ms) FROM events WHERE conversation_id = c.id), c.created_at_ms)
 FROM conversations c
-WHERE ?1 IS NULL OR c.id = ?1
+WHERE (?1 IS NULL OR c.bot_id = ?1) AND (?2 IS NULL OR c.id = ?2)
 ORDER BY 5 DESC, c.id DESC
 ";
 
@@ -125,10 +156,12 @@ impl From<std::io::Error> for StoreError {
 
 pub struct Conversation {
     pub id: i64,
-    pub provider: String,
-    pub command: Option<String>,
-    pub cwd: PathBuf,
+    pub bot_id: i64,
+    pub title: Option<String>,
     pub provider_session_id: Option<String>,
+    /// The revision of the bot's session settings that the provider session
+    /// was started with. The session is resumed only while the bot still has it.
+    pub session_revision: Option<i64>,
 }
 
 pub struct Store {
@@ -162,17 +195,20 @@ impl Store {
         if version < 1 {
             self.connection.execute_batch(SCHEMA_V1)?;
         }
-        if version < 2 {
-            self.upgrade(SCHEMA_V2, 2)?;
+        if version >= SCHEMA_VERSION {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    /// Applies one schema step and its version number together, or nothing at all.
-    fn upgrade(&self, statements: &str, version: i64) -> Result<(), StoreError> {
+        // Every pending step and the version number are applied together, or
+        // nothing at all: a failure leaves the database as it was.
         let transaction = self.connection.unchecked_transaction()?;
-        transaction.execute_batch(statements)?;
-        transaction.pragma_update(None, "user_version", version)?;
+        if version < 2 {
+            transaction.execute_batch(SCHEMA_V2)?;
+        }
+        if version < 3 {
+            transaction.execute_batch(SCHEMA_V3)?;
+            self.adopt_conversations()?;
+        }
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(())
     }
@@ -251,38 +287,20 @@ impl Store {
         Ok(open)
     }
 
-    pub fn create_conversation(
-        &self,
-        provider: &str,
-        command: Option<&str>,
-        cwd: &Path,
-    ) -> Result<Conversation, StoreError> {
-        self.connection.execute(
-            "INSERT INTO conversations (provider, command, cwd, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
-            params![provider, command, cwd.to_string_lossy(), now_ms()],
-        )?;
-        Ok(Conversation {
-            id: self.connection.last_insert_rowid(),
-            provider: provider.to_owned(),
-            command: command.map(str::to_owned),
-            cwd: cwd.to_path_buf(),
-            provider_session_id: None,
-        })
-    }
-
     pub fn conversation(&self, id: i64) -> Result<Option<Conversation>, StoreError> {
         let conversation = self
             .connection
             .query_row(
-                "SELECT id, provider, command, cwd, provider_session_id FROM conversations WHERE id = ?1",
+                "SELECT id, bot_id, title, provider_session_id, session_revision
+                 FROM conversations WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Conversation {
                         id: row.get(0)?,
-                        provider: row.get(1)?,
-                        command: row.get(2)?,
-                        cwd: PathBuf::from(row.get::<_, String>(3)?),
-                        provider_session_id: row.get(4)?,
+                        bot_id: row.get(1)?,
+                        title: row.get(2)?,
+                        provider_session_id: row.get(3)?,
+                        session_revision: row.get(4)?,
                     })
                 },
             )
@@ -290,26 +308,28 @@ impl Store {
         Ok(conversation)
     }
 
-    pub fn summaries(&self) -> Result<Vec<ConversationSummary>, StoreError> {
-        self.query_summaries(None)
+    /// The conversations of a bot, the most recently active first.
+    pub fn summaries(&self, bot_id: i64) -> Result<Vec<ConversationSummary>, StoreError> {
+        self.query_summaries(Some(bot_id), None)
     }
 
     pub fn summary(&self, id: i64) -> Result<Option<ConversationSummary>, StoreError> {
-        Ok(self.query_summaries(Some(id))?.pop())
+        Ok(self.query_summaries(None, Some(id))?.pop())
     }
 
-    fn query_summaries(&self, id: Option<i64>) -> Result<Vec<ConversationSummary>, StoreError> {
+    fn query_summaries(
+        &self,
+        bot_id: Option<i64>,
+        id: Option<i64>,
+    ) -> Result<Vec<ConversationSummary>, StoreError> {
         let mut statement = self.connection.prepare(SUMMARIES)?;
         let summaries = statement
-            .query_map(params![id], |row| {
+            .query_map(params![bot_id, id], |row| {
                 Ok(ConversationSummary {
                     id: row.get(0)?,
-                    cwd: row.get(1)?,
-                    created_at_ms: row.get(2)?,
-                    title: row
-                        .get::<_, Option<String>>(3)?
-                        .as_deref()
-                        .and_then(title_from),
+                    bot_id: row.get(1)?,
+                    title: row.get(2)?,
+                    created_at_ms: row.get(3)?,
                     last_activity_ms: row.get(4)?,
                 })
             })?
@@ -317,14 +337,27 @@ impl Store {
         Ok(summaries)
     }
 
+    /// Gives a conversation its title, from its first message, when it has none.
+    pub fn set_title(&self, conversation_id: i64, first_message: &str) -> Result<bool, StoreError> {
+        let Some(title) = title_of(first_message) else {
+            return Ok(false);
+        };
+        let titled = self.connection.execute(
+            "UPDATE conversations SET title = ?2 WHERE id = ?1 AND title IS NULL",
+            params![conversation_id, title],
+        )?;
+        Ok(titled > 0)
+    }
+
     pub fn set_provider_session(
         &self,
         conversation_id: i64,
         provider_session_id: &str,
+        session_revision: i64,
     ) -> Result<(), StoreError> {
         self.connection.execute(
-            "UPDATE conversations SET provider_session_id = ?2 WHERE id = ?1",
-            params![conversation_id, provider_session_id],
+            "UPDATE conversations SET provider_session_id = ?2, session_revision = ?3 WHERE id = ?1",
+            params![conversation_id, provider_session_id, session_revision],
         )?;
         Ok(())
     }
@@ -494,10 +527,9 @@ fn kind(event: &Event) -> &'static str {
     }
 }
 
-fn title_from(payload: &str) -> Option<String> {
-    let Ok(Event::UserText(text)) = serde_json::from_str(payload) else {
-        return None;
-    };
+/// The title a conversation takes from its first message: the first line that
+/// holds text, cut at 80 characters.
+fn title_of(text: &str) -> Option<String> {
     let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
     let mut title: String = line.chars().take(TITLE_LENGTH).collect();
     if line.chars().count() > TITLE_LENGTH {
@@ -646,11 +678,27 @@ mod tests {
         Store::from_connection(Connection::open_in_memory().unwrap()).unwrap()
     }
 
-    fn conversation(store: &Store) -> i64 {
+    fn bot(store: &Store) -> bots::BotRow {
         store
-            .create_conversation("claude", None, Path::new("/work"))
+            .create_bot(&bots::NewBot {
+                name: "Atlas".to_owned(),
+                title: String::new(),
+                instructions: String::new(),
+                avatar: crowbot_protocol::Avatar {
+                    color: "#3b82f6".to_owned(),
+                    glyph: "A".to_owned(),
+                },
+                provider: "claude".to_owned(),
+                model: None,
+                permission_level: crowbot_protocol::PermissionLevel::AskFirst,
+                workspace: "/work".to_owned(),
+            })
             .unwrap()
-            .id
+    }
+
+    /// A conversation of a bot of its own.
+    fn conversation(store: &Store) -> i64 {
+        bot(store).current_conversation_id
     }
 
     fn events(store: &SharedStore, id: i64) -> Vec<Event> {
@@ -701,52 +749,42 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_keeps_its_provider_command_and_folder() {
-        let store = store();
-        let created = store
-            .create_conversation("custom", Some("my-agent --acp"), Path::new("/work"))
-            .unwrap();
-        let loaded = store.conversation(created.id).unwrap().unwrap();
-        assert_eq!(loaded.provider, "custom");
-        assert_eq!(loaded.command.as_deref(), Some("my-agent --acp"));
-        assert_eq!(loaded.cwd, PathBuf::from("/work"));
-        assert_eq!(loaded.provider_session_id, None);
-    }
-
-    #[test]
-    fn a_summary_takes_its_title_from_the_first_user_message() {
+    fn a_conversation_takes_its_title_from_its_first_message_once() {
         let store = store();
         let id = conversation(&store);
         assert_eq!(store.summary(id).unwrap().unwrap().title, None);
-        store
-            .append(
-                id,
-                &Event::UserText("\n  Plan the trip  \nwith details".to_owned()),
-            )
-            .unwrap();
-        store
-            .append(id, &Event::UserText("second message".to_owned()))
-            .unwrap();
+        assert!(!store.set_title(id, "  \n ").unwrap());
+        assert!(
+            store
+                .set_title(id, "\n  Plan the trip  \nwith details")
+                .unwrap()
+        );
+        assert!(!store.set_title(id, "second message").unwrap());
         let summary = store.summary(id).unwrap().unwrap();
         assert_eq!(summary.title.as_deref(), Some("Plan the trip"));
-        assert_eq!(summary.cwd, "/work");
+        assert_eq!(
+            store.conversation(id).unwrap().unwrap().title,
+            summary.title
+        );
     }
 
     #[test]
     fn a_long_first_message_gives_a_shortened_title() {
         let store = store();
         let id = conversation(&store);
-        store.append(id, &Event::UserText("é".repeat(200))).unwrap();
+        store.set_title(id, &"é".repeat(200)).unwrap();
         let title = store.summary(id).unwrap().unwrap().title.unwrap();
         assert_eq!(title.chars().count(), TITLE_LENGTH + 1);
         assert!(title.ends_with('…'));
     }
 
     #[test]
-    fn summaries_list_the_most_recently_active_conversation_first() {
+    fn a_bot_lists_its_conversations_with_the_most_recently_active_first() {
         let store = store();
-        let first = conversation(&store);
-        let second = conversation(&store);
+        let owner = bot(&store);
+        let first = owner.current_conversation_id;
+        let second = store.new_conversation(owner.bot.id).unwrap().unwrap().id;
+        let elsewhere = conversation(&store);
         store
             .connection
             .execute(
@@ -759,12 +797,28 @@ mod tests {
             )
             .unwrap();
         let ids: Vec<i64> = store
-            .summaries()
+            .summaries(owner.bot.id)
             .unwrap()
             .iter()
             .map(|summary| summary.id)
             .collect();
         assert_eq!(ids, vec![first, second]);
+        assert!(!ids.contains(&elsewhere));
+    }
+
+    #[test]
+    fn a_provider_session_is_stored_with_the_revision_it_started_with() {
+        let store = store();
+        let id = conversation(&store);
+        let fresh = store.conversation(id).unwrap().unwrap();
+        assert_eq!(
+            (fresh.provider_session_id, fresh.session_revision),
+            (None, None)
+        );
+        store.set_provider_session(id, "session-1", 4).unwrap();
+        let started = store.conversation(id).unwrap().unwrap();
+        assert_eq!(started.provider_session_id.as_deref(), Some("session-1"));
+        assert_eq!(started.session_revision, Some(4));
     }
 
     #[test]
@@ -901,6 +955,7 @@ mod tests {
             conversation.provider_session_id.as_deref(),
             Some("session-1")
         );
+        assert_eq!(conversation.title.as_deref(), Some("kept"));
         assert_eq!(
             store.events(1).unwrap(),
             vec![Event::UserText("kept".to_owned())]
@@ -963,6 +1018,7 @@ mod tests {
                 tool_call_id: "tool-answered".to_owned(),
                 title: None,
                 decision: crowbot_protocol::ApprovalDecision::Allowed,
+                reason: None,
             },
             request("waiting"),
         ] {

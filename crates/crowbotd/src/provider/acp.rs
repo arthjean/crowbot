@@ -6,8 +6,10 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind,
     PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionId, SessionModeId, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason, TextContent,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue, SessionId,
+    SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, SystemPrompt, TextContent,
     ToolCallStatus,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, Error};
@@ -36,6 +38,12 @@ pub struct SessionConfig {
     pub agent: AgentProfile,
     pub cwd: PathBuf,
     pub resume: Option<String>,
+    /// The bot's instructions. They reach the agent as the system prompt of
+    /// the session, or at the start of its first prompt when the agent takes
+    /// no system prompt.
+    pub instructions: String,
+    /// The model the session runs on. `None` keeps the agent's default.
+    pub model: Option<String>,
 }
 
 pub enum AgentEvent {
@@ -80,7 +88,13 @@ pub async fn run_session(
     mut commands: UnboundedReceiver<SessionCommand>,
     events: UnboundedSender<AgentEvent>,
 ) -> Result<(), String> {
-    let SessionConfig { agent, cwd, resume } = config;
+    let SessionConfig {
+        agent,
+        cwd,
+        resume,
+        instructions,
+        model,
+    } = config;
     let process = AcpAgent::from_str(&agent.command).map_err(|error| error.to_string())?;
     let update_events = events.clone();
     let approval_events = events.clone();
@@ -137,27 +151,37 @@ pub async fn run_session(
                 .block_task()
                 .await?;
 
-            let (session_id, modes) = match resume {
+            let capabilities = initialized.agent_capabilities.session_capabilities;
+            let system_prompt = (capabilities.system_prompt.is_some() && !instructions.is_empty())
+                .then(|| {
+                    SystemPrompt::new(vec![ContentBlock::Text(TextContent::new(
+                        instructions.clone(),
+                    ))])
+                });
+            // An agent that takes no system prompt reads the instructions once,
+            // at the start of the first prompt of a new session.
+            let mut preface =
+                (system_prompt.is_none() && resume.is_none() && !instructions.is_empty())
+                    .then_some(instructions);
+
+            let (session_id, modes, config_options) = match resume {
                 Some(provider_session_id) => {
-                    if initialized
-                        .agent_capabilities
-                        .session_capabilities
-                        .resume
-                        .is_none()
-                    {
+                    if capabilities.resume.is_none() {
                         return Err(failure("the agent cannot resume a session"));
                     }
                     let session_id = SessionId::new(provider_session_id);
                     let mut request = ResumeSessionRequest::new(session_id.clone(), cwd);
                     request.meta = agent.session_meta;
+                    request.system_prompt = system_prompt;
                     let resumed = connection.send_request(request).block_task().await?;
-                    (session_id, resumed.modes)
+                    (session_id, resumed.modes, resumed.config_options)
                 }
                 None => {
                     let mut request = NewSessionRequest::new(cwd);
                     request.meta = agent.session_meta;
+                    request.system_prompt = system_prompt;
                     let created = connection.send_request(request).block_task().await?;
-                    (created.session_id, created.modes)
+                    (created.session_id, created.modes, created.config_options)
                 }
             };
 
@@ -173,6 +197,22 @@ pub async fn run_session(
                     .await?;
             }
 
+            if let Some(model) = model.as_deref()
+                && let Some(option) = model_option(config_options.as_deref(), model)?
+            {
+                connection
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        session_id.clone(),
+                        option,
+                        SessionConfigOptionValue::value_id(model.to_owned()),
+                    ))
+                    .block_task()
+                    .await
+                    .map_err(|error| {
+                        failure(&format!("the agent refused the model `{model}`: {error}"))
+                    })?;
+            }
+
             events
                 .send(AgentEvent::Started {
                     provider_session_id: session_id.0.to_string(),
@@ -183,12 +223,15 @@ pub async fn run_session(
                 let SessionCommand::Prompt(prompt) = command else {
                     continue;
                 };
+                let content = preface
+                    .take()
+                    .into_iter()
+                    .chain([prompt])
+                    .map(|text| ContentBlock::Text(TextContent::new(text)))
+                    .collect();
                 let mut answer = std::pin::pin!(
                     connection
-                        .send_request(PromptRequest::new(
-                            session_id.clone(),
-                            vec![ContentBlock::Text(TextContent::new(prompt))],
-                        ))
+                        .send_request(PromptRequest::new(session_id.clone(), content))
                         .block_task()
                 );
                 let response = loop {
@@ -237,6 +280,28 @@ fn needs_mode_change(modes: Option<&SessionModeState>, mode: &str) -> Result<boo
         )));
     }
     Ok(modes.is_some_and(|modes| modes.current_mode_id.0.as_ref() != mode))
+}
+
+/// The config option that sets the model, when the session does not run on
+/// `model` yet. An agent that offers no model choice cannot run the bot's model.
+fn model_option(
+    options: Option<&[SessionConfigOption]>,
+    model: &str,
+) -> Result<Option<SessionConfigId>, Error> {
+    let option = options
+        .unwrap_or_default()
+        .iter()
+        .find(|option| option.category == Some(SessionConfigOptionCategory::Model))
+        .ok_or_else(|| {
+            failure(&format!(
+                "the agent offers no model choice, so it cannot run on the model `{model}`"
+            ))
+        })?;
+    let current = match &option.kind {
+        SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
+        _ => None,
+    };
+    Ok((current != Some(model)).then(|| option.id.clone()))
 }
 
 fn select(
@@ -315,7 +380,8 @@ fn turn_end(reason: StopReason) -> TurnEnd {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::v1::schema::{
-        ContentChunk, PermissionOption, SessionMode, ToolCallUpdate, ToolCallUpdateFields,
+        ContentChunk, PermissionOption, SessionConfigSelectOption, SessionMode, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
 
     use super::*;
@@ -409,6 +475,47 @@ mod tests {
         let state = modes("plan", &["plan"]);
         assert!(needs_mode_change(Some(&state), "default").is_err());
         assert!(needs_mode_change(None, "default").is_err());
+    }
+
+    fn no_choice() -> Vec<SessionConfigSelectOption> {
+        Vec::new()
+    }
+
+    fn model_options(current: &str) -> Vec<SessionConfigOption> {
+        let models = vec![
+            SessionConfigSelectOption::new("fast", "Fast"),
+            SessionConfigSelectOption::new("smart", "Smart"),
+        ];
+        vec![
+            SessionConfigOption::select("mode", "Mode", "default", no_choice()),
+            SessionConfigOption::select("model", "Model", current.to_owned(), models)
+                .category(SessionConfigOptionCategory::Model),
+        ]
+    }
+
+    #[test]
+    fn the_model_is_set_through_the_option_of_the_model_category() {
+        let options = model_options("fast");
+        let option = model_option(Some(&options), "smart").unwrap();
+        assert_eq!(option, Some(SessionConfigId::new("model")));
+    }
+
+    #[test]
+    fn a_session_already_on_the_model_needs_no_change() {
+        let options = model_options("smart");
+        assert_eq!(model_option(Some(&options), "smart").unwrap(), None);
+    }
+
+    #[test]
+    fn an_agent_with_no_model_choice_cannot_run_a_chosen_model() {
+        let no_model = vec![SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "default",
+            no_choice(),
+        )];
+        assert!(model_option(Some(&no_model), "smart").is_err());
+        assert!(model_option(None, "smart").is_err());
     }
 
     #[test]

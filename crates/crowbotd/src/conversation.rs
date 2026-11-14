@@ -1,20 +1,19 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
-    ApprovalClosure, ApprovalDecision, ConversationSnapshot, Event, Interruption, QueueState,
-    ServerMessage,
+    ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, Interruption,
+    PermissionLevel, QueueState, ServerMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
-use crate::provider::acp::{
-    self, AgentEvent, AgentProfile, ApprovalAnswer, SessionCommand, SessionConfig,
-};
-use crate::provider::claude;
-use crate::store::{Conversation, Recorder, SharedStore, StoreError};
-
-pub const CUSTOM_PROVIDER: &str = "custom";
+use crate::daemon::Daemon;
+use crate::provider::acp::{self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig};
+use crate::store::{BotRow, Conversation, Recorder, SharedStore, StoreError};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -55,6 +54,20 @@ pub enum Command {
     ResumeQueue {
         sink: Sink,
     },
+    /// A client shows the conversation up to its end. With `following`, it
+    /// keeps the end on screen, so the turns that end next are read as well.
+    MarkRead {
+        connection: u64,
+        following: bool,
+        sink: Sink,
+    },
+    /// The bot moved to Full access: the approvals that wait are allowed.
+    PermissionLevelChanged,
+    /// The bot is being deleted: the running turn stops, then the task ends
+    /// and tells so through `done`.
+    ShutDown {
+        done: oneshot::Sender<()>,
+    },
 }
 
 enum Input {
@@ -80,12 +93,19 @@ impl ConversationHandle {
     }
 }
 
-pub fn spawn(store: SharedStore, conversation_id: i64) -> ConversationHandle {
+pub fn spawn(daemon: Arc<Daemon>, conversation: &Conversation) -> ConversationHandle {
     let (inputs, receiver) = mpsc::unbounded_channel();
+    let store = daemon.store().clone();
     let actor = Actor {
-        id: conversation_id,
-        recorder: Recorder::new(store.clone(), conversation_id),
+        id: conversation.id,
+        bot_id: conversation.bot_id,
+        titled: conversation.title.is_some(),
+        recorder: Recorder::new(store.clone(), conversation.id),
         store,
+        daemon,
+        closing: None,
+        finished: false,
+        followers: HashSet::new(),
         inputs: inputs.clone(),
         subscribers: Vec::new(),
         session: None,
@@ -107,6 +127,8 @@ struct Subscriber {
 
 struct Session {
     generation: u64,
+    /// The revision of the bot's session settings this session was started with.
+    revision: i64,
     commands: UnboundedSender<SessionCommand>,
     task: AbortHandle,
 }
@@ -120,6 +142,15 @@ struct PendingApproval {
 
 struct Actor {
     id: i64,
+    bot_id: i64,
+    /// The conversation has its title, so no later message can give it one.
+    titled: bool,
+    daemon: Arc<Daemon>,
+    /// Set while the bot is being deleted: answered once no turn runs.
+    closing: Option<oneshot::Sender<()>>,
+    finished: bool,
+    /// The attached clients that keep the end of the conversation on screen.
+    followers: HashSet<u64>,
     store: SharedStore,
     recorder: Recorder,
     inputs: UnboundedSender<Input>,
@@ -160,6 +191,9 @@ impl Actor {
                 }
                 None => break,
             }
+            if self.finished {
+                break;
+            }
         }
     }
 
@@ -196,7 +230,13 @@ impl Actor {
             Command::Unsubscribe { connection } => {
                 self.subscribers
                     .retain(|subscriber| subscriber.connection != connection);
+                self.followers.remove(&connection);
             }
+            Command::MarkRead {
+                connection,
+                following,
+                sink,
+            } => self.mark_read(connection, following, &sink),
             Command::Prompt { text, sink } => self.prompt(text, &sink),
             Command::ResolveApproval {
                 approval_id,
@@ -212,6 +252,95 @@ impl Actor {
             Command::DeleteQueued { queue_id, sink } => self.delete_queued(queue_id, &sink),
             Command::SendQueuedNow { queue_id, sink } => self.send_queued_now(queue_id, &sink),
             Command::ResumeQueue { sink } => self.resume_queue(&sink),
+            Command::PermissionLevelChanged => self.permission_level_changed(),
+            Command::ShutDown { done } => self.shut_down(done),
+        }
+    }
+
+    fn mark_read(&mut self, connection: u64, following: bool, sink: &Sink) {
+        let subscribed = self
+            .subscribers
+            .iter()
+            .any(|subscriber| subscriber.connection == connection);
+        if following && subscribed {
+            self.followers.insert(connection);
+        } else {
+            self.followers.remove(&connection);
+        }
+        match self.store.with(|store| store.mark_read(self.id)) {
+            Ok(_) => self.daemon.publish_bot(self.bot_id),
+            Err(error) => report(sink, error.to_string()),
+        }
+    }
+
+    /// Tells the daemon what this conversation is doing, for the bot's state.
+    fn sync(&self) {
+        self.daemon.report_activity(
+            self.id,
+            self.bot_id,
+            self.turn_active,
+            !self.approvals.is_empty(),
+        );
+    }
+
+    /// The level comes from the bot's record and from nowhere else: no prompt,
+    /// tool result, or file reaches it. A record that cannot be read asks first.
+    fn permission_level(&self) -> PermissionLevel {
+        match self.store.with(|store| store.bot(self.bot_id)) {
+            Ok(Some(row)) => row.bot.permission_level,
+            Ok(None) | Err(_) => PermissionLevel::AskFirst,
+        }
+    }
+
+    fn permission_level_changed(&mut self) {
+        if self.stop_due.is_some() || self.permission_level() != PermissionLevel::FullAccess {
+            return;
+        }
+        for approval in std::mem::take(&mut self.approvals) {
+            if approval.reply.send(ApprovalAnswer::Allow).is_ok() {
+                self.emit(Event::ApprovalResolved {
+                    id: Some(approval.id),
+                    tool_call_id: approval.tool_call_id,
+                    title: approval.title,
+                    decision: ApprovalDecision::Allowed,
+                    reason: Some(ApprovalReason::PermissionLevel),
+                });
+            }
+        }
+        self.sync();
+    }
+
+    fn shut_down(&mut self, done: oneshot::Sender<()>) {
+        self.closing = Some(done);
+        self.next_after_stop = false;
+        self.stop();
+        self.finish_closing();
+    }
+
+    /// Ends this task once no turn runs: the provider process closes with it.
+    fn finish_closing(&mut self) {
+        if self.turn_active {
+            return;
+        }
+        if let Some(done) = self.closing.take() {
+            self.close_session();
+            self.finished = true;
+            done.send(()).ok();
+        }
+    }
+
+    /// The first message of a conversation gives it its title.
+    fn give_title(&mut self, first_message: &str) {
+        if std::mem::replace(&mut self.titled, true) {
+            return;
+        }
+        match self
+            .store
+            .with(|store| store.set_title(self.id, first_message))
+        {
+            Ok(true) => self.daemon.publish_conversation(self.id),
+            Ok(false) => {}
+            Err(error) => self.report_store(Err::<(), _>(error)),
         }
     }
 
@@ -255,8 +384,17 @@ impl Actor {
     }
 
     fn prompt(&mut self, text: String, sink: &Sink) {
+        if self.closing.is_some() {
+            return report(sink, "This bot is being deleted.");
+        }
         if text.trim().is_empty() {
             return report(sink, "A message needs some text.");
+        }
+        // The conversation a person writes in is the one the bot opens on.
+        match self.store.with(|store| store.make_current(self.id)) {
+            Ok(true) => self.daemon.publish_bot(self.bot_id),
+            Ok(false) => {}
+            Err(error) => return report(sink, error.to_string()),
         }
         let queue = match self.queue() {
             Ok(queue) => queue,
@@ -272,6 +410,8 @@ impl Actor {
         }
         self.turn_active = true;
         self.emit(Event::UserText(text.clone()));
+        self.give_title(&text);
+        self.sync();
         self.deliver(text);
     }
 
@@ -282,6 +422,31 @@ impl Actor {
     }
 
     fn try_deliver(&mut self, text: String) -> Result<(), String> {
+        let (conversation, bot) = self
+            .store
+            .with(|store| {
+                Ok::<_, StoreError>((store.conversation(self.id)?, store.bot(self.bot_id)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let conversation =
+            conversation.ok_or_else(|| format!("conversation {} does not exist", self.id))?;
+        let bot = bot.ok_or_else(|| format!("bot {} does not exist", self.bot_id))?;
+        if !Path::new(&bot.bot.workspace).is_dir() {
+            self.close_session();
+            return Err(format!(
+                "The folder {} does not exist. Choose another one in the bot's settings.",
+                bot.bot.workspace
+            ));
+        }
+        // New instructions, a new model, or a new folder take a new provider
+        // session: the one that runs keeps the old ones.
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.revision != bot.session_revision)
+        {
+            self.close_session();
+        }
         let text = match &self.session {
             Some(session) => match session.commands.send(SessionCommand::Prompt(text)) {
                 Ok(()) => return Ok(()),
@@ -290,7 +455,7 @@ impl Actor {
             },
             None => text,
         };
-        let session = self.start_session()?;
+        let session = self.start_session(conversation, bot)?;
         session
             .commands
             .send(SessionCommand::Prompt(text))
@@ -299,16 +464,22 @@ impl Actor {
         Ok(())
     }
 
-    fn start_session(&mut self) -> Result<Session, String> {
-        let conversation = self
-            .store
-            .with(|store| store.conversation(self.id))
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("conversation {} does not exist", self.id))?;
+    fn start_session(
+        &mut self,
+        conversation: Conversation,
+        bot: BotRow,
+    ) -> Result<Session, String> {
+        let revision = bot.session_revision;
         let config = SessionConfig {
-            agent: agent_profile(&conversation)?,
-            cwd: conversation.cwd,
-            resume: conversation.provider_session_id,
+            agent: self.daemon.agent_profile(&bot.bot.provider)?,
+            cwd: PathBuf::from(bot.bot.workspace),
+            // The provider session is resumed only when it was started with
+            // the settings the bot has now.
+            resume: conversation
+                .provider_session_id
+                .filter(|_| conversation.session_revision == Some(revision)),
+            instructions: bot.bot.instructions,
+            model: bot.bot.model,
         };
         self.generation += 1;
         let generation = self.generation;
@@ -332,6 +503,7 @@ impl Actor {
         });
         Ok(Session {
             generation,
+            revision,
             commands,
             task: task.abort_handle(),
         })
@@ -350,9 +522,12 @@ impl Actor {
             AgentEvent::Started {
                 provider_session_id,
             } => {
-                let saved = self
-                    .store
-                    .with(|store| store.set_provider_session(self.id, &provider_session_id));
+                let Some(revision) = self.session.as_ref().map(|session| session.revision) else {
+                    return;
+                };
+                let saved = self.store.with(|store| {
+                    store.set_provider_session(self.id, &provider_session_id, revision)
+                });
                 self.report_store(saved);
             }
             AgentEvent::Event(event) => {
@@ -382,6 +557,18 @@ impl Actor {
                     });
                     return;
                 }
+                if self.permission_level() == PermissionLevel::FullAccess {
+                    if reply.send(ApprovalAnswer::Allow).is_ok() {
+                        self.emit(Event::ApprovalResolved {
+                            id: Some(id),
+                            tool_call_id,
+                            title,
+                            decision: ApprovalDecision::Allowed,
+                            reason: Some(ApprovalReason::PermissionLevel),
+                        });
+                    }
+                    return;
+                }
                 self.approvals.push(PendingApproval {
                     id: id.clone(),
                     tool_call_id: tool_call_id.clone(),
@@ -393,6 +580,7 @@ impl Actor {
                     tool_call_id,
                     title,
                 });
+                self.sync();
             }
             AgentEvent::ApprovalRefused {
                 tool_call_id,
@@ -402,6 +590,7 @@ impl Actor {
                 tool_call_id,
                 title,
                 decision: ApprovalDecision::Declined,
+                reason: Some(ApprovalReason::NoAllowOnce),
             }),
         }
     }
@@ -432,7 +621,9 @@ impl Actor {
             tool_call_id: approval.tool_call_id,
             title: approval.title,
             decision,
+            reason: None,
         });
+        self.sync();
     }
 
     /// Records every waiting approval as cancelled, and returns the channels
@@ -456,6 +647,7 @@ impl Actor {
             return;
         }
         let approvals = self.close_approvals();
+        self.sync();
         let asked = self.session.as_ref().is_some_and(|session| {
             session
                 .commands
@@ -487,19 +679,34 @@ impl Actor {
     }
 
     /// Records the end of the running turn, then starts the next queued message
-    /// or pauses the queue.
+    /// or pauses the queue, and tells the daemon where the bot stands.
     fn end_turn(&mut self, end: Event) {
+        self.finish_turn(end);
+        self.sync();
+        self.finish_closing();
+    }
+
+    fn finish_turn(&mut self, end: Event) {
         for reply in self.close_approvals() {
             reply.send(ApprovalAnswer::Cancel).ok();
         }
         let completed = matches!(end, Event::TurnEnded(_));
         self.emit(end);
+        if !self.followers.is_empty() {
+            // A client has the end of the conversation on screen: the turn
+            // that just ended is read before the bot's state is told.
+            let marked = self.store.with(|store| store.mark_read(self.id));
+            self.report_store(marked);
+        }
         self.turn_active = false;
         self.stop_due = None;
         let closed = self.recorder.close();
         self.report_store(closed);
 
         let send_now = std::mem::take(&mut self.next_after_stop);
+        if self.closing.is_some() {
+            return;
+        }
         let queue = match self.queue() {
             Ok(queue) => queue,
             Err(error) => return self.report_store(Err::<(), _>(error)),
@@ -530,6 +737,8 @@ impl Actor {
                     event: Event::UserText(text.clone()),
                 });
                 self.broadcast_queue();
+                self.give_title(&text);
+                self.sync();
                 self.deliver(text);
             }
             Ok(None) => {}
@@ -637,8 +846,18 @@ impl Actor {
     }
 
     fn broadcast(&mut self, message: ServerMessage) {
+        let attached = self.subscribers.len();
         self.subscribers
             .retain(|subscriber| subscriber.sink.send(message.clone()).is_ok());
+        if self.subscribers.len() < attached {
+            // A client that is gone no longer follows the conversation.
+            let subscribers = &self.subscribers;
+            self.followers.retain(|connection| {
+                subscribers
+                    .iter()
+                    .any(|subscriber| subscriber.connection == *connection)
+            });
+        }
     }
 }
 
@@ -647,14 +866,6 @@ fn report(sink: &Sink, message: impl Into<String>) {
         message: message.into(),
     })
     .ok();
-}
-
-fn agent_profile(conversation: &Conversation) -> Result<AgentProfile, String> {
-    match (conversation.provider.as_str(), &conversation.command) {
-        (claude::PROVIDER, _) => Ok(claude::profile()),
-        (CUSTOM_PROVIDER, Some(command)) => Ok(AgentProfile::generic(command.clone())),
-        (provider, _) => Err(format!("unknown provider: {provider}")),
-    }
 }
 
 fn now_ms() -> u64 {

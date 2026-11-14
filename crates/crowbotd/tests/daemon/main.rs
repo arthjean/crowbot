@@ -3,6 +3,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod bots;
+mod claude;
 mod endpoint;
 mod queue;
 mod recovery;

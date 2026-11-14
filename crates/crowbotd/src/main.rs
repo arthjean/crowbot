@@ -1,4 +1,5 @@
 mod conversation;
+mod daemon;
 mod provider;
 mod server;
 mod store;
@@ -11,17 +12,18 @@ use std::sync::Arc;
 use crowbot_protocol::Endpoint;
 use crowbot_protocol::transport::Listener;
 
-use crate::server::Daemon;
+use crate::daemon::Daemon;
 use crate::store::{SharedStore, Store};
 
 const USAGE: &str =
-    "usage: crowbotd [--db <path>] [--cwd <dir>] [--agent <command>] [--endpoint <address>]
+    "usage: crowbotd [--db <path>] [--bots-dir <dir>] [--agent <command>] [--endpoint <address>]
 
-The daemon listens on a local endpoint and serves Crow Bot clients until it is stopped.";
+The daemon listens on a local endpoint and serves Crow Bot clients until it is stopped.
+A bot created with no folder gets one of its own under --bots-dir (~/CrowBot/Bots).";
 
 struct Args {
     db: Option<PathBuf>,
-    cwd: Option<PathBuf>,
+    bots_dir: Option<PathBuf>,
     command: Option<String>,
     endpoint: Option<Endpoint>,
 }
@@ -29,14 +31,18 @@ struct Args {
 fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args {
         db: None,
-        cwd: None,
+        bots_dir: None,
         command: None,
         endpoint: None,
     };
     while let Some(arg) = raw.next() {
         match arg.as_str() {
             "--db" => args.db = Some(PathBuf::from(raw.next().ok_or("--db needs a path")?)),
-            "--cwd" => args.cwd = Some(PathBuf::from(raw.next().ok_or("--cwd needs a directory")?)),
+            "--bots-dir" => {
+                args.bots_dir = Some(PathBuf::from(
+                    raw.next().ok_or("--bots-dir needs a directory")?,
+                ));
+            }
             "--agent" => args.command = Some(raw.next().ok_or("--agent needs a command")?),
             "--endpoint" => {
                 args.endpoint = Some(Endpoint::new(
@@ -56,14 +62,22 @@ fn default_db_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "cannot find the home directory; pass --db <path>".to_owned())
 }
 
+/// Where the bots that were given no folder get one of their own.
+fn default_bots_dir() -> Result<PathBuf, String> {
+    std::env::home_dir()
+        .map(|home| home.join("CrowBot").join("Bots"))
+        .ok_or_else(|| "cannot find the home directory; pass --bots-dir <dir>".to_owned())
+}
+
 async fn run(args: Args) -> Result<(), String> {
     let db = match args.db {
         Some(path) => path,
         None => default_db_path()?,
     };
-    let cwd = match args.cwd {
-        Some(dir) => dir,
-        None => std::env::current_dir().map_err(|error| error.to_string())?,
+    let bots_dir = match args.bots_dir {
+        Some(dir) => std::path::absolute(&dir)
+            .map_err(|error| format!("cannot use {} for bots: {error}", dir.display()))?,
+        None => default_bots_dir()?,
     };
     let endpoint = match args.endpoint {
         Some(endpoint) => endpoint,
@@ -85,7 +99,7 @@ async fn run(args: Args) -> Result<(), String> {
         eprintln!("[crowbotd] ended {interrupted} turn(s) that a previous daemon left running");
     }
     eprintln!("[crowbotd] listening on {endpoint}");
-    let daemon = Arc::new(Daemon::new(SharedStore::new(store), cwd, args.command));
+    let daemon = Arc::new(Daemon::new(SharedStore::new(store), bots_dir, args.command));
     server::serve(daemon, listener).await;
     Ok(())
 }

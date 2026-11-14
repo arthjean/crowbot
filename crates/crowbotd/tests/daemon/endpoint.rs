@@ -7,11 +7,8 @@ use crate::support::{self, Daemon};
 async fn a_client_of_the_same_user_exchanges_hello_and_welcome() {
     let daemon = Daemon::start();
     let mut client = daemon.client().await;
-    client.send(ClientMessage::ListConversations).await;
-    assert_eq!(
-        client.next().await,
-        ServerMessage::Conversations(Vec::new())
-    );
+    client.send(ClientMessage::ListBots).await;
+    assert_eq!(client.next().await, ServerMessage::Bots(Vec::new()));
 }
 
 #[tokio::test]

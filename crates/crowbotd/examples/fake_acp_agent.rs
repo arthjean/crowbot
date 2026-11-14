@@ -7,12 +7,23 @@
 //! - `stream <count> <interval ms>`: answer with `count` words, one per interval,
 //!   and end as cancelled when a cancel arrives.
 //! - `ask <title>`: request permission for a tool call, then report the outcome.
+//! - `demand <title>`: the same, with a request that offers no allow-once option.
 //! - `deaf`: never end the turn, and ignore the cancel and the end of stdin.
 //! - `crash`: exit in the middle of the turn.
 //! - `session`: report the session id and whether the session was resumed.
+//! - `config`: report the system prompt, the text sent before the prompt, the
+//!   model, and the working folder of the session.
+//!
+//! The command is the last part of a prompt: the parts before it are reported
+//! by `config` as the preface.
+//!
+//! The agent offers the models `fast` and `smart` through a session config
+//! option, and starts each process on `fast`.
 //!
 //! When `FAKE_AGENT_HEARTBEAT` names a file, the agent rewrites it with a growing
-//! counter while it runs, so a test can tell whether the process is alive.
+//! counter while it runs, so a test can tell whether the process is alive. When
+//! `FAKE_AGENT_SYSTEM_PROMPT` is set, the agent advertises that it takes a
+//! system prompt at session creation.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -23,6 +34,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const HEARTBEAT: &str = "FAKE_AGENT_HEARTBEAT";
+const SYSTEM_PROMPT: &str = "FAKE_AGENT_SYSTEM_PROMPT";
+const MODELS: [&str; 2] = ["fast", "smart"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -34,6 +47,24 @@ struct Agent {
     resumed: AtomicBool,
     next_request: AtomicU64,
     answers: Mutex<HashMap<u64, mpsc::Sender<Value>>>,
+    session: Mutex<Session>,
+}
+
+/// What the client set when it created or resumed the session.
+#[derive(Default)]
+struct Session {
+    system_prompt: Option<String>,
+    model: Option<String>,
+    cwd: String,
+}
+
+fn texts(blocks: &Value) -> Vec<String> {
+    blocks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["text"].as_str().map(str::to_owned))
+        .collect()
 }
 
 impl Agent {
@@ -74,8 +105,18 @@ impl Agent {
     }
 
     /// Asks the client for permission and returns the option it selected.
-    fn ask(&self, session: &Value, title: &str) -> String {
+    fn ask(&self, session: &Value, title: &str, allow_once: bool) -> String {
         let request = 1000 + self.next_request.fetch_add(1, Ordering::SeqCst);
+        let mut options = vec![
+            json!({ "optionId": "always", "name": "Always allow", "kind": "allow_always" }),
+            json!({ "optionId": "reject", "name": "Reject", "kind": "reject_once" }),
+        ];
+        if allow_once {
+            options.insert(
+                1,
+                json!({ "optionId": "allow", "name": "Allow", "kind": "allow_once" }),
+            );
+        }
         let (answer, answered) = mpsc::channel();
         self.answers
             .lock()
@@ -88,11 +129,7 @@ impl Agent {
             "params": {
                 "sessionId": session,
                 "toolCall": { "toolCallId": format!("tool-{request}"), "title": title },
-                "options": [
-                    { "optionId": "always", "name": "Always allow", "kind": "allow_always" },
-                    { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
-                    { "optionId": "reject", "name": "Reject", "kind": "reject_once" }
-                ]
+                "options": options
             }
         }));
         let Ok(response) = answered.recv() else {
@@ -106,10 +143,37 @@ impl Agent {
         }
     }
 
+    fn session(&self) -> std::sync::MutexGuard<'_, Session> {
+        self.session.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps what the client set for the session, and answers with the
+    /// session's config options.
+    fn open_session(&self, params: &Value) -> Value {
+        let mut session = self.session();
+        session.cwd = params["cwd"].as_str().unwrap_or_default().to_owned();
+        let system_prompt = texts(&params["systemPrompt"]["content"]);
+        session.system_prompt = (!system_prompt.is_empty()).then(|| system_prompt.join("\n"));
+        Self::config_options(&session)
+    }
+
+    fn config_options(session: &Session) -> Value {
+        json!([{
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": session.model.as_deref().unwrap_or(MODELS[0]),
+            "options": MODELS.map(|model| json!({ "value": model, "name": model })),
+        }])
+    }
+
     fn prompt(&self, id: &Value, params: &Value) {
         self.cancelled.store(false, Ordering::SeqCst);
         let session = &params["sessionId"];
-        let text = params["prompt"][0]["text"].as_str().unwrap_or_default();
+        let mut parts = texts(&params["prompt"]);
+        let text = parts.pop().unwrap_or_default();
+        let text = text.as_str();
         let (command, rest) = text.split_once(' ').unwrap_or((text, ""));
         match command {
             "say" => self.say(session, rest),
@@ -127,8 +191,8 @@ impl Agent {
                     std::thread::sleep(interval);
                 }
             }
-            "ask" => {
-                let outcome = self.ask(session, rest);
+            "ask" | "demand" => {
+                let outcome = self.ask(session, rest, command == "ask");
                 self.say(session, &format!("outcome={outcome}"));
             }
             "deaf" => {
@@ -147,6 +211,19 @@ impl Agent {
                     self.resumed.load(Ordering::SeqCst)
                 ),
             ),
+            "config" => {
+                let report = {
+                    let config = self.session();
+                    format!(
+                        "system=[{}] preface=[{}] model={} cwd={}",
+                        config.system_prompt.as_deref().unwrap_or_default(),
+                        parts.join("|"),
+                        config.model.as_deref().unwrap_or(MODELS[0]),
+                        config.cwd
+                    )
+                };
+                self.say(session, &report);
+            }
             _ => self.say(session, text),
         }
         self.end(id);
@@ -158,17 +235,46 @@ impl Agent {
                 &id,
                 json!({
                     "protocolVersion": params["protocolVersion"],
-                    "agentCapabilities": { "sessionCapabilities": { "resume": {} } },
+                    "agentCapabilities": {
+                        "sessionCapabilities": if std::env::var_os(SYSTEM_PROMPT).is_some() {
+                            json!({ "resume": {}, "systemPrompt": {} })
+                        } else {
+                            json!({ "resume": {} })
+                        }
+                    },
                     "authMethods": []
                 }),
             ),
             "session/new" => self.respond(
                 &id,
-                json!({ "sessionId": format!("fake-session-{}", std::process::id()) }),
+                json!({
+                    "sessionId": format!("fake-session-{}-{}", std::process::id(), started_at()),
+                    "configOptions": self.open_session(&params),
+                }),
             ),
             "session/resume" => {
                 self.resumed.store(true, Ordering::SeqCst);
-                self.respond(&id, json!({}));
+                self.respond(&id, json!({ "configOptions": self.open_session(&params) }));
+            }
+            "session/set_config_option" => {
+                let value = params["value"].as_str().unwrap_or_default();
+                if params["configId"] == "model" && MODELS.contains(&value) {
+                    let mut session = self.session();
+                    session.model = Some(value.to_owned());
+                    self.respond(
+                        &id,
+                        json!({ "configOptions": Self::config_options(&session) }),
+                    );
+                } else {
+                    self.send(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32602,
+                            "message": format!("Invalid value for config option model: {value}")
+                        }
+                    }));
+                }
             }
             "session/prompt" => {
                 let agent = self.clone();
@@ -205,6 +311,14 @@ impl Agent {
             }
         }
     }
+}
+
+/// The time in nanoseconds: two processes never share a session id, even
+/// when the system gives the second one the process id of the first.
+fn started_at() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos())
 }
 
 fn main() {

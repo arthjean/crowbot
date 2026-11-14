@@ -125,7 +125,7 @@ mod tests {
             text: "a message longer than the sixty-four byte buffer of the test pipe, twice over"
                 .to_owned(),
         };
-        let second = ClientMessage::ListConversations;
+        let second = ClientMessage::ListBots;
         let mut bytes = encode(&first).unwrap();
         bytes.extend(encode(&second).unwrap());
         let writing = tokio::spawn(async move {

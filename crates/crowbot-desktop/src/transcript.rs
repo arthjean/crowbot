@@ -1,6 +1,6 @@
 use crowbot_protocol::{
-    ApprovalClosure, ApprovalDecision, ConversationSnapshot, Event, Interruption, ToolStatus,
-    TurnEnd,
+    ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, Interruption,
+    ToolStatus, TurnEnd,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,8 @@ pub enum Item {
         id: Option<String>,
         title: Option<String>,
         state: ApprovalState,
+        /// Why the daemon answered on its own. `None` means a person answered.
+        automatic: Option<ApprovalReason>,
     },
     Notice(String),
 }
@@ -104,6 +106,7 @@ impl Transcript {
                     id: Some(id),
                     title,
                     state: ApprovalState::Waiting,
+                    automatic: None,
                 });
                 end
             }
@@ -111,13 +114,14 @@ impl Transcript {
                 id,
                 title,
                 decision,
+                reason,
                 ..
             } => {
                 let decided = match decision {
                     ApprovalDecision::Allowed => ApprovalState::Allowed,
                     ApprovalDecision::Declined => ApprovalState::Declined,
                 };
-                self.settle_approval(id, title, decided)
+                self.settle_approval(id, title, decided, reason)
             }
             Event::ApprovalClosed {
                 id, title, reason, ..
@@ -126,7 +130,7 @@ impl Transcript {
                     ApprovalClosure::Cancelled => ApprovalState::Cancelled,
                     ApprovalClosure::Expired => ApprovalState::Expired,
                 };
-                self.settle_approval(Some(id), title, closed)
+                self.settle_approval(Some(id), title, closed, None)
             }
             Event::TurnInterrupted { cause } => {
                 let first = self.end_turn();
@@ -162,6 +166,7 @@ impl Transcript {
         id: Option<String>,
         title: Option<String>,
         settled: ApprovalState,
+        reason: Option<ApprovalReason>,
     ) -> usize {
         let waiting = self.items.iter().rposition(|item| {
             matches!(
@@ -172,8 +177,12 @@ impl Transcript {
         });
         match waiting {
             Some(index) => {
-                if let Item::Approval { state, .. } = &mut self.items[index] {
+                if let Item::Approval {
+                    state, automatic, ..
+                } = &mut self.items[index]
+                {
                     *state = settled;
+                    *automatic = reason;
                 }
                 index
             }
@@ -182,6 +191,7 @@ impl Transcript {
                     id,
                     title,
                     state: settled,
+                    automatic: reason,
                 });
                 self.items.len() - 1
             }
@@ -270,8 +280,8 @@ mod tests {
         ConversationSnapshot {
             conversation: ConversationSummary {
                 id: 1,
+                bot_id: 1,
                 title: None,
-                cwd: "/work".to_owned(),
                 created_at_ms: 0,
                 last_activity_ms: 0,
             },
@@ -295,6 +305,7 @@ mod tests {
             id: id.map(str::to_owned),
             title: Some("Write notes.txt".to_owned()),
             state,
+            automatic: None,
         }
     }
 
@@ -364,12 +375,37 @@ mod tests {
             tool_call_id: "tool".to_owned(),
             title: Some("Write notes.txt".to_owned()),
             decision: ApprovalDecision::Allowed,
+            reason: None,
         });
         assert_eq!(changed, 0);
         assert_eq!(
             transcript.items(),
             [approval(Some("a1"), ApprovalState::Allowed)]
         );
+    }
+
+    #[test]
+    fn an_answer_given_by_the_permission_level_says_so() {
+        let allowed = |id: &str| Event::ApprovalResolved {
+            id: Some(id.to_owned()),
+            tool_call_id: "tool".to_owned(),
+            title: Some("Write notes.txt".to_owned()),
+            decision: ApprovalDecision::Allowed,
+            reason: Some(ApprovalReason::PermissionLevel),
+        };
+        let by_level = |id: &str| Item::Approval {
+            id: Some(id.to_owned()),
+            title: Some("Write notes.txt".to_owned()),
+            state: ApprovalState::Allowed,
+            automatic: Some(ApprovalReason::PermissionLevel),
+        };
+        let mut transcript = Transcript::default();
+        // A request that waited when the bot moved to Full access.
+        transcript.apply(request("a1"));
+        transcript.apply(allowed("a1"));
+        // A request that the level answered before anyone saw it.
+        transcript.apply(allowed("a2"));
+        assert_eq!(transcript.items(), [by_level("a1"), by_level("a2")]);
     }
 
     #[test]
@@ -380,6 +416,7 @@ mod tests {
             tool_call_id: "tool".to_owned(),
             title: Some("Write notes.txt".to_owned()),
             decision: ApprovalDecision::Declined,
+            reason: None,
         });
         assert_eq!(
             transcript.items(),

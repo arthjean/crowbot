@@ -32,7 +32,7 @@ pub enum ConnectionEvent {
     Disconnected(String),
     /// The client cannot attach and waits for the user to retry.
     Failed(String),
-    Message(ServerMessage),
+    Message(Box<ServerMessage>),
 }
 
 /// How the client starts a daemon when none listens.
@@ -345,7 +345,7 @@ async fn serve(
         tokio::select! {
             incoming = reader.read::<ServerMessage>() => match incoming {
                 Ok(Some(message)) => {
-                    if events.send(ConnectionEvent::Message(message)).is_err() {
+                    if events.send(ConnectionEvent::Message(Box::new(message))).is_err() {
                         return dropped("");
                     }
                 }

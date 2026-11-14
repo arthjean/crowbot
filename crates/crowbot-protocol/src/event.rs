@@ -27,6 +27,9 @@ pub enum Event {
         tool_call_id: String,
         title: Option<String>,
         decision: ApprovalDecision,
+        /// Why the daemon answered on its own. `None` means a person answered.
+        #[serde(default)]
+        reason: Option<ApprovalReason>,
     },
     ApprovalClosed {
         id: String,
@@ -68,6 +71,16 @@ pub enum ApprovalDecision {
     Declined,
 }
 
+/// Why the daemon answered an approval request without a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalReason {
+    /// The bot is on Full access.
+    PermissionLevel,
+    /// The request offered no allow-once option, so it could only be declined.
+    NoAllowOnce,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalClosure {
@@ -107,7 +120,23 @@ mod tests {
                 tool_call_id: "t1".to_owned(),
                 title: Some("Write".to_owned()),
                 decision: ApprovalDecision::Declined,
+                reason: None,
             }
+        );
+    }
+
+    #[test]
+    fn an_approval_answered_by_the_permission_level_has_a_stable_stored_shape() {
+        assert_eq!(
+            serde_json::to_string(&Event::ApprovalResolved {
+                id: Some("a1".to_owned()),
+                tool_call_id: "t1".to_owned(),
+                title: None,
+                decision: ApprovalDecision::Allowed,
+                reason: Some(ApprovalReason::PermissionLevel),
+            })
+            .unwrap(),
+            r#"{"type":"approval_resolved","data":{"id":"a1","tool_call_id":"t1","title":null,"decision":"allowed","reason":"permission_level"}}"#
         );
     }
 

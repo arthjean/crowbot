@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crowbot_protocol::transport::{self, MessageReader, MessageWriter};
 use crowbot_protocol::{
-    ClientMessage, ConversationSnapshot, Endpoint, Event, PROTOCOL_VERSION, QueueState,
-    ServerMessage,
+    BotDraft, BotPatch, BotSummary, ClientMessage, ConversationSnapshot, ConversationSummary,
+    Endpoint, Event, PROTOCOL_VERSION, QueueState, ServerMessage,
 };
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -43,38 +43,53 @@ fn fake_agent() -> &'static Path {
         let agent = Path::new(env!("CARGO_BIN_EXE_crowbotd"))
             .with_file_name("examples")
             .join(name);
-        if !agent.exists() {
-            let built = Command::new(env!("CARGO"))
-                .args(["build", "-p", "crowbotd", "--example", "fake_acp_agent"])
-                .status()
-                .unwrap();
-            assert!(built.success(), "cannot build the scripted agent");
-        }
+        // Built each time: a test filter skips the examples, and an agent left
+        // by an earlier build would answer with an older script.
+        let built = Command::new(env!("CARGO"))
+            .args(["build", "-p", "crowbotd", "--example", "fake_acp_agent"])
+            .status()
+            .unwrap();
+        assert!(built.success(), "cannot build the scripted agent");
         agent
     })
 }
 
-fn daemon_command(dir: &Path, endpoint: &Endpoint) -> Command {
-    let agent = serde_json::json!({
-        "command": fake_agent(),
-        "env": { "FAKE_AGENT_HEARTBEAT": dir.join("heartbeat") },
-    });
+/// The agent that the bots of a test daemon run.
+#[derive(Clone, Copy)]
+enum Agent {
+    /// The scripted agent, which may advertise that it takes a system prompt.
+    Scripted { system_prompt: bool },
+    /// The daemon's own Claude profile: the real adapter and the real model.
+    Claude,
+}
+
+fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_crowbotd"));
     command
         .arg("--db")
         .arg(dir.join("crowbot.db"))
-        .arg("--cwd")
-        .arg(dir)
+        .arg("--bots-dir")
+        .arg(dir.join("bots"))
         .args(["--endpoint", endpoint.address()])
-        .args(["--agent", &agent.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null());
+    if let Agent::Scripted { system_prompt } = agent {
+        let mut env = serde_json::json!({ "FAKE_AGENT_HEARTBEAT": dir.join("heartbeat") });
+        if system_prompt {
+            env["FAKE_AGENT_SYSTEM_PROMPT"] = "1".into();
+        }
+        let agent = serde_json::json!({ "command": fake_agent(), "env": env });
+        command.args(["--agent", &agent.to_string()]);
+    }
     command
 }
 
 /// Runs a daemon that is expected to exit on its own.
 pub fn run_daemon(dir: &Path, endpoint: &Endpoint) -> Output {
-    daemon_command(dir, endpoint)
+    let agent = Agent::Scripted {
+        system_prompt: false,
+    };
+    daemon_command(dir, endpoint, agent)
         .stderr(Stdio::piped())
         .output()
         .unwrap()
@@ -84,19 +99,67 @@ pub struct Daemon {
     dir: PathBuf,
     endpoint: Endpoint,
     child: Option<Child>,
+    agent: Agent,
 }
 
 impl Daemon {
+    /// A daemon whose agent takes no system prompt at session creation.
     pub fn start() -> Self {
+        Self::start_with(Agent::Scripted {
+            system_prompt: false,
+        })
+    }
+
+    /// A daemon whose agent advertises that it takes a system prompt.
+    pub fn start_with_system_prompt() -> Self {
+        Self::start_with(Agent::Scripted {
+            system_prompt: true,
+        })
+    }
+
+    /// A daemon whose bots run on Claude, with the user's own sign-in.
+    pub fn start_with_claude() -> Self {
+        Self::start_with(Agent::Claude)
+    }
+
+    /// A daemon that starts on a database file the test wrote first, as an
+    /// earlier daemon would have left it.
+    pub fn start_on(write_database: impl FnOnce(&Path)) -> Self {
+        let mut daemon = Self::stopped(Agent::Scripted {
+            system_prompt: false,
+        });
+        write_database(&daemon.dir.join("crowbot.db"));
+        daemon.spawn();
+        daemon
+    }
+
+    fn start_with(agent: Agent) -> Self {
+        let mut daemon = Self::stopped(agent);
+        daemon.spawn();
+        daemon
+    }
+
+    fn stopped(agent: Agent) -> Self {
         let dir = test_dir();
         let endpoint = test_endpoint(&dir);
-        let mut daemon = Self {
+        Self {
             dir,
             endpoint,
             child: None,
-        };
-        daemon.spawn();
-        daemon
+            agent,
+        }
+    }
+
+    /// Where the daemon makes the folders of the bots that were given none.
+    pub fn bots_dir(&self) -> PathBuf {
+        self.dir.join("bots")
+    }
+
+    /// A folder of the test that the daemon knows nothing about.
+    pub fn folder(&self, name: &str) -> PathBuf {
+        let folder = self.dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
     }
 
     /// Starts the daemon again on the same database and endpoint.
@@ -108,7 +171,7 @@ impl Daemon {
             .open(self.dir.join("daemon.log"))
             .unwrap();
         self.child = Some(
-            daemon_command(&self.dir, &self.endpoint)
+            daemon_command(&self.dir, &self.endpoint, self.agent)
                 .stderr(log)
                 .spawn()
                 .unwrap(),
@@ -165,15 +228,43 @@ impl Client {
     }
 
     pub async fn next(&mut self) -> ServerMessage {
-        self.next_within(PATIENCE)
+        tokio::time::timeout(PATIENCE, self.reader.read::<ServerMessage>())
             .await
             .expect("the daemon sent nothing in time")
+            .unwrap()
+            .expect("the daemon closed the connection")
     }
 
+    /// The next message, for a turn of a real model that takes its time.
+    pub async fn next_within_minutes(&mut self) -> ServerMessage {
+        tokio::time::timeout(
+            Duration::from_secs(180),
+            self.reader.read::<ServerMessage>(),
+        )
+        .await
+        .expect("the daemon sent nothing in time")
+        .unwrap()
+        .expect("the daemon closed the connection")
+    }
+
+    /// The next message about a conversation the client opened, if one comes
+    /// in time. What the daemon tells every client about bots is skipped.
     pub async fn next_within(&mut self, patience: Duration) -> Option<ServerMessage> {
-        match tokio::time::timeout(patience, self.reader.read::<ServerMessage>()).await {
-            Ok(message) => Some(message.unwrap().expect("the daemon closed the connection")),
-            Err(_) => None,
+        let deadline = tokio::time::Instant::now() + patience;
+        loop {
+            let read = self.reader.read::<ServerMessage>();
+            match tokio::time::timeout_at(deadline, read).await {
+                Ok(message) => {
+                    let message = message.unwrap().expect("the daemon closed the connection");
+                    if !matches!(
+                        message,
+                        ServerMessage::BotChanged(_) | ServerMessage::ConversationChanged(_)
+                    ) {
+                        return Some(message);
+                    }
+                }
+                Err(_) => return None,
+            }
         }
     }
 
@@ -225,17 +316,117 @@ impl Client {
         self.until_event(Event::ends_turn).await
     }
 
-    /// Creates a conversation and opens it.
+    /// Creates a bot and opens its conversation.
     pub async fn new_conversation(&mut self) -> i64 {
-        self.send(ClientMessage::CreateConversation).await;
-        let id = self
-            .until(|message| match message {
-                ServerMessage::ConversationCreated(summary) => Some(summary.id),
-                _ => None,
-            })
-            .await;
+        let id = self.new_bot("Crow").await.current_conversation_id;
         self.open(id).await;
         id
+    }
+
+    pub async fn new_bot(&mut self, name: &str) -> BotSummary {
+        self.create_bot(BotDraft {
+            name: name.to_owned(),
+            ..BotDraft::default()
+        })
+        .await
+    }
+
+    pub async fn create_bot(&mut self, draft: BotDraft) -> BotSummary {
+        self.send(ClientMessage::CreateBot { draft }).await;
+        self.until_created().await
+    }
+
+    /// Reads messages until the daemon tells which bot this client made, and
+    /// returns the summary that was sent for it.
+    pub async fn until_created(&mut self) -> BotSummary {
+        let mut changed = Vec::new();
+        loop {
+            match self.next().await {
+                ServerMessage::BotChanged(summary) => changed.push(summary),
+                ServerMessage::BotCreated { bot_id } => {
+                    return changed
+                        .into_iter()
+                        .rev()
+                        .find(|summary| summary.bot.id == bot_id)
+                        .expect("the new bot was not sent before the answer");
+                }
+                ServerMessage::Error { message } => panic!("the daemon refused: {message}"),
+                ServerMessage::InvalidField { field, message } => {
+                    panic!("the daemon refused {field}: {message}")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub async fn update_bot(&mut self, bot_id: i64, patch: BotPatch) {
+        self.send(ClientMessage::UpdateBot { bot_id, patch }).await;
+    }
+
+    /// Reads messages until a bot summary matches.
+    pub async fn until_bot(&mut self, matches: impl Fn(&BotSummary) -> bool) -> BotSummary {
+        self.until(|message| match message {
+            ServerMessage::BotChanged(summary) if matches(&summary) => Some(summary),
+            _ => None,
+        })
+        .await
+    }
+
+    /// Reads messages until the daemon refuses a field, and returns its name.
+    pub async fn until_invalid(&mut self) -> String {
+        self.until(|message| match message {
+            ServerMessage::InvalidField { field, .. } => Some(field),
+            _ => None,
+        })
+        .await
+    }
+
+    pub async fn bots(&mut self) -> Vec<BotSummary> {
+        self.send(ClientMessage::ListBots).await;
+        self.until(|message| match message {
+            ServerMessage::Bots(bots) => Some(bots),
+            _ => None,
+        })
+        .await
+    }
+
+    pub async fn bot(&mut self, bot_id: i64) -> BotSummary {
+        let bots = self.bots().await;
+        bots.into_iter()
+            .find(|summary| summary.bot.id == bot_id)
+            .expect("the bot is not in the list")
+    }
+
+    pub async fn conversations(&mut self, bot_id: i64) -> Vec<ConversationSummary> {
+        self.send(ClientMessage::ListConversations { bot_id }).await;
+        self.until(|message| match message {
+            ServerMessage::Conversations {
+                conversations,
+                bot_id: listed,
+            } if listed == bot_id => Some(conversations),
+            _ => None,
+        })
+        .await
+    }
+
+    /// Sends a prompt and returns the whole reply of the turn.
+    pub async fn ask(&mut self, conversation_id: i64, text: &str) -> String {
+        self.say(conversation_id, text).await;
+        let mut reply = String::new();
+        loop {
+            match self.next().await {
+                ServerMessage::ConversationEvent {
+                    conversation_id: about,
+                    event,
+                } if about == conversation_id => match event {
+                    Event::MessageText(text) => reply.push_str(&text),
+                    Event::TurnFailed { message } => panic!("the turn failed: {message}"),
+                    event if event.ends_turn() => return reply,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
     }
 
     pub async fn open(&mut self, conversation_id: i64) -> ConversationSnapshot {

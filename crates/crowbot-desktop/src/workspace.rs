@@ -1,6 +1,10 @@
+use std::cell::Cell;
+use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crowbot_protocol::{
-    ApprovalDecision, ClientMessage, ConversationSummary, Event, QueueState, ServerMessage,
-    ToolStatus,
+    ApprovalDecision, ApprovalReason, BotDraft, BotState, BotSummary, ClientMessage,
+    ConversationSummary, Event, QueueState, ServerMessage, ToolStatus,
 };
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Focusable, FollowMode,
@@ -9,6 +13,7 @@ use gpui::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::bots;
 use crate::composer::{Composer, ComposerEvent};
 use crate::connection::{Connection, ConnectionEvent};
 use crate::theme::Theme;
@@ -16,7 +21,6 @@ use crate::transcript::{ApprovalState, Item, Transcript};
 
 const COLUMN_WIDTH: f32 = 760.;
 const SIDEBAR_WIDTH: f32 = 260.;
-const TITLE_LENGTH: usize = 80;
 
 actions!(workspace, [FocusNext, FocusPrevious]);
 
@@ -40,17 +44,25 @@ enum Status {
 
 struct OpenConversation {
     id: i64,
+    title: Option<String>,
     transcript: Transcript,
     list: ListState,
     queue: QueueState,
+    /// Whether the list showed its end at the last scroll, as the daemon was told.
+    at_end: Rc<Cell<bool>>,
 }
 
 pub struct Workspace {
     connection: Connection,
     status: Status,
-    conversations: Vec<ConversationSummary>,
+    bots: Vec<BotSummary>,
+    selected_bot: Option<i64>,
+    /// The conversation the pane shows: the bot's current one, or one picked
+    /// from its history.
     selected: Option<i64>,
     open: Option<OpenConversation>,
+    /// The conversations of the selected bot, while the pane shows its history.
+    history: Option<Vec<ConversationSummary>>,
     composer: Entity<Composer>,
     /// The queued message that the composer is editing.
     editing: Option<i64>,
@@ -99,9 +111,11 @@ impl Workspace {
         Self {
             connection,
             status: Status::Connecting,
-            conversations: Vec::new(),
+            bots: Vec::new(),
+            selected_bot: None,
             selected: None,
             open: None,
+            history: None,
             composer,
             editing: None,
             notice: None,
@@ -116,7 +130,7 @@ impl Workspace {
             ConnectionEvent::Connected => {
                 self.status = Status::Connected;
                 self.notice = None;
-                self.connection.send(ClientMessage::ListConversations);
+                self.connection.send(ClientMessage::ListBots);
                 if let Some(conversation_id) = self.selected {
                     self.connection
                         .send(ClientMessage::OpenConversation { conversation_id });
@@ -127,7 +141,7 @@ impl Workspace {
                 self.status = Status::Disconnected(reason.into());
             }
             ConnectionEvent::Failed(reason) => self.status = Status::Failed(reason.into()),
-            ConnectionEvent::Message(message) => self.handle_message(message),
+            ConnectionEvent::Message(message) => self.handle_message(*message),
         }
         cx.notify();
     }
@@ -135,36 +149,94 @@ impl Workspace {
     fn handle_message(&mut self, message: ServerMessage) {
         match message {
             ServerMessage::Welcome { .. } => {}
-            ServerMessage::Conversations(conversations) => {
-                self.conversations = conversations;
-                if self.selected.is_none() {
-                    match self.conversations.first() {
-                        Some(latest) => self.select(latest.id),
-                        None => self.connection.send(ClientMessage::CreateConversation),
-                    }
+            ServerMessage::Bots(bots) => {
+                self.bots = bots;
+                if self.selected_bot().is_none() {
+                    self.forget_selection();
+                    self.select_first_bot();
                 }
             }
+            ServerMessage::BotChanged(summary) => {
+                let id = summary.bot.id;
+                match self.bots.iter_mut().find(|known| known.bot.id == id) {
+                    Some(known) => *known = summary,
+                    None => self.bots.push(summary),
+                }
+                if self.selected_bot.is_none() {
+                    self.select_bot(id);
+                }
+            }
+            // This client made the bot: it opens it.
+            ServerMessage::BotCreated { bot_id } => self.select_bot(bot_id),
+            ServerMessage::BotDeleted { bot_id } => {
+                self.bots.retain(|known| known.bot.id != bot_id);
+                if self.selected_bot == Some(bot_id) {
+                    self.forget_selection();
+                    self.select_first_bot();
+                }
+            }
+            ServerMessage::Conversations {
+                bot_id,
+                conversations,
+            } => {
+                if self.selected_bot == Some(bot_id) && self.history.is_some() {
+                    self.history = Some(conversations);
+                }
+            }
+            // This client started the conversation: it shows it.
             ServerMessage::ConversationCreated(summary) => {
-                let id = summary.id;
-                self.conversations.insert(0, summary);
-                self.select(id);
+                if self.selected_bot == Some(summary.bot_id) {
+                    self.history = None;
+                    self.select(summary.id);
+                }
+            }
+            ServerMessage::ConversationChanged(summary) => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == summary.id) {
+                    open.title.clone_from(&summary.title);
+                }
+                if self.selected_bot == Some(summary.bot_id)
+                    && let Some(history) = self.history.as_mut()
+                {
+                    match history.iter_mut().find(|known| known.id == summary.id) {
+                        Some(known) => *known = summary,
+                        None => history.insert(0, summary),
+                    }
+                }
             }
             ServerMessage::ConversationOpened(snapshot) => {
                 let id = snapshot.conversation.id;
                 if self.selected != Some(id) {
                     return;
                 }
-                self.remember(snapshot.conversation.clone());
+                let title = snapshot.conversation.title.clone();
                 let queue = snapshot.queue.clone();
                 let transcript = Transcript::from_snapshot(snapshot);
                 let list = ListState::new(transcript.items().len(), ListAlignment::Top, px(600.));
                 list.set_follow_mode(FollowMode::Tail);
+                // The daemon learns when the list leaves its end and when it
+                // comes back: it reads what arrives only while the end shows.
+                let at_end = Rc::new(Cell::new(true));
+                let (connection, told) = (self.connection.clone(), at_end.clone());
+                list.set_scroll_handler(move |scroll, _, _| {
+                    let following = scroll.is_following_tail;
+                    if told.replace(following) != following {
+                        connection.send(ClientMessage::MarkRead {
+                            conversation_id: id,
+                            following,
+                        });
+                    }
+                });
                 self.open = Some(OpenConversation {
                     id,
+                    title,
                     transcript,
                     list,
                     queue,
+                    at_end,
                 });
+                // The conversation opens at its end: all of it is shown,
+                // unless the history covers it.
+                self.conversation_shown();
                 self.forget_started_edit();
             }
             ServerMessage::QueueChanged {
@@ -180,34 +252,52 @@ impl Workspace {
                 conversation_id,
                 event,
             } => self.apply(conversation_id, event),
-            ServerMessage::Error { message } => self.notice = Some(message.into()),
+            ServerMessage::Error { message } | ServerMessage::InvalidField { message, .. } => {
+                self.notice = Some(message.into());
+            }
         }
     }
 
-    fn remember(&mut self, summary: ConversationSummary) {
-        match self
-            .conversations
-            .iter_mut()
-            .find(|known| known.id == summary.id)
-        {
-            Some(known) => *known = summary,
-            None => self.conversations.insert(0, summary),
+    fn selected_bot(&self) -> Option<&BotSummary> {
+        let id = self.selected_bot?;
+        self.bots.iter().find(|known| known.bot.id == id)
+    }
+
+    /// Drops what the pane shows without telling the daemon: the bot is gone.
+    fn forget_selection(&mut self) {
+        self.selected_bot = None;
+        self.selected = None;
+        self.open = None;
+        self.history = None;
+        self.editing = None;
+    }
+
+    fn select_first_bot(&mut self) {
+        if let Some(first) = self.bots.first().map(|known| known.bot.id) {
+            self.select_bot(first);
         }
+    }
+
+    /// Opens a bot on its current conversation.
+    fn select_bot(&mut self, bot_id: i64) {
+        let Some(current) = self
+            .bots
+            .iter()
+            .find(|known| known.bot.id == bot_id)
+            .map(|known| known.current_conversation_id)
+        else {
+            return;
+        };
+        self.selected_bot = Some(bot_id);
+        self.history = None;
+        self.select(current);
     }
 
     fn apply(&mut self, conversation_id: i64, event: Event) {
-        if let Event::UserText(text) = &event
-            && let Some(summary) = self
-                .conversations
-                .iter_mut()
-                .find(|summary| summary.id == conversation_id)
-            && summary.title.is_none()
-        {
-            summary.title = title_from(text);
-        }
         let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) else {
             return;
         };
+        let marks_read = bots::marks_read(&event);
         let before = open.transcript.items().len();
         let first_changed = open.transcript.apply(event);
         let after = open.transcript.items().len();
@@ -216,6 +306,16 @@ impl Workspace {
         }
         if after > before {
             open.list.splice(before..before, after - before);
+        }
+        if !marks_read {
+            return;
+        }
+        // The list shows the conversation at its end: what arrived is read.
+        if open.at_end.get() && self.history.is_none() {
+            self.connection.send(ClientMessage::MarkRead {
+                conversation_id,
+                following: true,
+            });
         }
     }
 
@@ -252,6 +352,7 @@ impl Workspace {
     fn can_send(&self, cx: &App) -> bool {
         matches!(self.status, Status::Connected)
             && self.open.is_some()
+            && self.history.is_none()
             && !self.composer.read(cx).text().trim().is_empty()
     }
 
@@ -329,10 +430,83 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_from_sidebar(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_bot(&mut self, bot_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.notice = None;
+        self.select_bot(bot_id);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Creates a bot with a default name. The daemon answers with the bot,
+    /// and this client opens it.
+    fn new_bot(&mut self) {
+        if matches!(self.status, Status::Connected) {
+            self.connection.send(ClientMessage::CreateBot {
+                draft: BotDraft {
+                    name: bots::next_name(&self.bots),
+                    ..BotDraft::default()
+                },
+            });
+        }
+    }
+
+    /// Starts a conversation of the selected bot. The daemon makes it the
+    /// bot's current one, and this client shows it.
+    fn new_chat(&mut self) {
+        if let Some(bot_id) = self.selected_bot
+            && matches!(self.status, Status::Connected)
+        {
+            self.connection
+                .send(ClientMessage::NewConversation { bot_id });
+        }
+    }
+
+    /// Shows the conversations of the selected bot, or goes back to the one
+    /// the pane showed.
+    fn toggle_history(&mut self) {
+        if self.history.take().is_some() {
+            self.conversation_shown();
+            return;
+        }
+        if let Some(bot_id) = self.selected_bot {
+            self.history = Some(Vec::new());
+            self.connection
+                .send(ClientMessage::ListConversations { bot_id });
+            // The history covers the conversation: what was shown is read,
+            // and what arrives from now on is not.
+            if let Some(open) = self.open.as_ref()
+                && open.at_end.get()
+            {
+                self.connection.send(ClientMessage::MarkRead {
+                    conversation_id: open.id,
+                    following: false,
+                });
+            }
+        }
+    }
+
+    fn open_from_history(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.history = None;
+        if self.selected == Some(id) {
+            self.conversation_shown();
+        }
         self.select(id);
         self.focus_composer(window, cx);
         cx.notify();
+    }
+
+    /// The pane shows the conversation: when the list is at its end, all of
+    /// it is read, and so is what arrives while the end stays on screen.
+    fn conversation_shown(&self) {
+        if let Some(open) = self.open.as_ref()
+            && open.at_end.get()
+            && self.history.is_none()
+        {
+            self.connection.send(ClientMessage::MarkRead {
+                conversation_id: open.id,
+                following: true,
+            });
+        }
     }
 
     fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -351,26 +525,34 @@ impl Workspace {
 
     fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let connected = matches!(self.status, Status::Connected);
-        let rows = self.conversations.iter().map(|summary| {
-            let id = summary.id;
-            let selected = self.selected == Some(id);
-            let title: SharedString = summary
-                .title
-                .clone()
-                .unwrap_or_else(|| "New conversation".to_owned())
-                .into();
+        let rows = self.bots.iter().map(|summary| {
+            let id = summary.bot.id;
+            let selected = self.selected_bot == Some(id);
+            let name: SharedString = summary.bot.name.clone().into();
+            let status = bots::status_label(summary);
+            let status_color = match summary.state {
+                BotState::Waiting => theme.attention_text,
+                BotState::Failed => theme.danger_text,
+                BotState::Unread => theme.text,
+                BotState::Working | BotState::Idle => theme.text_secondary,
+            };
+            let label: SharedString = match &status {
+                Some(status) => format!("{name}, {status}").into(),
+                None => name.clone(),
+            };
             let hover = theme.hover;
             div()
-                .id(("conversation", usize::try_from(id).unwrap_or_default()))
+                .id(("bot", usize::try_from(id).unwrap_or_default()))
                 .focusable()
                 .tab_stop(true)
                 .role(Role::Button)
-                .aria_label(title.clone())
+                .aria_label(label)
                 .flex_none()
-                .h(px(32.))
-                .px(px(10.))
+                .h(px(36.))
+                .px(px(8.))
                 .flex()
                 .items_center()
+                .gap(px(8.))
                 .rounded(px(6.))
                 .border_2()
                 .border_color(gpui::transparent_black())
@@ -381,9 +563,29 @@ impl Workspace {
                 })
                 .when(!selected, |row| row.hover(move |style| style.bg(hover)))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_from_sidebar(id, window, cx);
+                    this.open_bot(id, window, cx);
                 }))
-                .child(div().truncate().child(title))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(22.))
+                        .rounded_full()
+                        .bg(bots::avatar_color(&summary.bot.avatar.color)
+                            .unwrap_or(theme.accent_solid))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .text_color(theme.on_accent)
+                        .child(SharedString::from(summary.bot.avatar.glyph.clone())),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(name))
+                .children(status.map(|status| {
+                    div()
+                        .flex_none()
+                        .text_color(status_color)
+                        .child(SharedString::from(status))
+                }))
         });
         let (status, status_color) = match &self.status {
             Status::Connected => ("Connected to the daemon", theme.text_secondary),
@@ -404,8 +606,8 @@ impl Workspace {
             .child(
                 div().p(px(12.)).child(
                     button(
-                        "new-conversation",
-                        "New conversation",
+                        "new-bot",
+                        "New bot",
                         if connected {
                             ButtonStyle::Quiet
                         } else {
@@ -415,18 +617,16 @@ impl Workspace {
                     )
                     .w_full()
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if matches!(this.status, Status::Connected) {
-                            this.connection.send(ClientMessage::CreateConversation);
-                            this.focus_composer(window, cx);
-                        }
+                        this.new_bot();
+                        this.focus_composer(window, cx);
                     })),
                 ),
             )
             .child(
                 div()
-                    .id("conversations")
+                    .id("bots")
                     .role(Role::List)
-                    .aria_label("Conversations")
+                    .aria_label("Bots")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -445,6 +645,154 @@ impl Workspace {
                     .text_color(status_color)
                     .child(status),
             )
+    }
+
+    /// The bot the pane shows, the title of its conversation, and the way to
+    /// its other conversations.
+    fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let bot = self.selected_bot()?;
+        let title: SharedString = if self.history.is_some() {
+            "History".into()
+        } else {
+            self.open
+                .as_ref()
+                .and_then(|open| open.title.clone())
+                .unwrap_or_else(|| "New chat".to_owned())
+                .into()
+        };
+        Some(
+            div()
+                .id("conversation-header")
+                .flex_none()
+                .px(px(24.))
+                .py(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .border_b_1()
+                .border_color(theme.separator)
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(px(240.))
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(SharedString::from(bot.bot.name.clone())),
+                )
+                .child(
+                    div()
+                        .id("conversation-title")
+                        .role(Role::Heading)
+                        .aria_label(title.clone())
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_secondary)
+                        .child(title),
+                )
+                .child(
+                    button(
+                        "toggle-history",
+                        if self.history.is_some() {
+                            "Back to chat"
+                        } else {
+                            "History"
+                        },
+                        ButtonStyle::Quiet,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_history();
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    button("new-chat", "New chat", ButtonStyle::Quiet, theme).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.new_chat();
+                            this.focus_composer(window, cx);
+                        }),
+                    ),
+                ),
+        )
+    }
+
+    /// The conversations of the selected bot, the most recently active first.
+    fn render_history(
+        &self,
+        conversations: &[ConversationSummary],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current = self.selected_bot().map(|bot| bot.current_conversation_id);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+            .unwrap_or_default();
+        let rows = conversations.iter().map(|summary| {
+            let id = summary.id;
+            let title: SharedString = summary
+                .title
+                .clone()
+                .unwrap_or_else(|| "New chat".to_owned())
+                .into();
+            let mut detail = bots::ago(now_ms, summary.last_activity_ms);
+            if current == Some(id) {
+                detail = format!("Current · {detail}");
+            }
+            let hover = theme.hover;
+            div()
+                .id(("history", usize::try_from(id).unwrap_or_default()))
+                .focusable()
+                .tab_stop(true)
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("{title}, {detail}")))
+                .flex_none()
+                .h(px(36.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .rounded(px(6.))
+                .border_2()
+                .border_color(gpui::transparent_black())
+                .focus_visible(|style| style.border_color(theme.focus_ring))
+                .cursor_pointer()
+                .when(self.selected == Some(id), |row| row.bg(theme.selected))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_from_history(id, window, cx);
+                }))
+                .child(div().flex_1().min_w_0().truncate().child(title))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_secondary)
+                        .child(SharedString::from(detail)),
+                )
+        });
+        div()
+            .size_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("history")
+                    .role(Role::List)
+                    .aria_label("Conversations of this bot")
+                    .w_full()
+                    .max_w(px(COLUMN_WIDTH))
+                    .h_full()
+                    .overflow_y_scroll()
+                    .px(px(24.))
+                    .py(px(16.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(rows),
+            )
+            .into_any_element()
     }
 
     fn render_item(
@@ -521,9 +869,21 @@ impl Workspace {
                         .into_any_element(),
                 )
             }
-            Item::Approval { id, title, state } => (
+            Item::Approval {
+                id,
+                title,
+                state,
+                automatic,
+            } => (
                 12.,
-                self.render_approval(index, id.clone(), title.clone(), *state, &theme, cx),
+                self.render_approval(
+                    index,
+                    id.clone(),
+                    title.clone(),
+                    (*state, *automatic),
+                    &theme,
+                    cx,
+                ),
             ),
             Item::Notice(text) => (
                 12.,
@@ -554,7 +914,7 @@ impl Workspace {
         index: usize,
         id: Option<String>,
         title: Option<String>,
-        state: ApprovalState,
+        (state, automatic): (ApprovalState, Option<ApprovalReason>),
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -575,8 +935,20 @@ impl Workspace {
         };
         let id = match (state, id) {
             (ApprovalState::Waiting, Some(id)) => id,
-            (ApprovalState::Allowed, _) => return settled("Allowed", theme.success_text),
-            (ApprovalState::Declined, _) => return settled("Declined", theme.danger_text),
+            (ApprovalState::Allowed, _) => {
+                let label = match automatic {
+                    Some(ApprovalReason::PermissionLevel) => "Allowed by Full access",
+                    _ => "Allowed",
+                };
+                return settled(label, theme.success_text);
+            }
+            (ApprovalState::Declined, _) => {
+                let label = match automatic {
+                    Some(ApprovalReason::NoAllowOnce) => "Declined: it could not be allowed once",
+                    _ => "Declined",
+                };
+                return settled(label, theme.danger_text);
+            }
             (ApprovalState::Cancelled, _) => return settled("Cancelled", theme.text_secondary),
             (ApprovalState::Expired | ApprovalState::Waiting, _) => {
                 return settled("Not answered", theme.text_secondary);
@@ -648,6 +1020,9 @@ impl Workspace {
                 .child(text)
                 .into_any_element()
         };
+        if let Some(history) = &self.history {
+            return self.render_history(history, theme, cx);
+        }
         match &self.open {
             Some(open) if open.transcript.items().is_empty() => {
                 message("Send a message to start this conversation.")
@@ -658,10 +1033,11 @@ impl Workspace {
             )
             .size_full()
             .into_any_element(),
-            None if matches!(self.status, Status::Connected) => {
-                message("Opening the conversation…")
+            None if !matches!(self.status, Status::Connected) => {
+                message("Bots appear here once the daemon is connected.")
             }
-            None => message("Conversations appear here once the daemon is connected."),
+            None if self.selected_bot.is_none() => message("Create a bot to start."),
+            None => message("Opening the conversation…"),
         }
     }
 
@@ -960,15 +1336,6 @@ fn readable(index: usize, text: &str) -> Text {
     )
 }
 
-fn title_from(text: &str) -> Option<String> {
-    let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
-    let mut title: String = line.chars().take(TITLE_LENGTH).collect();
-    if line.chars().count() > TITLE_LENGTH {
-        title.push('…');
-    }
-    Some(title)
-}
-
 impl Focusable for Workspace {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1037,13 +1404,18 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .children(banner)
+                    .children(self.render_header(&theme, cx))
                     .child(
                         div()
                             .flex_1()
                             .min_h_0()
                             .child(self.render_transcript(&theme, cx)),
                     )
-                    .child(self.render_composer(&theme, window, cx)),
+                    .children(
+                        self.history
+                            .is_none()
+                            .then(|| self.render_composer(&theme, window, cx)),
+                    ),
             )
     }
 }
