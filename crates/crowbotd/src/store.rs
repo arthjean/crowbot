@@ -1,12 +1,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crowbot_protocol::{ConversationSummary, Event};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::event::Event;
-
 const SCHEMA_VERSION: i64 = 1;
+const TITLE_LENGTH: usize = 80;
 
 const SCHEMA_V1: &str = "
 BEGIN;
@@ -28,6 +29,19 @@ CREATE TABLE events (
 CREATE INDEX events_by_conversation ON events(conversation_id, id);
 PRAGMA user_version = 1;
 COMMIT;
+";
+
+const SUMMARIES: &str = "
+SELECT
+    c.id,
+    c.cwd,
+    c.created_at_ms,
+    (SELECT payload FROM events
+        WHERE conversation_id = c.id AND kind = 'user_text' ORDER BY id LIMIT 1),
+    COALESCE((SELECT MAX(created_at_ms) FROM events WHERE conversation_id = c.id), c.created_at_ms)
+FROM conversations c
+WHERE ?1 IS NULL OR c.id = ?1
+ORDER BY 5 DESC, c.id DESC
 ";
 
 #[derive(Debug)]
@@ -153,6 +167,33 @@ impl Store {
         Ok(conversation)
     }
 
+    pub fn summaries(&self) -> Result<Vec<ConversationSummary>, StoreError> {
+        self.query_summaries(None)
+    }
+
+    pub fn summary(&self, id: i64) -> Result<Option<ConversationSummary>, StoreError> {
+        Ok(self.query_summaries(Some(id))?.pop())
+    }
+
+    fn query_summaries(&self, id: Option<i64>) -> Result<Vec<ConversationSummary>, StoreError> {
+        let mut statement = self.connection.prepare(SUMMARIES)?;
+        let summaries = statement
+            .query_map(params![id], |row| {
+                Ok(ConversationSummary {
+                    id: row.get(0)?,
+                    cwd: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                    title: row
+                        .get::<_, Option<String>>(3)?
+                        .as_deref()
+                        .and_then(title_from),
+                    last_activity_ms: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(summaries)
+    }
+
     pub fn set_provider_session(
         &self,
         conversation_id: i64,
@@ -170,7 +211,7 @@ impl Store {
             "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
             params![
                 conversation_id,
-                event.kind(),
+                kind(event),
                 serde_json::to_string(event)?,
                 now_ms()
             ],
@@ -192,14 +233,54 @@ impl Store {
     }
 }
 
+fn kind(event: &Event) -> &'static str {
+    match event {
+        Event::UserText(_) => "user_text",
+        Event::MessageText(_) => "message_text",
+        Event::ThoughtText(_) => "thought_text",
+        Event::ToolCallStarted { .. } => "tool_call_started",
+        Event::ToolCallUpdated { .. } => "tool_call_updated",
+        Event::ApprovalRequested { .. } => "approval_requested",
+        Event::ApprovalResolved { .. } => "approval_resolved",
+        Event::TurnEnded(_) => "turn_ended",
+        Event::TurnFailed { .. } => "turn_failed",
+    }
+}
+
+fn title_from(payload: &str) -> Option<String> {
+    let Ok(Event::UserText(text)) = serde_json::from_str(payload) else {
+        return None;
+    };
+    let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    let mut title: String = line.chars().take(TITLE_LENGTH).collect();
+    if line.chars().count() > TITLE_LENGTH {
+        title.push('…');
+    }
+    Some(title)
+}
+
+#[derive(Clone)]
+pub struct SharedStore(Arc<Mutex<Store>>);
+
+impl SharedStore {
+    pub fn new(store: Store) -> Self {
+        Self(Arc::new(Mutex::new(store)))
+    }
+
+    pub fn with<R>(&self, read_or_write: impl FnOnce(&Store) -> R) -> R {
+        let store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        read_or_write(&store)
+    }
+}
+
 pub struct Recorder {
-    store: Store,
+    store: SharedStore,
     conversation_id: i64,
     pending: Option<Event>,
 }
 
 impl Recorder {
-    pub fn new(store: Store, conversation_id: i64) -> Self {
+    pub fn new(store: SharedStore, conversation_id: i64) -> Self {
         Self {
             store,
             conversation_id,
@@ -208,40 +289,34 @@ impl Recorder {
     }
 
     pub fn record(&mut self, event: Event) -> Result<(), StoreError> {
-        match event {
-            Event::SessionStarted {
-                provider_session_id,
-            } => self
-                .store
-                .set_provider_session(self.conversation_id, &provider_session_id),
-            Event::MessageText(_) | Event::ThoughtText(_) => self.buffer(event),
-            other => {
+        match (&mut self.pending, event) {
+            (Some(Event::MessageText(buffer)), Event::MessageText(text))
+            | (Some(Event::ThoughtText(buffer)), Event::ThoughtText(text)) => {
+                buffer.push_str(&text);
+                Ok(())
+            }
+            (_, event @ (Event::MessageText(_) | Event::ThoughtText(_))) => {
                 self.flush()?;
-                self.store.append(self.conversation_id, &other)
+                self.pending = Some(event);
+                Ok(())
+            }
+            (_, event) => {
+                self.flush()?;
+                self.append(&event)
             }
         }
     }
 
     pub fn flush(&mut self) -> Result<(), StoreError> {
         match self.pending.take() {
-            Some(event) => self.store.append(self.conversation_id, &event),
+            Some(event) => self.append(&event),
             None => Ok(()),
         }
     }
 
-    fn buffer(&mut self, event: Event) -> Result<(), StoreError> {
-        match (&mut self.pending, &event) {
-            (Some(Event::MessageText(buffer)), Event::MessageText(text))
-            | (Some(Event::ThoughtText(buffer)), Event::ThoughtText(text)) => {
-                buffer.push_str(text);
-                Ok(())
-            }
-            _ => {
-                self.flush()?;
-                self.pending = Some(event);
-                Ok(())
-            }
-        }
+    fn append(&self, event: &Event) -> Result<(), StoreError> {
+        self.store
+            .with(|store| store.append(self.conversation_id, event))
     }
 }
 
@@ -255,8 +330,9 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use crowbot_protocol::{ToolStatus, TurnEnd};
+
     use super::*;
-    use crate::event::{ToolStatus, TurnEnd};
 
     fn store() -> Store {
         Store::from_connection(Connection::open_in_memory().unwrap()).unwrap()
@@ -267,6 +343,10 @@ mod tests {
             .create_conversation("claude", None, Path::new("/work"))
             .unwrap()
             .id
+    }
+
+    fn events(store: &SharedStore, id: i64) -> Vec<Event> {
+        store.with(|store| store.events(id)).unwrap()
     }
 
     #[test]
@@ -309,6 +389,7 @@ mod tests {
     #[test]
     fn a_missing_conversation_is_none() {
         assert!(store().conversation(42).unwrap().is_none());
+        assert!(store().summary(42).unwrap().is_none());
     }
 
     #[test]
@@ -325,10 +406,65 @@ mod tests {
     }
 
     #[test]
+    fn a_summary_takes_its_title_from_the_first_user_message() {
+        let store = store();
+        let id = conversation(&store);
+        assert_eq!(store.summary(id).unwrap().unwrap().title, None);
+        store
+            .append(
+                id,
+                &Event::UserText("\n  Plan the trip  \nwith details".to_owned()),
+            )
+            .unwrap();
+        store
+            .append(id, &Event::UserText("second message".to_owned()))
+            .unwrap();
+        let summary = store.summary(id).unwrap().unwrap();
+        assert_eq!(summary.title.as_deref(), Some("Plan the trip"));
+        assert_eq!(summary.cwd, "/work");
+    }
+
+    #[test]
+    fn a_long_first_message_gives_a_shortened_title() {
+        let store = store();
+        let id = conversation(&store);
+        store.append(id, &Event::UserText("é".repeat(200))).unwrap();
+        let title = store.summary(id).unwrap().unwrap().title.unwrap();
+        assert_eq!(title.chars().count(), TITLE_LENGTH + 1);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn summaries_list_the_most_recently_active_conversation_first() {
+        let store = store();
+        let first = conversation(&store);
+        let second = conversation(&store);
+        store
+            .connection
+            .execute(
+                "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, 'user_text', ?2, ?3)",
+                params![
+                    first,
+                    serde_json::to_string(&Event::UserText("later".to_owned())).unwrap(),
+                    now_ms() + 60_000
+                ],
+            )
+            .unwrap();
+        let ids: Vec<i64> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|summary| summary.id)
+            .collect();
+        assert_eq!(ids, vec![first, second]);
+    }
+
+    #[test]
     fn the_recorder_merges_adjacent_chunks_of_the_same_kind() {
         let store = store();
         let id = conversation(&store);
-        let mut recorder = Recorder::new(store, id);
+        let store = SharedStore::new(store);
+        let mut recorder = Recorder::new(store.clone(), id);
         for event in [
             Event::MessageText("Hel".to_owned()),
             Event::MessageText("lo".to_owned()),
@@ -339,7 +475,7 @@ mod tests {
             recorder.record(event).unwrap();
         }
         assert_eq!(
-            recorder.store.events(id).unwrap(),
+            events(&store, id),
             vec![
                 Event::MessageText("Hello".to_owned()),
                 Event::ThoughtText("hm".to_owned()),
@@ -353,31 +489,17 @@ mod tests {
     fn the_recorder_keeps_pending_text_until_flush() {
         let store = store();
         let id = conversation(&store);
-        let mut recorder = Recorder::new(store, id);
+        let store = SharedStore::new(store);
+        let mut recorder = Recorder::new(store.clone(), id);
         recorder
             .record(Event::MessageText("partial".to_owned()))
             .unwrap();
-        assert!(recorder.store.events(id).unwrap().is_empty());
+        assert!(events(&store, id).is_empty());
         recorder.flush().unwrap();
         assert_eq!(
-            recorder.store.events(id).unwrap(),
+            events(&store, id),
             vec![Event::MessageText("partial".to_owned())]
         );
-    }
-
-    #[test]
-    fn the_recorder_saves_the_provider_session_on_the_conversation() {
-        let store = store();
-        let id = conversation(&store);
-        let mut recorder = Recorder::new(store, id);
-        recorder
-            .record(Event::SessionStarted {
-                provider_session_id: "session-1".to_owned(),
-            })
-            .unwrap();
-        let loaded = recorder.store.conversation(id).unwrap().unwrap();
-        assert_eq!(loaded.provider_session_id.as_deref(), Some("session-1"));
-        assert!(recorder.store.events(id).unwrap().is_empty());
     }
 
     #[test]

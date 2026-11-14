@@ -6,27 +6,36 @@ Crows learn by watching, use tools, and remember. So do the bots.
 
 ## Status
 
-Prototype. The daemon starts Claude through the Agent Client Protocol, keeps a conversation across turns and restarts, and records every event in SQLite.
+Prototype. The daemon listens on a local endpoint, starts Claude through the Agent Client Protocol, and records every event in SQLite. The desktop client attaches to it, shows a conversation as it streams, and asks you to allow or decline each gated tool call.
+
+Start the daemon, then the client:
 
 ```sh
-cargo run -p crowbotd -- --cwd <dir> "<prompt>"
-cargo run -p crowbotd -- --conversation <id> "<prompt>"
-cargo run -p crowbotd -- --conversation <id> --history
+cargo run -p crowbotd -- --cwd <dir>
+cargo run -p crowbot-desktop
 ```
 
-- With a prompt, the daemon runs one turn. Without one, it reads one prompt per line from standard input.
-- `--conversation <id>` continues a conversation, in the folder where it started.
-- `--history` prints a conversation from the database and does not start the agent.
-- `--approve` allows each approval request once. Without it, the daemon declines them all.
+The daemon:
+
+- `--cwd <dir>` is the folder where new conversations work. The default is the folder the daemon starts in.
 - `--db <path>` selects the database. The default is `~/.crowbot/crowbot.db`.
-- `--agent "<command>"` starts another ACP agent.
+- `--endpoint <address>` selects where it listens. The default is the named pipe `\\.\pipe\crowbotd-<user>` on Windows and the socket `~/.crowbot/crowbotd.sock` elsewhere.
+- `--agent "<command>"` starts another ACP agent for new conversations.
+
+The client:
+
+- It opens the most recent conversation. Closing the window does not stop a turn: the daemon keeps working, and an approval request waits until a client answers it.
+- Enter sends the message, Shift+Enter adds a line.
+- `--endpoint <address>` attaches to a daemon that listens somewhere else.
+- When no daemon is running, the window says so and reconnects on its own.
 
 It needs Bun, Node.js 22 or later, and a signed-in Claude Code.
 
 ## Shape
 
 - `crowbotd`: a headless Rust daemon that owns the bots, their conversations, their memory, and their computers. It runs on your computer or on a server.
-- A native desktop client written in Rust with GPUI. It attaches to a daemon, local or remote.
+- `crowbot` (the `crowbot-desktop` crate): a native desktop client written in Rust with GPUI. It attaches to a daemon, local today and remote later, and keeps no state of its own.
+- `crowbot-protocol`: the messages the daemon and its clients exchange, one JSON message per line.
 - Bots run on Claude, ChatGPT, or Grok, with your own subscription or your own API key.
 
 ## Pricing model

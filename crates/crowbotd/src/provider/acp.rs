@@ -11,10 +11,10 @@ use agent_client_protocol::v1::schema::{
     ToolCallStatus,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, Error};
+use crowbot_protocol::{ApprovalDecision, Event, ToolStatus, TurnEnd};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-
-use crate::event::{ApprovalDecision, ApprovalPolicy, Event, ToolStatus, TurnEnd};
+use tokio::sync::oneshot;
 
 pub struct AgentProfile {
     pub command: String,
@@ -35,22 +35,28 @@ impl AgentProfile {
 pub struct SessionConfig {
     pub agent: AgentProfile,
     pub cwd: PathBuf,
-    pub approvals: ApprovalPolicy,
     pub resume: Option<String>,
+}
+
+pub enum AgentEvent {
+    Started {
+        provider_session_id: String,
+    },
+    Event(Event),
+    ApprovalNeeded {
+        tool_call_id: String,
+        title: Option<String>,
+        reply: oneshot::Sender<ApprovalDecision>,
+    },
 }
 
 pub async fn run_session(
     config: SessionConfig,
     mut prompts: UnboundedReceiver<String>,
-    events: UnboundedSender<Event>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let SessionConfig {
-        agent,
-        cwd,
-        approvals,
-        resume,
-    } = config;
-    let process = AcpAgent::from_str(&agent.command)?;
+    events: UnboundedSender<AgentEvent>,
+) -> Result<(), String> {
+    let SessionConfig { agent, cwd, resume } = config;
+    let process = AcpAgent::from_str(&agent.command).map_err(|error| error.to_string())?;
     let update_events = events.clone();
     let approval_events = events.clone();
 
@@ -59,23 +65,45 @@ pub async fn run_session(
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
                 if let Some(event) = translate(notification.update) {
-                    update_events.send(event).ok();
+                    update_events.send(AgentEvent::Event(event)).ok();
                 }
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _connection| {
-                let (outcome, decision) = resolve(&request, approvals);
+            async move |request: RequestPermissionRequest,
+                        responder,
+                        connection: ConnectionTo<Agent>| {
+                let tool_call_id = request.tool_call.tool_call_id.0.to_string();
+                let title = request.tool_call.fields.title.clone();
+                let decline = decline_outcome(&request);
+                let Some(allow) = allow_once_outcome(&request) else {
+                    approval_events
+                        .send(AgentEvent::Event(Event::ApprovalResolved {
+                            id: None,
+                            tool_call_id,
+                            title,
+                            decision: ApprovalDecision::Declined,
+                        }))
+                        .ok();
+                    return responder.respond(RequestPermissionResponse::new(decline));
+                };
+                let (reply, decision) = oneshot::channel();
                 approval_events
-                    .send(Event::ApprovalResolved {
-                        tool_call_id: request.tool_call.tool_call_id.0.to_string(),
-                        title: request.tool_call.fields.title.clone(),
-                        decision,
+                    .send(AgentEvent::ApprovalNeeded {
+                        tool_call_id,
+                        title,
+                        reply,
                     })
                     .ok();
-                responder.respond(RequestPermissionResponse::new(outcome))
+                connection.spawn(async move {
+                    let outcome = match decision.await {
+                        Ok(ApprovalDecision::Allowed) => allow,
+                        Ok(ApprovalDecision::Declined) | Err(_) => decline,
+                    };
+                    responder.respond(RequestPermissionResponse::new(outcome))
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -122,13 +150,12 @@ pub async fn run_session(
             }
 
             events
-                .send(Event::SessionStarted {
+                .send(AgentEvent::Started {
                     provider_session_id: session_id.0.to_string(),
                 })
                 .ok();
 
             while let Some(prompt) = prompts.recv().await {
-                events.send(Event::UserText(prompt.clone())).ok();
                 let response = connection
                     .send_request(PromptRequest::new(
                         session_id.clone(),
@@ -137,14 +164,15 @@ pub async fn run_session(
                     .block_task()
                     .await?;
                 events
-                    .send(Event::TurnEnded(turn_end(response.stop_reason)))
+                    .send(AgentEvent::Event(Event::TurnEnded(turn_end(
+                        response.stop_reason,
+                    ))))
                     .ok();
             }
             Ok(())
         })
-        .await?;
-
-    Ok(())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn failure(message: &str) -> Error {
@@ -166,30 +194,27 @@ fn needs_mode_change(modes: Option<&SessionModeState>, mode: &str) -> Result<boo
     Ok(modes.is_some_and(|modes| modes.current_mode_id.0.as_ref() != mode))
 }
 
-fn resolve(
+fn select(
     request: &RequestPermissionRequest,
-    policy: ApprovalPolicy,
-) -> (RequestPermissionOutcome, ApprovalDecision) {
-    let select = |kind: PermissionOptionKind| {
-        request
-            .options
-            .iter()
-            .find(|option| option.kind == kind)
-            .map(|option| {
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                    option.option_id.clone(),
-                ))
-            })
-    };
-    if policy == ApprovalPolicy::AllowOnce
-        && let Some(outcome) = select(PermissionOptionKind::AllowOnce)
-    {
-        return (outcome, ApprovalDecision::Allowed);
-    }
-    (
-        select(PermissionOptionKind::RejectOnce).unwrap_or(RequestPermissionOutcome::Cancelled),
-        ApprovalDecision::Declined,
-    )
+    kind: PermissionOptionKind,
+) -> Option<RequestPermissionOutcome> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == kind)
+        .map(|option| {
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                option.option_id.clone(),
+            ))
+        })
+}
+
+fn allow_once_outcome(request: &RequestPermissionRequest) -> Option<RequestPermissionOutcome> {
+    select(request, PermissionOptionKind::AllowOnce)
+}
+
+fn decline_outcome(request: &RequestPermissionRequest) -> RequestPermissionOutcome {
+    select(request, PermissionOptionKind::RejectOnce).unwrap_or(RequestPermissionOutcome::Cancelled)
 }
 
 fn translate(update: SessionUpdate) -> Option<Event> {
@@ -201,11 +226,15 @@ fn translate(update: SessionUpdate) -> Option<Event> {
             title: call.title,
             status: tool_status(call.status),
         }),
-        SessionUpdate::ToolCallUpdate(update) => Some(Event::ToolCallUpdated {
-            id: update.tool_call_id.0.to_string(),
-            title: update.fields.title,
-            status: update.fields.status.and_then(tool_status),
-        }),
+        SessionUpdate::ToolCallUpdate(update) => {
+            let title = update.fields.title;
+            let status = update.fields.status.and_then(tool_status);
+            (title.is_some() || status.is_some()).then(|| Event::ToolCallUpdated {
+                id: update.tool_call_id.0.to_string(),
+                title,
+                status,
+            })
+        }
         _ => None,
     }
 }
@@ -277,46 +306,45 @@ mod tests {
     }
 
     #[test]
-    fn the_decline_policy_selects_reject_once() {
+    fn declining_selects_reject_once() {
         let request = request(&[
             PermissionOptionKind::AllowAlways,
             PermissionOptionKind::AllowOnce,
             PermissionOptionKind::RejectOnce,
         ]);
-        let (outcome, decision) = resolve(&request, ApprovalPolicy::Decline);
-        assert_eq!(decision, ApprovalDecision::Declined);
-        assert_eq!(selected(&outcome).as_deref(), Some("option-2"));
+        assert_eq!(
+            selected(&decline_outcome(&request)).as_deref(),
+            Some("option-2")
+        );
     }
 
     #[test]
-    fn the_allow_policy_selects_allow_once_and_never_allow_always() {
+    fn allowing_selects_allow_once_and_never_allow_always() {
         let request = request(&[
             PermissionOptionKind::AllowAlways,
             PermissionOptionKind::AllowOnce,
             PermissionOptionKind::RejectOnce,
         ]);
-        let (outcome, decision) = resolve(&request, ApprovalPolicy::AllowOnce);
-        assert_eq!(decision, ApprovalDecision::Allowed);
+        let outcome = allow_once_outcome(&request).unwrap();
         assert_eq!(selected(&outcome).as_deref(), Some("option-1"));
     }
 
     #[test]
-    fn the_allow_policy_declines_when_only_allow_always_is_offered() {
+    fn a_request_that_only_offers_allow_always_cannot_be_allowed() {
         let request = request(&[
             PermissionOptionKind::AllowAlways,
             PermissionOptionKind::RejectOnce,
         ]);
-        let (outcome, decision) = resolve(&request, ApprovalPolicy::AllowOnce);
-        assert_eq!(decision, ApprovalDecision::Declined);
-        assert_eq!(selected(&outcome).as_deref(), Some("option-1"));
+        assert!(allow_once_outcome(&request).is_none());
     }
 
     #[test]
     fn a_request_without_a_reject_option_is_cancelled() {
         let request = request(&[PermissionOptionKind::AllowAlways]);
-        let (outcome, decision) = resolve(&request, ApprovalPolicy::Decline);
-        assert_eq!(decision, ApprovalDecision::Declined);
-        assert!(matches!(outcome, RequestPermissionOutcome::Cancelled));
+        assert!(matches!(
+            decline_outcome(&request),
+            RequestPermissionOutcome::Cancelled
+        ));
     }
 
     #[test]
