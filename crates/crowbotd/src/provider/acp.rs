@@ -600,6 +600,7 @@ fn choice(option: &SessionConfigSelectOption) -> ModelChoice {
         id: option.value.0.to_string(),
         name: option.name.clone(),
         description: option.description.clone(),
+        ..ModelChoice::default()
     }
 }
 
@@ -692,7 +693,9 @@ async fn accept_sign_in(
 }
 
 /// Reads the models and the reasoning levels an agent offers: one session is
-/// opened in `cwd`, with no prompt, and closed.
+/// opened in `cwd`, with no prompt, and closed. The levels of a model are
+/// often its own, so the session is moved to each model in turn and the
+/// levels it then offers are kept on that model.
 pub async fn read_offer(
     profile: AgentProfile,
     launch: &Launch,
@@ -714,10 +717,51 @@ pub async fn read_offer(
                 let mut request = NewSessionRequest::new(cwd);
                 request.meta = profile.session_meta;
                 let created = connection.send_request(request).block_task().await?;
-                Ok(offer_of(
-                    created.config_options.as_deref().unwrap_or_default(),
-                    true,
-                ))
+                let options = created.config_options.unwrap_or_default();
+                let mut offer = offer_of(&options, true);
+                let Some((model_option, _, current)) =
+                    select_of(&options, &SessionConfigOptionCategory::Model)
+                else {
+                    return Ok(offer);
+                };
+                let mut levels = vec![(
+                    current,
+                    select_of(&options, &SessionConfigOptionCategory::ThoughtLevel),
+                )];
+                let others: Vec<String> = offer
+                    .models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .filter(|id| *id != levels[0].0)
+                    .collect();
+                for id in others {
+                    // A model the agent will not move to keeps the levels of
+                    // the provider.
+                    let set = connection
+                        .send_request(SetSessionConfigOptionRequest::new(
+                            created.session_id.clone(),
+                            model_option.clone(),
+                            SessionConfigOptionValue::value_id(id.clone()),
+                        ))
+                        .block_task()
+                        .await;
+                    if let Ok(set) = set {
+                        let found = select_of(
+                            &set.config_options,
+                            &SessionConfigOptionCategory::ThoughtLevel,
+                        );
+                        levels.push((id, found));
+                    }
+                }
+                for (id, found) in levels {
+                    if let (Some(model), Some((_, efforts, current))) =
+                        (offer.models.iter_mut().find(|model| model.id == id), found)
+                    {
+                        model.efforts = efforts;
+                        model.default_effort = Some(current);
+                    }
+                }
+                Ok(offer)
             },
         )
         .await

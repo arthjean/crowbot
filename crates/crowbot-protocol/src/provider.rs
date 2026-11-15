@@ -83,6 +83,14 @@ pub struct ModelChoice {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// The reasoning levels of this model, when the provider has levels that
+    /// depend on the model. Empty for a level, and for a model whose levels
+    /// are not known: the levels of the provider then apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<ModelChoice>,
+    /// The level a session of this model starts on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
 }
 
 /// The models and the reasoning levels a provider offers.
@@ -141,7 +149,7 @@ mod tests {
             models: vec![ModelChoice {
                 id: "gpt".to_owned(),
                 name: "GPT".to_owned(),
-                description: None,
+                ..ModelChoice::default()
             }],
             default_model: Some("gpt".to_owned()),
             ..ProviderModels::default()

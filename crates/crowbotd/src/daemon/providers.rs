@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crowbot_protocol::{
-    FailureCause, ModelsState, ProviderModels, ProviderState, ProviderStatus, RuntimeInstall,
-    ServerMessage, SignInMethod,
+    FailureCause, ModelChoice, ModelsState, ProviderModels, ProviderState, ProviderStatus,
+    RuntimeInstall, ServerMessage, SignInMethod,
 };
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
@@ -758,6 +758,22 @@ impl Daemon {
                 })
         };
         let listed = !offer.models.is_empty();
+        let mut models = latest_models(offer.models, default_model.as_deref());
+        // A session of a turn reports the levels of its own model only: the
+        // levels read earlier for the other models stay.
+        if let Some(known) = self
+            .state()
+            .providers
+            .get(id)
+            .and_then(|entry| entry.models.as_ref())
+        {
+            for model in models.iter_mut().filter(|model| model.efforts.is_empty()) {
+                if let Some(old) = known.models.iter().find(|old| old.id == model.id) {
+                    model.efforts = old.efforts.clone();
+                    model.default_effort = old.default_effort.clone();
+                }
+            }
+        }
         self.publish_models(
             id,
             ProviderModels {
@@ -767,7 +783,7 @@ impl Daemon {
                 } else {
                     ModelsState::Unavailable
                 },
-                models: offer.models,
+                models,
                 default_model,
                 efforts: offer.efforts,
                 default_effort,
@@ -924,5 +940,106 @@ impl ProcessTree {
                 libc::kill(-group, libc::SIGKILL);
             }
         }
+    }
+}
+
+/// The version of a model id: the numbers of its parts that start with a
+/// digit, in order, and the family: the other parts. `gpt-5.2-codex` is
+/// version 5.2 of `gpt-codex`, and `claude-opus-4-1` version 4.1 of
+/// `claude-opus`.
+fn family_and_version(id: &str) -> (String, Vec<u64>) {
+    let mut family = Vec::new();
+    let mut version = Vec::new();
+    for part in id.split('-') {
+        if part.starts_with(|c: char| c.is_ascii_digit()) {
+            version.extend(part.split('.').map(|number| {
+                let digits: String = number.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().unwrap_or(0)
+            }));
+        } else {
+            family.push(part);
+        }
+    }
+    (family.join("-"), version)
+}
+
+/// The models worth offering: the newest of each family, in the order the
+/// provider lists them. A provider lists the models it still serves, older
+/// versions included, and an older version only crowds the list. The
+/// default model always stays, since a bot runs on it when it names none.
+fn latest_models(models: Vec<ModelChoice>, default: Option<&str>) -> Vec<ModelChoice> {
+    let keys: Vec<(String, Vec<u64>)> = models
+        .iter()
+        .map(|model| family_and_version(&model.id))
+        .collect();
+    models
+        .into_iter()
+        .zip(&keys)
+        .filter(|(model, (family, version))| {
+            default == Some(model.id.as_str())
+                || !keys
+                    .iter()
+                    .any(|(other, newer)| other == family && newer > version)
+        })
+        .map(|(model, _)| model)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn models(ids: &[&str]) -> Vec<ModelChoice> {
+        ids.iter()
+            .map(|id| ModelChoice {
+                id: (*id).to_owned(),
+                name: (*id).to_owned(),
+                ..ModelChoice::default()
+            })
+            .collect()
+    }
+
+    fn ids(models: &[ModelChoice]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
+
+    #[test]
+    fn only_the_newest_model_of_each_family_is_offered() {
+        let listed = models(&[
+            "gpt-5.2-codex",
+            "gpt-5.1-codex",
+            "gpt-5-codex",
+            "gpt-5.1-codex-max",
+            "claude-opus-4-1",
+            "claude-opus-4",
+            "claude-sonnet-4-20250514",
+            "grok-4.7",
+            "grok-4.10",
+            "grok-code-fast-1",
+            "default",
+            "opus",
+        ]);
+        assert_eq!(
+            ids(&latest_models(listed, None)),
+            [
+                "gpt-5.2-codex",
+                "gpt-5.1-codex-max",
+                "claude-opus-4-1",
+                "claude-sonnet-4-20250514",
+                "grok-4.10",
+                "grok-code-fast-1",
+                "default",
+                "opus",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_model_stays_even_when_a_newer_one_is_listed() {
+        let listed = models(&["grok-4.7", "grok-4.8"]);
+        assert_eq!(
+            ids(&latest_models(listed, Some("grok-4.7"))),
+            ["grok-4.7", "grok-4.8"]
+        );
     }
 }

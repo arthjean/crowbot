@@ -617,6 +617,13 @@ async fn a_provider_lists_its_models_and_its_reasoning_levels() {
     assert_eq!(codex.default_model.as_deref(), Some("gpt-fast"));
     assert_eq!(ids(&codex.efforts), ["medium", "low", "high"]);
     assert_eq!(codex.default_effort.as_deref(), Some("medium"));
+    // Each model carries its own levels, read by moving the session to it.
+    assert_eq!(ids(&codex.models[0].efforts), ["medium", "low", "high"]);
+    assert_eq!(
+        ids(&codex.models[1].efforts),
+        ["medium", "low", "high", "xhigh"]
+    );
+    assert_eq!(codex.models[1].default_effort.as_deref(), Some("medium"));
 
     let claude = models(&mut client, CLAUDE).await;
     assert_eq!(ids(&claude.models), ["fast", "smart"]);

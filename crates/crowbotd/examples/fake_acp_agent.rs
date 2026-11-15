@@ -450,7 +450,12 @@ impl Agent {
             "currentValue": session.model.as_deref().unwrap_or(models[0]),
             "options": models.map(|model| json!({ "value": model, "name": model })),
         })];
-        let efforts = self.flavor.efforts();
+        // The second model reasons further than the first: its levels are
+        // its own, as with the real agents.
+        let mut efforts = self.flavor.efforts().to_vec();
+        if !efforts.is_empty() && session.model.as_deref() == Some(models[1]) {
+            efforts.push("xhigh");
+        }
         if let Some(first) = efforts.first() {
             options.push(json!({
                 "id": "reasoning_effort",
