@@ -34,3 +34,11 @@ pub use search::{
     SearchResults,
 };
 pub use wire::{WireError, decode, encode};
+
+/// The exit status of a daemon that did not start because another daemon
+/// holds its database. A client that started it waits for that daemon.
+pub const EXIT_DATABASE_HELD: u8 = 3;
+
+/// The exit status of a daemon that did not start because another program
+/// holds its endpoint. A client that started it attaches to that program.
+pub const EXIT_ENDPOINT_HELD: u8 = 4;

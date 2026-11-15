@@ -13,5 +13,6 @@ mod recovery;
 mod runtimes;
 mod settings;
 mod shell;
+mod startup;
 mod stop;
 mod support;

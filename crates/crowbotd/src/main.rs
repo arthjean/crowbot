@@ -2,6 +2,7 @@ mod conversation;
 mod daemon;
 mod digest;
 mod handoff;
+mod instance;
 mod lifetime;
 mod provider;
 mod runtime;
@@ -13,10 +14,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crowbot_protocol::Endpoint;
 use crowbot_protocol::transport::Listener;
+use crowbot_protocol::{EXIT_DATABASE_HELD, EXIT_ENDPOINT_HELD, Endpoint};
 
 use crate::daemon::Daemon;
+use crate::instance::LockFailure;
 use crate::runtime::Runtimes;
 use crate::store::{SharedStore, Store};
 
@@ -92,7 +94,67 @@ fn default_bots_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "cannot find the home directory; pass --bots-dir <dir>".to_owned())
 }
 
-async fn run(args: Args) -> Result<(), String> {
+/// Why a daemon did not start, each with its exit status.
+enum StartError {
+    /// Status 1.
+    Failed(String),
+    /// `EXIT_DATABASE_HELD`: another daemon uses the database.
+    DatabaseHeld(String),
+    /// `EXIT_ENDPOINT_HELD`: another program holds the endpoint.
+    EndpointHeld(String),
+}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for StartError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_owned())
+    }
+}
+
+/// The folder `~/.crowbot` holds the database, the log, and the socket of
+/// the default daemon: only its user may enter it. It is made so, or kept so
+/// when the client or a permissive umask made it first.
+#[cfg(unix)]
+fn private_folder(folder: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder)
+        .map_err(|error| format!("cannot create {}: {error}", folder.display()))?;
+    let metadata = std::fs::metadata(folder)
+        .map_err(|error| format!("cannot read {}: {error}", folder.display()))?;
+    // SAFETY: `geteuid` has no preconditions.
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(format!(
+            "{} belongs to another account, so it could read the database",
+            folder.display()
+        ));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("cannot make {} private: {error}", folder.display()))?;
+        eprintln!("[crowbotd] made {} private to its user", folder.display());
+    }
+    Ok(())
+}
+
+/// Starts the daemon in this order: lock the database, open it, end the turns
+/// a previous daemon left running, then claim the endpoint. An endpoint that
+/// answers therefore belongs to a daemon that is ready, and a daemon that
+/// fails to start is never reached.
+async fn run(args: Args) -> Result<(), StartError> {
+    #[cfg(unix)]
+    if args.db.is_none() || args.endpoint.is_none() {
+        let home = std::env::home_dir().ok_or("cannot find the home directory")?;
+        private_folder(&home.join(".crowbot"))?;
+    }
     let db = match args.db {
         Some(path) => path,
         None => default_db_path()?,
@@ -123,19 +185,26 @@ async fn run(args: Args) -> Result<(), String> {
             Endpoint::local().ok_or("cannot choose a local endpoint; pass --endpoint <address>")?
         }
     };
-    let listener = Listener::bind(&endpoint).map_err(|error| match error.kind() {
-        ErrorKind::PermissionDenied | ErrorKind::AddrInUse => format!(
-            "another program already holds the endpoint {endpoint}: another crowbotd is running, or another program took the name"
-        ),
-        _ => format!("cannot listen on {endpoint}: {error}"),
-    })?;
     eprintln!("[crowbotd] process {}", std::process::id());
+    let _locked =
+        instance::lock_database(&db, &endpoint)
+            .await
+            .map_err(|failure| match failure {
+                LockFailure::Held(message) => StartError::DatabaseHeld(message),
+                LockFailure::Failed(message) => StartError::Failed(message),
+            })?;
     let store = Store::open(&db).map_err(|error| error.to_string())?;
     eprintln!("[crowbotd] database {}", db.display());
     let interrupted = store.recover().map_err(|error| error.to_string())?;
     if interrupted > 0 {
         eprintln!("[crowbotd] ended {interrupted} turn(s) that a previous daemon left running");
     }
+    let listener = Listener::bind(&endpoint).map_err(|error| match error.kind() {
+        ErrorKind::PermissionDenied | ErrorKind::AddrInUse => StartError::EndpointHeld(format!(
+            "another program already holds the endpoint {endpoint}: another crowbotd is running, or another program took the name"
+        )),
+        _ => StartError::Failed(format!("cannot listen on {endpoint}: {error}")),
+    })?;
     eprintln!("[crowbotd] listening on {endpoint}");
     let daemon = Arc::new(Daemon::new(
         SharedStore::new(store),
@@ -183,11 +252,12 @@ async fn serve() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(args).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("[crowbotd] failed: {message}");
-            ExitCode::FAILURE
-        }
-    }
+    let (message, status) = match run(args).await {
+        Ok(()) => return ExitCode::SUCCESS,
+        Err(StartError::Failed(message)) => (message, ExitCode::FAILURE),
+        Err(StartError::DatabaseHeld(message)) => (message, ExitCode::from(EXIT_DATABASE_HELD)),
+        Err(StartError::EndpointHeld(message)) => (message, ExitCode::from(EXIT_ENDPOINT_HELD)),
+    };
+    eprintln!("[crowbotd] failed: {message}");
+    status
 }
