@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crowbot_protocol::transport::{self, MessageReader, MessageWriter};
-use crowbot_protocol::{ClientMessage, Endpoint, PROTOCOL_VERSION, ServerMessage};
+use crowbot_protocol::{
+    ClientMessage, EXIT_DATABASE_HELD, Endpoint, PROTOCOL_VERSION, ServerMessage,
+};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -53,7 +55,7 @@ impl DaemonLauncher {
     /// the client exits.
     fn launch(&self) -> std::io::Result<Child> {
         if let Some(parent) = self.log.parent() {
-            std::fs::create_dir_all(parent)?;
+            private_folder(parent)?;
         }
         let log = std::fs::OpenOptions::new()
             .create(true)
@@ -93,6 +95,23 @@ impl DaemonLauncher {
             .find(|line| !line.is_empty())
             .map(str::to_owned)
     }
+}
+
+/// The folder of the log is the daemon's own (`~/.crowbot`): on Unix only its
+/// user may enter one this client creates.
+#[cfg(unix)]
+fn private_folder(folder: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder)
+}
+
+#[cfg(not(unix))]
+fn private_folder(folder: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(folder)
 }
 
 #[cfg(windows)]
@@ -253,13 +272,22 @@ impl Attachment {
         })?;
         let launched = Instant::now();
         self.last_launch = Some(launched);
+        // The daemon claims its endpoint once it is ready, so the client
+        // waits for it to answer, or to exit.
+        let mut held = false;
         loop {
             if let Some(stream) = self.connect().await? {
                 return Ok(stream);
             }
-            if let Ok(Some(status)) = daemon.try_wait() {
-                // When two clients each start a daemon, one daemon wins the
-                // endpoint and the other exits. The client attaches to the winner.
+            if !held && let Ok(Some(status)) = daemon.try_wait() {
+                // When two clients each start a daemon, one daemon wins and
+                // the other exits: at the database, which the winner may still
+                // migrate, so the client waits for the winner; or at the
+                // endpoint, which the winner then holds.
+                if status.code() == Some(i32::from(EXIT_DATABASE_HELD)) {
+                    held = true;
+                    continue;
+                }
                 if let Some(stream) = self.connect().await? {
                     return Ok(stream);
                 }
@@ -269,10 +297,17 @@ impl Attachment {
                 ));
             }
             if launched.elapsed() > START_TIMEOUT {
-                return Err(format!(
-                    "The daemon started but does not answer on {}.",
-                    self.endpoint
-                ));
+                return Err(if held {
+                    with_log_line(
+                        "Another daemon uses the database and did not answer in time.",
+                        launcher.last_log_line(log_start),
+                    )
+                } else {
+                    format!(
+                        "The daemon started but does not answer on {}.",
+                        self.endpoint
+                    )
+                });
             }
             tokio::time::sleep(START_POLL).await;
         }
@@ -618,6 +653,54 @@ mod tests {
         until_connected(&mut second_events);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(scene.listening(&["first", "second"]), 1);
+    }
+
+    /// Another daemon holds the database and does not listen yet, as one that
+    /// still migrates it: the daemon this client starts exits, and the client
+    /// waits for the holder instead of failing.
+    #[test]
+    fn a_client_waits_for_the_daemon_that_holds_the_database() {
+        daemon_binary();
+        let scene = Scene::new();
+        let lock = std::fs::File::create(scene.dir.join("crowbot.db.lock")).unwrap();
+        lock.lock().unwrap();
+        let (_connection, mut events) = scene.client("loser");
+
+        let started = Instant::now();
+        let mut launched = false;
+        let mut seen = |events: &mut UnboundedReceiver<ConnectionEvent>| {
+            while let Ok(event) = events.try_recv() {
+                match event {
+                    ConnectionEvent::Starting => launched = true,
+                    ConnectionEvent::Failed(reason) => panic!("the client failed: {reason}"),
+                    _ => {}
+                }
+            }
+        };
+        while !std::fs::read_to_string(scene.log("loser"))
+            .unwrap_or_default()
+            .contains("another crowbotd")
+        {
+            assert!(
+                started.elapsed() < PATIENCE,
+                "the daemon never found the lock"
+            );
+            seen(&mut events);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The holder is still busy a moment after the other daemon exited.
+        std::thread::sleep(Duration::from_millis(500));
+        seen(&mut events);
+        assert!(launched);
+        answering_daemon(
+            scene.endpoint.clone(),
+            ServerMessage::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                daemon_version: "holder".to_owned(),
+            },
+        );
+        until_connected(&mut events);
+        drop(lock);
     }
 
     #[test]
