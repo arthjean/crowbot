@@ -365,6 +365,42 @@ fn a_provider_that_cannot_run_is_stated_above_create_with_the_control_that_fixes
 }
 
 #[gpui::test]
+fn a_provider_not_installed_yet_offers_its_install_on_the_creation_form(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1600.)));
+    daemon.connect(Vec::new(), cx);
+    daemon.sent();
+    // A provider downloads its runtime at the first turn, and a person can
+    // only sign in once it is there: the form says so, and offers Install.
+    daemon.tell(
+        ServerMessage::Providers(vec![ProviderStatus {
+            detail: Some(
+                "Crow Bot downloads claude-agent-acp 1.0 (219 MB) when a bot first needs it."
+                    .to_owned(),
+            ),
+            ..provider(ProviderState::NotInstalled)
+        }]),
+        cx,
+    );
+    assert!(shown(cx, "creation-provider-notice"));
+    assert!(bounds(cx, "creation-provider-notice").bottom() <= bounds(cx, "create-bot").top());
+    daemon.sent();
+    click(cx, "creation-install");
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::InstallRuntime {
+            provider: "claude".to_owned()
+        }]
+    );
+    // Once installed and signed in, the notice goes.
+    daemon.tell(
+        ServerMessage::ProviderChanged(provider(ProviderState::Ready)),
+        cx,
+    );
+    assert!(!shown(cx, "creation-provider-notice"));
+}
+
+#[gpui::test]
 fn new_bot_with_a_bot_opens_the_same_form_with_cancel(cx: &mut TestAppContext) {
     let (workspace, mut daemon, cx) = open(cx);
     daemon.connect(two_bots(), cx);

@@ -129,6 +129,25 @@ pub(super) fn provider_problem(status: &ProviderStatus) -> Option<SharedString> 
     }
 }
 
+/// What a person should know about a provider before a bot runs on it: what
+/// stops it, as a warning, or a runtime it does not have yet, which a turn
+/// downloads and which only then takes a sign-in.
+pub(super) fn provider_notice(status: &ProviderStatus) -> Option<(SharedString, bool)> {
+    if let Some(problem) = provider_problem(status) {
+        return Some((problem, true));
+    }
+    (status.state == ProviderState::NotInstalled).then(|| {
+        let downloads = status.detail.clone().unwrap_or_else(|| {
+            format!(
+                "Crow Bot downloads {} when a bot first needs it.",
+                status.name
+            )
+        });
+        let text = format!("{downloads} Install it now to sign in before the first message.");
+        (text.into(), false)
+    })
+}
+
 /// One choice of a picker. `value` is what the choice stores: `None` is the
 /// default of the provider.
 pub(super) struct Choice {
@@ -312,7 +331,12 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let problem = provider_problem(status)?;
+        let (problem, warning) = provider_notice(status)?;
+        let (surface, mark, tint) = if warning {
+            (theme.warning_soft, Icon::TriangleAlert, theme.warning_text)
+        } else {
+            (theme.hover, Icon::Info, theme.text_muted)
+        };
         Some(
             div()
                 .id((prefix, 40_usize))
@@ -324,7 +348,7 @@ impl Workspace {
                 .flex_col()
                 .gap(space::S2)
                 .rounded(radius::MD)
-                .bg(theme.warning_soft)
+                .bg(surface)
                 .child(
                     div()
                         .flex()
@@ -335,11 +359,7 @@ impl Workspace {
                                 .h(text::MD.leading)
                                 .flex()
                                 .items_center()
-                                .child(ui::icon(
-                                    Icon::TriangleAlert,
-                                    icon_size::SM,
-                                    theme.warning_text,
-                                )),
+                                .child(ui::icon(mark, icon_size::SM, tint)),
                         )
                         .child(div().flex_1().min_w_0().child(problem)),
                 )
