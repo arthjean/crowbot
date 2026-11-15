@@ -54,6 +54,8 @@ pub struct AgentProfile {
     pub folders: Vec<PathBuf>,
     /// The files the daemon writes before each start, with their content.
     pub files: Vec<(PathBuf, String)>,
+    /// The files and folders the daemon removes before each start.
+    pub removed: Vec<PathBuf>,
 }
 
 impl AgentProfile {
@@ -70,6 +72,7 @@ impl AgentProfile {
             sign_in_page: None,
             folders: Vec::new(),
             files: Vec::new(),
+            removed: Vec::new(),
         }
     }
 
@@ -83,6 +86,17 @@ impl AgentProfile {
                 std::fs::create_dir_all(folder)?;
             }
             std::fs::write(path, content)?;
+        }
+        for path in &self.removed {
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            match removed {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
         }
         Ok(())
     }

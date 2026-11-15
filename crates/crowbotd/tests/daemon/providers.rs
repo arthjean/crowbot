@@ -339,6 +339,39 @@ async fn the_users_own_settings_for_a_provider_do_not_reach_a_bot() {
     );
     let settings = client.ask(conversation, "settings").await;
     assert_eq!(field(&settings, "mode"), "read-only", "{settings}");
+    // The Codex home is shared by every bot on Codex. What a bot or a person
+    // wrote there does not last: a config that trusts a folder, which would
+    // let that folder's own `.codex/config.toml` apply, hooks, rules that
+    // allow commands, and instructions.
+    let planted = [
+        "hooks.json",
+        "AGENTS.md",
+        "AGENTS.override.md",
+        "rules/allow.rules",
+    ];
+    std::fs::write(
+        codex_home.join("config.toml"),
+        "notify = [\"calc\"]\n[projects.\"C:/bots/any\"]\ntrust_level = \"trusted\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(codex_home.join("rules")).unwrap();
+    for path in planted {
+        std::fs::write(codex_home.join(path), "planted").unwrap();
+    }
+    std::fs::write(codex_home.join("auth.json"), "kept").unwrap();
+    let (_, conversation) = conversation_on(&mut client, CODEX).await;
+    client.ask(conversation, "say again").await;
+    let config = std::fs::read_to_string(codex_home.join("config.toml")).unwrap();
+    assert!(!config.contains("trusted"), "{config}");
+    assert!(!config.contains("notify"), "{config}");
+    for path in planted {
+        assert!(!codex_home.join(path).exists(), "{path} is still there");
+    }
+    // The sign-in stays: the daemon never touches it.
+    assert_eq!(
+        std::fs::read_to_string(codex_home.join("auth.json")).unwrap(),
+        "kept"
+    );
 
     ready(&daemon, &mut client, GROK).await;
     let (_, conversation) = conversation_on(&mut client, GROK).await;
