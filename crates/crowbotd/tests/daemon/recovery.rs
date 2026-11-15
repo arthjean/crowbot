@@ -112,3 +112,24 @@ async fn a_restart_expires_a_waiting_approval_and_the_next_message_resumes_the_s
         Event::TurnEnded(TurnEnd::Completed)
     );
 }
+
+#[tokio::test]
+async fn the_agent_of_a_turn_ends_with_a_daemon_that_crashes() {
+    let mut daemon = Daemon::start();
+    let mut client = daemon.client().await;
+    let id = client.new_conversation().await;
+    // A deaf agent ignores the end of its input: only its own end stops it.
+    client.say(id, "deaf").await;
+    client.until_reply("deaf").await;
+    assert!(daemon.heartbeat().is_some());
+
+    daemon.kill();
+    tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+    let after_kill = daemon.heartbeat();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        daemon.heartbeat(),
+        after_kill,
+        "the agent still runs after the daemon crashed"
+    );
+}

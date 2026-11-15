@@ -756,19 +756,38 @@ impl ProviderEntry {
 /// Runs the sign-in with no window and no way to read what it prints: its
 /// output can hold a one-time link, which is the provider's business.
 fn spawn_hidden(command: &SignInCommand) -> std::io::Result<(Child, ProcessTree)> {
-    let mut process = Command::new(&command.program);
-    process
-        .args(&command.arguments)
-        .envs(&command.environment)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
+    let process = || {
+        let mut process = Command::new(&command.program);
+        process
+            .args(&command.arguments)
+            .envs(&command.environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        process.process_group(0);
+        process
+    };
     #[cfg(windows)]
-    process.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    let child = {
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        // A sign-in leaves the job of the daemon: the browser it opens is the
+        // user's, and stays when the daemon ends. A job above the daemon's
+        // that forbids it keeps the sign-in in the daemon's job.
+        let mut outside = process();
+        outside.creation_flags(CREATE_NO_WINDOW | crate::lifetime::BREAKAWAY);
+        match outside.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                let mut inside = process();
+                inside.creation_flags(CREATE_NO_WINDOW);
+                inside.spawn()?
+            }
+            spawned => spawned?,
+        }
+    };
     #[cfg(unix)]
-    process.process_group(0);
-    let child = process.spawn()?;
+    let child = process().spawn()?;
     let tree = ProcessTree::of(&child)?;
     Ok((child, tree))
 }

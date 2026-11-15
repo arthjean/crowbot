@@ -124,10 +124,13 @@ impl Launch {
         self
     }
 
+    /// The agent ends with the daemon: on Unix it starts under the daemon's
+    /// guard (`lifetime.rs`).
     fn agent(&self) -> AcpAgent {
+        let (program, args) = crate::lifetime::guarded(&self.program, &self.args);
         AcpAgent::new(
-            AcpAgentConfig::new(&self.program)
-                .args(self.args.iter().cloned())
+            AcpAgentConfig::new(program)
+                .args(args)
                 .envs(self.env.clone()),
         )
     }

@@ -25,7 +25,8 @@
 //! - `fail other`: fail the turn with an error kind that has no known cause.
 //! - `sample <interval ms>`: answer with a Markdown text that holds every kind
 //!   of block, one word per interval, and end as cancelled when a cancel arrives.
-//! - `deaf`: never end the turn, and ignore the cancel and the end of stdin.
+//! - `deaf`: never end the turn, and ignore the cancel and the end of stdin;
+//!   the process exits on its own after 20 seconds.
 //! - `crash`: exit in the middle of the turn.
 //! - `session`: report the session id and whether the session was resumed.
 //! - `config`: report the system prompt, the text sent before the prompt, the
@@ -622,9 +623,10 @@ impl Agent {
             "deaf" => {
                 self.deaf.store(true, Ordering::SeqCst);
                 self.say(session, "deaf");
-                loop {
-                    std::thread::sleep(Duration::from_secs(1));
-                }
+                // Long past what a test waits for, and short enough that an
+                // agent left running ends on its own.
+                std::thread::sleep(Duration::from_secs(20));
+                std::process::exit(0);
             }
             "crash" => std::process::exit(3),
             "session" => self.say(

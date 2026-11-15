@@ -2,6 +2,7 @@ mod conversation;
 mod daemon;
 mod digest;
 mod handoff;
+mod lifetime;
 mod provider;
 mod runtime;
 mod server;
@@ -148,8 +149,33 @@ async fn run(args: Args) -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    #[cfg(unix)]
+    {
+        let mut raw = std::env::args_os().skip(1).peekable();
+        if raw.peek().is_some_and(|first| first == lifetime::GUARD) {
+            raw.next();
+            return lifetime::guard(raw);
+        }
+    }
+    // Before any process starts: each one is then bound to the daemon.
+    if let Err(error) = lifetime::bind_children() {
+        eprintln!("[crowbotd] the agents will not end with the daemon: {error}");
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[crowbotd] failed: cannot start the runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(serve())
+}
+
+async fn serve() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(message) => {
