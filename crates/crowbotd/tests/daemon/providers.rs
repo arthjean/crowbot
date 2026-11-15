@@ -406,11 +406,30 @@ async fn the_users_own_settings_for_a_provider_do_not_reach_a_bot() {
         "[permission]\nallow = [\"Write\"]\n",
     )
     .unwrap();
+    // Nor do the other layers Grok reads from its home.
+    let planted = [
+        "trusted_folders.toml",
+        "hooks/session-start.json",
+        "workflows/any.rhai",
+        "lsp.json",
+        "skills/any/SKILL.md",
+        "memory-v2/global/MEMORY.md",
+    ];
+    for path in planted {
+        let path = grok_home.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "planted").unwrap();
+    }
+    std::fs::create_dir_all(grok_home.join("sessions")).unwrap();
     let (_, conversation) = conversation_on(&mut client, GROK).await;
     client.ask(conversation, "say again").await;
     let rules = std::fs::read_to_string(grok_home.join("config.toml")).unwrap();
     assert!(rules.contains("ask = "), "{rules}");
     assert!(!rules.contains("allow"), "{rules}");
+    for path in planted {
+        assert!(!grok_home.join(path).exists(), "{path} is still there");
+    }
+    assert!(grok_home.join("sessions").is_dir());
 
     ready(&daemon, &mut client, CLAUDE).await;
     let (_, conversation) = conversation_on(&mut client, CLAUDE).await;

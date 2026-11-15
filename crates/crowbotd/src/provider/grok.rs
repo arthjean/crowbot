@@ -21,6 +21,35 @@ ask = ["Edit", "Write", "Bash", "WebFetch", "MCPTool"]
 remember_tool_approvals = false
 "#;
 
+/// What the home must not hold at a start: every layer Grok 1.0.77 reads
+/// beside its config, which a bot could write to reach the next session or
+/// another bot. That is the folders it trusts (whose own `.grok` hooks would
+/// then run), hooks, workflows (scripts), language servers (commands),
+/// plugins, skills, agents, personas, rules, memories, a managed config, the
+/// settings, the sandbox config, and the status line script. The rest is
+/// Grok's own state: the sessions, the logs, and the sign-in (`auth.json`)
+/// and server credentials, which the daemon never touches.
+const REMOVED: [&str; 18] = [
+    "trusted_folders.toml",
+    "hooks",
+    "workflows",
+    "lsp.json",
+    "plugins",
+    "skills",
+    "agents",
+    "personas",
+    "rules",
+    "memory",
+    "memory-v2",
+    "managed_config.toml",
+    "requirements.toml",
+    "settings.json",
+    "sandbox.toml",
+    "statusline.sh",
+    "AGENTS.md",
+    "GROK.md",
+];
+
 const OTHER_TOOLS: [&str; 3] = ["CLAUDE", "CURSOR", "CODEX"];
 const OTHER_TOOL_PARTS: [&str; 6] = ["AGENTS", "HOOKS", "MCPS", "RULES", "SKILLS", "SESSIONS"];
 
@@ -53,6 +82,7 @@ pub fn profile(home: &Path) -> AgentProfile {
         sign_in_page: Some(SIGN_IN_PAGE),
         folders: vec![home.to_owned()],
         files: vec![(home.join("config.toml"), CONFIG.to_owned())],
+        removed: REMOVED.iter().map(|path| home.join(path)).collect(),
         ..AgentProfile::generic()
     }
 }
@@ -85,5 +115,12 @@ mod tests {
         assert_eq!(path, &home.join("config.toml"));
         assert!(config.contains(r#"ask = ["Edit", "Write", "Bash", "WebFetch", "MCPTool"]"#));
         assert_eq!(profile.session_auth, Some("grok.com"));
+        assert!(profile.removed.contains(&home.join("trusted_folders.toml")));
+        assert!(
+            !profile
+                .removed
+                .iter()
+                .any(|path| path.ends_with("auth.json") || path.ends_with("sessions"))
+        );
     }
 }
