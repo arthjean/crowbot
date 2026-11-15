@@ -150,6 +150,40 @@ pub fn button(
     }
 }
 
+/// A round icon button: 36 across, a filled circle with a hairline edge and
+/// a 14 icon, lighter under the pointer.
+pub fn round_button(
+    id: impl Into<ElementId>,
+    glyph: Icon,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let label = label.into();
+    let (focus, hover) = (theme.border_focus, theme.round_button_hover);
+    let id = id.into();
+    div()
+        .id(id.clone())
+        .debug_selector(move || id.to_string())
+        .focusable()
+        .tab_stop(true)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .flex_none()
+        .size(size::ROUND_BUTTON)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(theme.round_button_edge)
+        .bg(theme.round_button)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .focus_visible(move |style| style.border_color(focus))
+        .tooltip(tooltip(label))
+        .child(icon(glyph, icon_size::SM, theme.text_secondary))
+}
+
 pub fn icon_button(
     id: impl Into<ElementId>,
     glyph: Icon,
@@ -416,21 +450,6 @@ pub fn menu_row(
 /// The mark of the chosen row, at the trailing edge.
 pub fn menu_check(theme: &Theme) -> Svg {
     icon(Icon::Check, menu::CHECK, theme.text)
-}
-
-/// The name of a group of rows: muted, on a row of its own.
-pub fn menu_heading(label: impl Into<SharedString>, theme: &Theme) -> Div {
-    div()
-        .flex_none()
-        .h(menu::ROW_HEIGHT)
-        .px(menu::ROW_INSET)
-        .flex()
-        .items_center()
-        .text_size(text::SM.size)
-        .line_height(text::SM.leading)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.text_muted)
-        .child(label.into())
 }
 
 pub fn menu_separator(theme: &Theme) -> Div {

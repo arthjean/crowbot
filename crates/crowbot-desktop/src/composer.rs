@@ -78,17 +78,6 @@ impl InputStyle {
             ..Self::area(label, min_rows, max_rows)
         }
     }
-
-    pub fn search() -> Self {
-        Self {
-            step: text::MD,
-            single_line: true,
-            label: "Search bots",
-            min_rows: 1.,
-            max_rows: 1.,
-            sample_placeholder: false,
-        }
-    }
 }
 
 actions!(

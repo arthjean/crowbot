@@ -61,27 +61,12 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let query = self.search.read(cx).text().to_owned();
-        let groups = sidebar::groups(&self.bots, &query);
         let content: Vec<AnyElement> = if self.bots.is_empty() {
             vec![self.render_empty_list(shown, theme, cx)]
-        } else if groups.is_empty() {
-            vec![
-                div()
-                    .py(space::S8)
-                    .px(space::S2)
-                    .text_center()
-                    .text_color(theme.text_readable)
-                    .child(SharedString::from(format!(
-                        "No bot matches “{}”.",
-                        query.trim()
-                    )))
-                    .into_any_element(),
-            ]
         } else {
-            groups
+            sidebar::groups(&self.bots)
                 .iter()
-                .map(|group| self.render_group(group, shown, !query.trim().is_empty(), theme, cx))
+                .map(|group| self.render_group(group, shown, theme, cx))
                 .collect()
         };
         div()
@@ -94,7 +79,7 @@ impl Workspace {
             .flex_col()
             .border_r_1()
             .border_color(theme.border)
-            .child(self.render_search(shown, theme, cx))
+            .child(self.render_sidebar_actions(shown, theme, cx))
             .child(
                 div()
                     .id("bots")
@@ -120,40 +105,27 @@ impl Workspace {
             )
     }
 
-    fn render_search(&self, shown: Shown, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let row = div()
+    /// The actions over the list, as round buttons: search everything on the
+    /// leading edge, a new bot on the trailing edge, stacked in a compact
+    /// sidebar.
+    fn render_sidebar_actions(&self, shown: Shown, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let search = ui::round_button("open-search", Icon::Search, "Search everything", theme)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)));
+        let create = ui::round_button("new-bot", Icon::Plus, "New bot", theme)
+            .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx)));
+        div()
             .flex_none()
-            .pt(layout::SEARCH_PADDING_TOP)
-            .px(space::S3)
+            .pt(layout::SIDEBAR_ACTIONS_TOP)
+            // The same inset as the rows under them, so their edges line up.
+            .px(space::S2)
             .pb(space::S1_5)
             .flex()
             .items_center()
-            .gap(space::S1_5);
-        if shown.compact {
-            return row.justify_center().child(
-                ui::icon_button("search-bots", Icon::Search, "Search bots", theme)
-                    .size(control::MD)
-                    .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx))),
-            );
-        }
-        row.child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h(control::MD)
-                .px(layout::SEARCH_FIELD_PADDING)
-                .flex()
-                .items_center()
-                .gap(space::S2)
-                .rounded(radius::MD)
-                .bg(theme.hover)
-                .child(ui::icon(Icon::Search, icon_size::MD, theme.text_muted))
-                .child(div().flex_1().min_w_0().child(self.search.clone())),
-        )
-        .child(
-            ui::icon_button("new-bot", Icon::Plus, "New bot", theme)
-                .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx))),
-        )
+            .gap(space::S2)
+            .when(shown.compact, |row| row.flex_col().justify_center())
+            .when(!shown.compact, |row| row.justify_between())
+            .child(search)
+            .child(create)
     }
 
     fn render_empty_list(&self, shown: Shown, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -221,7 +193,6 @@ impl Workspace {
         &self,
         group: &Group,
         shown: Shown,
-        searching: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -304,7 +275,7 @@ impl Workspace {
                 .children(rows(&members, cx))
                 .into_any_element(),
             GroupKind::Hidden => {
-                let open = self.hidden_open || searching;
+                let open = self.hidden_open;
                 let (hover, focus) = (theme.text_secondary, theme.border_focus);
                 let label = SharedString::from(format!("Hidden ({count})"));
                 let action = if open {

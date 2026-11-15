@@ -72,10 +72,10 @@ the one the bot runs on. No decoration stands in for data.
 ```text
 ┌rail┬ sidebar topbar ─┬ header: avatar, name, title · model, history, new chat, panel ┬ caption ┐
 │ ⌂  │ ▤               │                                                               │ _ ☐ ×   │
-│ 🔍 ├─────────────────┴───────────────────────────────────────────────────────────────┴─────────┤
+│    ├─────────────────┴───────────────────────────────────────────────────────────────┴─────────┤
 │    │ card: inset 4 right and bottom, radius 14, canvas fill, hairline edge                   │
 │    │ ┌ sidebar 280 ──┐ ┌ conversation ──────────────────────────────┐ ┌ bot panel 360 ┐     │
-│    │ │ search  +     │ │ transcript, column 760                     │ │ docked when   │     │
+│    │ │ (🔍)       (+) │ │ transcript, column 760                     │ │ docked when   │     │
 │    │ │ groups, rows  │ │                                            │ │ 424 px of     │     │
 │ Cl │ │ 62 px         │ │ composer                                   │ │ conversation  │     │
 │ Ch │ └───────────────┘ └────────────────────────────────────────────┘ │ remain        │     │
@@ -88,7 +88,7 @@ the one the bot runs on. No decoration stands in for data.
 | Region | Role | Geometry |
 | --- | --- | --- |
 | Window | Client-drawn title band on Windows, traffic lights on macOS | Default 1080 by 760, minimum 640 by 420; title band 38 tall (`layout::TOP_ROW`); caption buttons 46 wide |
-| Rail | Search everything, one ring per provider, Settings | 52 wide on the frame color; logo row 38; buttons 36 with 20 px icons at radius 12, gap 6, bottom padding 12; a 24 by 1 separator above Settings |
+| Rail | One ring per provider, Settings | 52 wide on the frame color; logo row 38; buttons 36 with 20 px icons at radius 12, gap 6, bottom padding 12; a 24 by 1 separator above Settings |
 | Sidebar | The bots, grouped: Pinned tiles, Needs you, Unread, Bots, Hidden | Default 280, 128 to 400, compact 88 below a 110 px drag; a 16 px resize handle on its right edge; no fill of its own, the card shows through |
 | Card | Holds the sidebar, the conversation, and the docked panel | Inset 4 from the right and bottom edges, radius 14, `canvas` fill, 1 px `border` edge, on the `frame` color |
 | Conversation | Transcript and composer | Column 760; keeps 424 beside the sidebar before the sidebar shrinks |
@@ -114,6 +114,11 @@ never hex values.
 | `menu_separator` | Lines between groups of a menu | text at 0.08 | ink at 0.08 |
 | `dialog_ring` | The edge of menus, pickers, and dialogs | text at 0.10 | ink at 0.10 |
 | `input_edge` | The edge of a text field and of the model trigger, on `control` | text at 0.045 | ink at 0.10 |
+| `picker_surface`, `picker_rail` | The model picker, and its column of provider tabs | `#212121`, `#101010` | `#ffffff`, `#f4f4f5` |
+| `picker_tab`, `picker_tab_edge` | The provider tab shown in the model picker | text at 0.08, 0.11 | ink at 0.06, 0.10 |
+| `radio_edge` | The ring of a model that is not chosen | text at 0.22 | ink at 0.22 |
+| `badge` | A small pill beside a name, such as `default` | text at 0.07 | ink at 0.06 |
+| `round_button`, `round_button_hover`, `round_button_edge` | A round icon button, such as Search and New bot over the bot list | `#262626`, `#2e2e2e`, text at 0.08 | `#f0f0f2`, `#e8e8eb`, ink at 0.08 |
 | `border`, `border_strong` | Hairlines | text at 0.035, 0.045 | ink at 0.07, 0.10 |
 | `hover` | Hover wash on chrome | text at 0.06 | ink at 0.05 |
 | `text`, `text_secondary`, `text_muted`, `text_dim` | Primary, labels, secondary, disabled marks | `#ffffff`, `#dcdcdc`, `#979797`, `#6a6a6a` | `#141414`, `#3a3a3c`, `#6b6b70`, `#8e8e93` |
@@ -177,7 +182,7 @@ The spacing scale is 2, 4, 6, 8, 12, 16, 24, 32 (`space`). Controls are 24,
 | Menu row | 28 tall, inset 8, gap 8; a check of 14 at the trailing edge |
 | Menu heading | A 28 px row, 12 px Medium in `text_muted` |
 | Menu separator | 1 px, inset 8, 4 above and below |
-| Menu width | Context menus 192 to 288; a picker takes the width of its trigger |
+| Menu width | Context menus 192 to 288; the model picker is 360 |
 | Menu height | Scrolls past 400 (`menu::MAX_HEIGHT`) |
 
 ### 4.5 Typography
@@ -202,8 +207,12 @@ case everywhere. Never an em dash.
 
 Lucide stroke icons (ISC) in `assets/icons/`, painted with `text_color`:
 `text_muted` at rest, `text` on hover. A new icon is the Lucide file, added
-to the `icons!` list in `src/assets.rs`. Provider marks in the rail are two
-letters of the provider's name, since brand logos are not ours to ship.
+to the `icons!` list in `src/assets.rs`. Provider marks are the providers'
+logos, from LobeHub Icons (MIT) in `assets/icons/providers/`, filled with one
+color by the client (`rail::provider_glyph`): 14 in the rail ring, 19 in a
+picker tab, 15 beside the model in the trigger, where the Claude mark takes
+`claude_mark` and the others `text`. They only name the provider a bot runs
+on. A provider with no logo shows two letters of its name.
 
 ### 4.7 Motion
 
@@ -223,10 +232,10 @@ Motion explains a state change. Nothing animates for decoration.
 ### 5.1 Rail (`workspace/rail.rs`)
 
 App-wide controls only: what belongs to one bot never goes there. Top: the
-logo row, which drags the window, then Search everything (Ctrl+K). Bottom: one
-button per provider, a 28 px ring of 2 px in the provider's state color
-(`forms::provider_color`: success ready, warning signed out, danger runtime
-missing, `text_dim` not installed or unknown) around two letters of its name;
+logo row, which drags the window. Bottom: one button per provider, a 28 px
+ring of 2 px in the provider's state color (`forms::provider_color`: success
+ready, warning signed out, danger runtime missing, `text_dim` not installed or
+unknown) around its 14 px logo;
 its tooltip and accessible name say `<name>: <state>`, and it opens Settings at
 Providers. Then the separator and Settings. A page item joins the rail only
 when a second page exists.
@@ -240,8 +249,14 @@ toggle. The empty band drags the window.
 
 ### 5.3 Sidebar
 
-Search field: 32 tall, radius 8, `hover` fill, no edge, a 16 px search icon,
-14 px text; the 28 px New bot button beside it. Rows: name 15 Medium, preview
+Over the list, 9 below its top and 8 in from each side, aligned with the
+edges of the rows, two round buttons
+(`ui::round_button`): Search everything (Ctrl+K) on the leading edge, which
+opens the search palette, and New bot on the trailing edge. Each is a 36 circle on `round_button` with a
+1 px `round_button_edge`, `round_button_hover` under the pointer, a 14 px
+icon in `text_secondary`, and a tooltip. A compact sidebar stacks them. The
+list is not filtered in place: the palette searches bots, conversations, and
+messages. Rows: name 15 Medium, preview
 14 in `text_muted`, time 13 in `text_readable`; the selected row takes
 `surface`, others `control_hover` under the pointer.
 
@@ -256,26 +271,67 @@ value in `text_placeholder`; other placeholders are hints in `text_muted`.
 
 ### 5.5 Select trigger and picker
 
-A trigger is a row that opens a picker under it: label on the leading edge
+A trigger is a row that opens a picker beside it: label on the leading edge
 (`text::SM` in `text_secondary`), value on the trailing edge in `text::MD`
-(muted context, then the value in SemiBold, then muted detail after a `·`),
-then a 14 px chevron. It reads as a form control: the `control` fill and the
-`input_edge`, unchanged under the pointer and while the picker is open, so
-opening it never moves it; keyboard focus turns the edge `border_focus`.
+(the provider logo, or a muted name for a provider with no logo, then the
+value in SemiBold, then muted detail after a `·`),
+then a 14 px chevron that turns over while the picker is open. It reads as a
+form control: the `control` fill and the `input_edge`, unchanged under the
+pointer and while the picker is open, so opening it never moves it; keyboard
+focus turns the edge `border_focus`.
 
-The picker opens 4 px under the trigger, at the trigger's width, through a
-`deferred` `anchored` element, with `ui::menu_reveal`. It is a wide
-`ui::menu_panel` (radius 14, padding 6). Columns are separated by a vertical
-`menu_separator`, never by a fill. Rows are `ui::menu_row` with `wide` set
-(radius 8); the chosen row carries `menu_selected` and, in a list of values,
-the `ui::menu_check` at its trailing edge. Groups start with
-`ui::menu_heading` and are split by `ui::menu_separator`.
+The model picker of the creation form (`workspace/creation.rs`, tokens in
+`theme::picker`) opens 8 under the trigger, aligned on its leading edge,
+through a `deferred` `anchored` element attached to the trigger's bounds, with
+`ui::menu_reveal`; it moves above the trigger when the window has no room
+under it. It is 360 wide, 226 to 520 tall (and leaves 100 of the window
+height), radius 14, on `picker_surface` with the `dialog_ring` edge and the
+`menu_shadow`.
+
+- Provider tabs: a 52 column on `picker_rail`, padded 9 by 7, with a
+  `border` line on its trailing edge and its own leading corners at radius
+  13, so no fill reaches the panel's corner. A tab is 36 square, radius 8,
+  and shows the logo of its provider: `text` at 0.48 at rest, 0.80 under
+  the pointer, full while shown, on `picker_tab` with a `picker_tab_edge`
+  edge. A provider that cannot run a turn shows its logo at 0.28 (0.60 under the pointer or shown) and a 6 dot 6 in from the top
+  trailing corner, `warning` when it is signed out and `text_muted`
+  otherwise, ringed 2 in `picker_rail`. Showing a tab never moves the bot to
+  that provider: picking one of its models does. The foot of the column
+  holds a 36 settings button (a 16 gear, `text_muted`, `text` under the
+  pointer) that closes the picker and opens Settings > Providers.
+- The panel beside the tabs pads 6. Heading, 6 above and 8 below, inset 10:
+  the provider name in `text::LG` SemiBold, then its account, its runtime, or
+  its state in `text::SM` `text_muted`, 1 below.
+- What keeps the provider from listing models, when something does, sits in a
+  box on `menu_highlight`, radius 8, padded 8 by 10, in `text::SM`
+  `text_secondary`, 6 above the search.
+- Search: 32 tall, radius 8, on `menu_highlight` with no edge, inset 10. It
+  filters the models by name and id. A typed id the provider does not list
+  ends the list as a "Use" row; Enter picks the first row.
+- Model rows, 6 below the search: padded 6 by 10, radius 8, `text::MD`
+  Medium, `menu_highlight` under the pointer. A 16 radio sits 10 in: a
+  `radio_edge` ring, or filled with `text` and a 12 check in
+  `picker_surface` when chosen. The model the provider runs by default
+  carries a `default` pill 7 after its name (`text::SM` Medium `text_muted`
+  on `badge`, padded 1 by 6, leading 15), and picking it follows the
+  provider's default. A provider that lists no model offers "Default model".
+  The daemon lists only the newest model of each family (the parts of the id
+  that hold no number), and always the default model.
+- Reasoning: a footer 6 below the list, across the whole panel under a
+  `border` line, padded 6 (16 on the leading edge): "Reasoning" in `text::SM`
+  `text_muted`, then a 128 by 32 select (radius 8, `menu_highlight`,
+  `picker_tab` under the pointer or open, value in `text::MD` Medium, an
+  up-down chevron). Its levels open 4 under it in a plain `ui::menu_panel`
+  aligned on its trailing edge. The levels are those of the model: the
+  bot's model on its own tab, the default model on another, as the daemon
+  read them by moving a session to each model; a model with none of its own
+  takes the provider's. A level the new model does not have goes back to its
+  default. A level chosen on another tab waits for a model of that tab.
+  Picking a model closes the picker unless the model has levels.
 
 While a picker is open, a transparent backdrop covers the window: a click
-outside closes the picker and does nothing else. Escape closes it before it
-reaches the form. The model picker of the creation form
-(`workspace/creation.rs`) is the reference: providers with their state dot,
-models with a check, reasoning levels as chips, and an "Other model" field.
+outside closes the picker and does nothing else. Escape closes the reasoning
+menu first, then the picker, before it reaches the form.
 
 ### 5.6 Creation form (`workspace/creation.rs`)
 
@@ -351,7 +407,8 @@ on `surface_raised` at radius 6 with a `border_strong` edge, 12 SemiBold.
 - A control without an accessible name, or an icon button without a tooltip.
 - `aria_expanded` or `aria_selected` on a clickable element without an
   `on_a11y_action` handler: GPUI then drops its Invoke pattern.
-- Brand logos or text taken from another product.
+- Text, code, or assets taken from another product, such as OpenBot. Provider
+  logos come from a source whose license allows it (4.6).
 
 ## 7. Delivery gate
 

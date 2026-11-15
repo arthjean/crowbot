@@ -636,22 +636,25 @@ fn a_state_change_moves_the_bot_to_its_group(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn the_search_box_filters_the_list_as_it_is_typed(cx: &mut TestAppContext) {
-    let (workspace, mut daemon, cx) = open(cx);
+fn search_and_new_bot_sit_side_by_side_over_the_list(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
     daemon.connect(two_bots(), cx);
-    workspace.update_in(cx, |this, window, cx| this.focus_search(window, cx));
+    // Search sits on the leading edge of the sidebar and the new bot on the
+    // trailing edge, both above the list.
+    let (search, create) = (bounds(cx, "open-search"), bounds(cx, "new-bot"));
+    assert!(search.right() < create.left());
+    assert_eq!(search.size, create.size);
+    assert!(create.bottom() <= bounds(cx, "bot-1").top());
+    // Their edges line up with the edges of the rows under them.
+    let row = bounds(cx, "bot-1");
+    assert_eq!(search.left(), row.left());
+    assert_eq!(create.right(), row.right());
 
-    cx.simulate_input("wr");
-    assert!(shown(cx, "bot-2"));
-    assert!(!shown(cx, "bot-1"));
-
-    cx.simulate_input("x");
-    assert!(!shown(cx, "bot-2"));
-    assert!(!shown(cx, "bot-1"));
-
-    cx.simulate_keystrokes("backspace backspace backspace");
-    assert!(shown(cx, "bot-1"));
-    assert!(shown(cx, "bot-2"));
+    click(cx, "open-search");
+    assert!(shown(cx, "search-palette"));
+    cx.simulate_keystrokes("escape");
+    click(cx, "new-bot");
+    assert!(shown(cx, "creation"));
 }
 
 #[gpui::test]

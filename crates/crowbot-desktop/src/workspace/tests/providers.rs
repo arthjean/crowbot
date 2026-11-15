@@ -33,7 +33,7 @@ fn offered(ids: &[&str]) -> Vec<ModelChoice> {
         .map(|id| ModelChoice {
             id: (*id).to_owned(),
             name: id.to_uppercase(),
-            description: None,
+            ..ModelChoice::default()
         })
         .collect()
 }
@@ -251,16 +251,24 @@ fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &m
         ServerMessage::ProviderModels(listed("claude", &["fast", "smart"], &[])),
         cx,
     );
-    assert!(shown(cx, "creation-model-choice-2"));
+    // The default model is chosen, and the provider has no reasoning levels.
+    assert!(shown(cx, "creation-model-choice-0-chosen"));
+    assert!(shown(cx, "creation-model-choice-1"));
+    assert!(!shown(cx, "creation-model-choice-2"));
     assert!(!shown(cx, "creation-effort"));
 
-    // The other provider is signed out: its sign-ins are listed by name.
+    // A tab shows the models of another provider, and the bot moves there
+    // only when one of them is picked.
     click(cx, "creation-provider-1");
     assert_eq!(daemon.sent(), [list_models("codex")]);
     assert!(shown(cx, "creation-provider-1-chosen"));
-    assert!(shown(cx, "creation-provider-notice"));
-    cx.simulate_keystrokes("escape");
+    assert!(shown(cx, "creation-models-note"));
+    assert!(!shown(cx, "creation-provider-notice"));
+    click(cx, "creation-model-choice-0");
     assert!(!shown(cx, "creation-model-picker"));
+
+    // The other provider is signed out: its sign-ins are listed by name.
+    assert!(shown(cx, "creation-provider-notice"));
     assert!(shown(cx, "creation-sign-in-chat-gpt"));
     click(cx, "creation-sign-in-device-code");
     assert_eq!(
@@ -287,18 +295,28 @@ fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &m
         cx,
     );
     click(cx, "creation-model-row");
-    click(cx, "creation-model-choice-2");
+    click(cx, "creation-model-choice-1");
     assert_eq!(
-        workspace.read_with(cx, |this, cx| this
-            .creation_model
-            .read(cx)
-            .text()
-            .to_owned()),
-        "gpt-smart"
+        workspace.read_with(cx, |this, _| this
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.model.clone())),
+        Some("gpt-smart".to_owned())
     );
-    assert!(shown(cx, "creation-model-choice-2-chosen"));
-    click(cx, "creation-effort-3");
-    assert!(shown(cx, "creation-effort-3-chosen"));
+    // A provider with reasoning levels keeps the picker open for them.
+    assert!(shown(cx, "creation-model-choice-1-chosen"));
+    click(cx, "creation-effort");
+    assert!(shown(cx, "creation-effort-0-chosen"), "the default level");
+    click(cx, "creation-effort-2");
+    assert!(!shown(cx, "creation-effort-menu"));
+    click(cx, "creation-effort");
+    assert!(shown(cx, "creation-effort-2-chosen"));
+    cx.simulate_keystrokes("escape");
+    assert!(!shown(cx, "creation-effort-menu"));
+    assert!(
+        shown(cx, "creation-model-picker"),
+        "Escape closes the menu first"
+    );
     // A click outside the picker closes it, and lands nowhere else.
     click(cx, "creation-name");
     assert!(!shown(cx, "creation-model-picker"));
@@ -644,4 +662,51 @@ fn a_sign_in_code_is_read_from_the_page_and_nothing_else() {
         sign_in_code("https://a.example/?user_code=%3Cscript%3E"),
         None
     );
+}
+
+#[gpui::test]
+fn the_reasoning_levels_follow_the_model_and_the_gear_opens_the_provider_settings(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1600.)));
+    daemon.connect(Vec::new(), cx);
+    daemon.tell(
+        ServerMessage::Providers(vec![status("claude", "Claude", ProviderState::Ready)]),
+        cx,
+    );
+    // The first model has levels of its own; the second has none.
+    let mut models = listed("claude", &["opus", "haiku"], &["low", "high"]);
+    models.models[0].efforts = offered(&["low", "high", "max"]);
+    models.models[0].default_effort = Some("high".to_owned());
+    daemon.tell(ServerMessage::ProviderModels(models), cx);
+    daemon.sent();
+
+    click(cx, "creation-model-row");
+    click(cx, "creation-effort");
+    // The levels of the default model, its own default first.
+    assert!(shown(cx, "creation-effort-2"), "low, high, max");
+    assert!(shown(cx, "creation-effort-1-chosen"), "high is the default");
+    click(cx, "creation-effort-2");
+    let effort = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |this, _| {
+            this.creation
+                .as_ref()
+                .and_then(|creation| creation.effort.clone())
+        })
+    };
+    assert_eq!(effort(cx), Some("max".to_owned()));
+
+    // A model without that level goes back to its own default, and a model
+    // with no level of its own takes the levels of the provider.
+    click(cx, "creation-model-choice-1");
+    assert_eq!(effort(cx), None);
+    click(cx, "creation-effort");
+    assert!(shown(cx, "creation-effort-0-chosen"), "low is the default");
+    assert!(!shown(cx, "creation-effort-2"));
+    cx.simulate_keystrokes("escape");
+
+    click(cx, "creation-provider-settings");
+    assert!(!shown(cx, "creation-model-picker"));
+    assert!(shown(cx, "settings-dialog"));
 }

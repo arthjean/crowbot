@@ -270,7 +270,6 @@ pub struct Workspace {
     load_error: Option<SharedString>,
     history: Option<Vec<ConversationSummary>>,
     composer: Entity<Composer>,
-    search: Entity<Composer>,
     editing: Option<i64>,
     selection: SharedSelection,
     copied: Option<Copied>,
@@ -344,7 +343,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let composer = cx.new(|cx| Composer::new("Message the bot", InputStyle::message(), cx));
-        let search = cx.new(|cx| Composer::new("Search", InputStyle::search(), cx));
         let field = |label, placeholder: &'static str, limit, cx: &mut Context<Self>| {
             cx.new(|cx| {
                 Composer::new(placeholder, InputStyle::field(label), cx).with_max_length(limit)
@@ -377,7 +375,7 @@ impl Workspace {
             input.set_enter_submits(false);
             input
         });
-        let creation_model = field("Model", "Default model", BOT_MODEL_LENGTH, cx);
+        let creation_model = field("Search models", "Search models", BOT_MODEL_LENGTH, cx);
         let provider_executable = field(
             "Executable path",
             "Full path of the executable",
@@ -414,7 +412,6 @@ impl Workspace {
                     }
                 },
             ),
-            cx.observe(&search, |_, _, cx| cx.notify()),
             cx.observe(&composer, |this, _, cx| this.schedule_draft_save(cx)),
             cx.observe_window_appearance(window, |this, _, cx| this.apply_theme(cx)),
             cx.on_app_quit(|this, cx| {
@@ -436,10 +433,11 @@ impl Workspace {
                 window,
                 |this, _, event: &ComposerEvent, window, cx| {
                     if matches!(event, ComposerEvent::Submit) {
-                        this.create_bot(window, cx);
+                        this.submit_model_search(window, cx);
                     }
                 },
             ),
+            cx.observe(&creation_model, |_, _, cx| cx.notify()),
             cx.subscribe_in(
                 &provider_executable,
                 window,
@@ -505,7 +503,6 @@ impl Workspace {
             load_error: None,
             history: None,
             composer,
-            search,
             editing: None,
             selection: SharedSelection::default(),
             copied: None,
@@ -1131,6 +1128,9 @@ impl Workspace {
         if self.creation.is_some() {
             let provider = self.creation_provider();
             self.ask_models(&provider);
+            // The picker lists the models of the tab it shows.
+            let tab = self.picker_tab();
+            self.ask_models(&tab);
         } else if self.side_panel
             && let Some(provider) = self.selected_bot().map(|bot| bot.bot.provider.clone())
         {
@@ -1259,7 +1259,7 @@ impl Workspace {
     }
 
     fn select_first_bot(&mut self) {
-        let first = sidebar::groups(&self.bots, "")
+        let first = sidebar::groups(&self.bots)
             .first()
             .and_then(|group| group.bots.first().copied());
         if let Some(first) = first {
@@ -1942,13 +1942,6 @@ impl Workspace {
         self.save_sidebar();
         cx.stop_propagation();
         cx.notify();
-    }
-
-    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar.is_compact() {
-            self.toggle_sidebar(cx);
-        }
-        window.focus(&self.search.focus_handle(cx), cx);
     }
 
     fn menu_entries(&self) -> Vec<MenuEntry> {

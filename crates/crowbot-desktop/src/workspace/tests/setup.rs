@@ -268,10 +268,11 @@ fn create_shows_a_creating_state_then_the_bot_opens_with_the_composer_focused(
     type_name(cx, "  Atlas ");
     click(cx, "creation-purpose");
     cx.simulate_input("Plan the week.");
+    // A model the provider does not list is picked by its id.
     click(cx, "creation-model-row");
     click(cx, "creation-model");
     cx.simulate_input("smart");
-    cx.simulate_keystrokes("escape");
+    press_enter(cx);
     assert!(!shown(cx, "creation-model-picker"));
     click(cx, "creation-color-3");
     click(cx, "creation-glyph-2");

@@ -42,14 +42,7 @@ pub fn group_of(summary: &BotSummary) -> GroupKind {
     }
 }
 
-pub fn matches(summary: &BotSummary, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    query.is_empty()
-        || summary.bot.name.to_lowercase().contains(&query)
-        || summary.bot.title.to_lowercase().contains(&query)
-}
-
-pub fn groups(bots: &[BotSummary], query: &str) -> Vec<Group> {
+pub fn groups(bots: &[BotSummary]) -> Vec<Group> {
     [
         GroupKind::Pinned,
         GroupKind::NeedsYou,
@@ -61,7 +54,7 @@ pub fn groups(bots: &[BotSummary], query: &str) -> Vec<Group> {
     .filter_map(|kind| {
         let mut members: Vec<&BotSummary> = bots
             .iter()
-            .filter(|summary| group_of(summary) == kind && matches(summary, query))
+            .filter(|summary| group_of(summary) == kind)
             .collect();
         if matches!(kind, GroupKind::NeedsYou | GroupKind::Unread) {
             members.sort_by_key(|summary| std::cmp::Reverse(summary.last_activity_ms));
@@ -173,7 +166,7 @@ pub mod tests {
             summary(6, "Working", BotState::Working),
         ];
         assert_eq!(
-            kinds(&groups(&bots, "")),
+            kinds(&groups(&bots)),
             [
                 (GroupKind::Pinned, vec![1]),
                 (GroupKind::NeedsYou, vec![3]),
@@ -182,8 +175,8 @@ pub mod tests {
                 (GroupKind::Hidden, vec![2]),
             ]
         );
-        assert_eq!(kinds(&groups(&bots[..1], "")), [(GroupKind::Bots, vec![5])]);
-        assert!(groups(&[], "").is_empty());
+        assert_eq!(kinds(&groups(&bots[..1])), [(GroupKind::Bots, vec![5])]);
+        assert!(groups(&[]).is_empty());
     }
 
     #[test]
@@ -212,15 +205,15 @@ pub mod tests {
             summary(1, "Atlas", BotState::Idle),
             summary(2, "Orion", BotState::Idle),
         ];
-        assert_eq!(kinds(&groups(&bots, "")), [(GroupKind::Bots, vec![1, 2])]);
+        assert_eq!(kinds(&groups(&bots)), [(GroupKind::Bots, vec![1, 2])]);
         bots[1] = summary(2, "Orion", BotState::Waiting);
         assert_eq!(
-            kinds(&groups(&bots, "")),
+            kinds(&groups(&bots)),
             [(GroupKind::NeedsYou, vec![2]), (GroupKind::Bots, vec![1])]
         );
         bots[1] = summary(2, "Orion", BotState::Unread);
         assert_eq!(
-            kinds(&groups(&bots, "")),
+            kinds(&groups(&bots)),
             [(GroupKind::Unread, vec![2]), (GroupKind::Bots, vec![1])]
         );
     }
@@ -231,24 +224,7 @@ pub mod tests {
             summary(1, "Old", BotState::Waiting),
             summary(2, "New", BotState::Waiting),
         ];
-        assert_eq!(
-            kinds(&groups(&bots, "")),
-            [(GroupKind::NeedsYou, vec![2, 1])]
-        );
-    }
-
-    #[test]
-    fn search_keeps_the_bots_whose_name_or_title_holds_the_text() {
-        let mut titled = summary(2, "Orion", BotState::Idle);
-        titled.bot.title = "Release Notes".to_owned();
-        let bots = [summary(1, "Atlas", BotState::Waiting), titled];
-        assert_eq!(
-            kinds(&groups(&bots, " atl ")),
-            [(GroupKind::NeedsYou, vec![1])]
-        );
-        assert_eq!(kinds(&groups(&bots, "NOTES")), [(GroupKind::Bots, vec![2])]);
-        assert!(groups(&bots, "zebra").is_empty());
-        assert_eq!(groups(&bots, "   ").len(), 2);
+        assert_eq!(kinds(&groups(&bots)), [(GroupKind::NeedsYou, vec![2, 1])]);
     }
 
     #[test]

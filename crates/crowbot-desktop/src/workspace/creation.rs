@@ -1,28 +1,60 @@
+use std::cell::Cell;
+use std::f32::consts::PI;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crowbot_protocol::{
-    AVATAR_COLORS, Avatar, Bot, BotDraft, ClientMessage, ModelChoice, PermissionLevel,
+    AVATAR_COLORS, Avatar, Bot, BotDraft, ClientMessage, ModelChoice, ModelsState, PermissionLevel,
+    ProviderState,
 };
 use gpui::{
-    AnyElement, App, Context, CursorStyle, DispatchPhase, Div, Focusable, FontWeight, Hsla,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Role,
-    ScrollEvent, ScrollHandle, SharedString, Stateful, Window, WindowControlArea, anchored, canvas,
-    deferred, div, linear_color_stop, linear_gradient, point, prelude::*, px,
+    Anchor, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Focusable,
+    FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Role, ScrollEvent, ScrollHandle, SharedString, Stateful, Transformation, Window,
+    WindowControlArea, anchored, canvas, deferred, div, linear_color_stop, linear_gradient, point,
+    prelude::*, px, radians,
 };
 
 use super::forms::{self, AvatarOwner, GLYPHS};
+use super::rail::{provider_glyph, provider_logo};
+use super::settings::Section;
 use super::{FocusRequest, Workspace};
 use crate::assets::Icon;
 use crate::composer::Composer;
 use crate::theme::{
-    Theme, control, duration, icon as icon_size, layout, menu, motion, opacity, radius, size,
-    space, text,
+    Theme, control, duration, icon as icon_size, layout, menu, motion, opacity, picker, radius,
+    size, space, text,
 };
 use crate::ui::{self, ButtonKind};
 
 /// The name a new bot starts with. It is a real value, not a hint: the user
 /// edits it or keeps it.
 pub(super) const DEFAULT_NAME: &str = "New bot";
+
+/// One row of the model list of a picker tab.
+struct ModelRow {
+    /// What the row stores: `None` is the default model of the provider.
+    value: Option<String>,
+    name: SharedString,
+    /// The provider runs this model when the bot names none.
+    default: bool,
+    chosen: bool,
+}
+
+/// A small muted pill beside a name.
+fn badge(label: &'static str, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .px(picker::BADGE_PADDING_X)
+        .py(picker::BADGE_PADDING_Y)
+        .rounded_full()
+        .bg(theme.badge)
+        .text_size(text::SM.size)
+        .line_height(picker::BADGE_LEADING)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child(label)
+}
 
 pub(super) struct Template {
     pub name: &'static str,
@@ -254,8 +286,21 @@ pub(super) struct Creation {
     pub name_error: Option<SharedString>,
     pub error: Option<SharedString>,
     pub creating: bool,
-    /// The model picker is open under its row.
+    /// `None` is the default model of the provider.
+    pub model: Option<String>,
+    /// The model picker is open beside its row.
     pub picker: bool,
+    /// The provider tab the picker shows; `None` is the bot's provider.
+    tab: Option<String>,
+    /// The reasoning menu of the picker is open.
+    effort_menu: bool,
+    /// A reasoning level chosen on another tab, kept for the model picked
+    /// there next.
+    queued_effort: Option<(String, Option<String>)>,
+    /// Where the model row and the reasoning select were last drawn, so the
+    /// picker and its menu open beside them.
+    row_bounds: Rc<Cell<Bounds<Pixels>>>,
+    effort_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The fields still hold what an earlier form left in them.
     pub stale: bool,
     /// The form opened by itself, because no bot existed.
@@ -390,7 +435,6 @@ impl Workspace {
         }
         let name = self.creation_name.read(cx).text().trim().to_owned();
         let instructions = self.creation_purpose.read(cx).text().to_owned();
-        let model = self.creation_model.read(cx).text().trim().to_owned();
         let avatar = self.creation_avatar(cx);
         let Some(creation) = self.creation.as_mut() else {
             return;
@@ -399,14 +443,18 @@ impl Workspace {
         creation.name_error = None;
         creation.picker = false;
         creation.creating = true;
-        let (provider, effort) = (creation.provider.clone(), creation.effort.clone());
+        let (provider, model, effort) = (
+            creation.provider.clone(),
+            creation.model.clone(),
+            creation.effort.clone(),
+        );
         self.connection.send(ClientMessage::CreateBot {
             draft: BotDraft {
                 name,
                 instructions,
                 avatar: Some(avatar),
                 provider,
-                model: (!model.is_empty()).then_some(model),
+                model,
                 effort,
                 ..BotDraft::default()
             },
@@ -422,49 +470,6 @@ impl Workspace {
             .and_then(|creation| creation.provider.clone())
             .or_else(|| self.providers.first().map(|status| status.id.clone()))
             .unwrap_or_default()
-    }
-
-    /// Another provider has other models and other reasoning levels: the
-    /// ones chosen so far go back to the defaults.
-    fn pick_creation_provider(
-        &mut self,
-        provider: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let current = self.creation_provider();
-        let Some(creation) = self.creation.as_mut() else {
-            return;
-        };
-        if creation.creating || provider.as_deref() == Some(current.as_str()) {
-            return;
-        }
-        creation.provider = provider;
-        creation.effort = None;
-        self.creation_model
-            .update(cx, |input, cx| input.clear(window, cx));
-    }
-
-    fn pick_creation_model(
-        &mut self,
-        model: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let model = model.unwrap_or_default();
-        self.creation_model
-            .update(cx, |input, cx| input.set_text(&model, window, cx));
-    }
-
-    fn pick_creation_effort(
-        &mut self,
-        effort: Option<String>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        if let Some(creation) = self.creation.as_mut() {
-            creation.effort = effort;
-        }
     }
 
     pub(super) fn preview_bot(&self, cx: &App) -> Bot {
@@ -485,21 +490,246 @@ impl Workspace {
         }
     }
 
-    /// Closes the model picker. False when it was not open.
+    /// Closes the reasoning menu when it is open, and the model picker
+    /// otherwise. False when neither was open.
     pub(super) fn close_model_picker(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(creation) = self.creation.as_mut().filter(|creation| creation.picker) else {
             return false;
         };
-        creation.picker = false;
+        if !std::mem::take(&mut creation.effort_menu) {
+            creation.picker = false;
+        }
         cx.notify();
         true
     }
 
-    fn toggle_model_picker(&mut self, cx: &mut Context<Self>) {
-        if let Some(creation) = self.creation.as_mut()
-            && !creation.creating
+    /// Opens the picker on the tab of the chosen provider, with an empty
+    /// search, or closes it.
+    fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.as_mut().filter(|creation| !creation.creating) else {
+            return;
+        };
+        creation.picker = !creation.picker;
+        creation.tab = None;
+        creation.effort_menu = false;
+        creation.queued_effort = None;
+        self.creation_model
+            .update(cx, |input, cx| input.clear(window, cx));
+        cx.notify();
+    }
+
+    /// The provider whose models the picker shows.
+    pub(super) fn picker_tab(&self) -> String {
+        self.creation
+            .as_ref()
+            .and_then(|creation| creation.tab.clone())
+            .unwrap_or_else(|| self.creation_provider())
+    }
+
+    fn show_picker_tab(&mut self, tab: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        creation.tab = Some(tab);
+        creation.effort_menu = false;
+        self.creation_model
+            .update(cx, |input, cx| input.clear(window, cx));
+        cx.notify();
+    }
+
+    /// The rows of a tab that match the search. The model the provider runs
+    /// by default carries a badge and stands for the default, so picking it
+    /// follows the provider when its default changes. A model id typed in the
+    /// search that the provider does not list ends the rows, as a choice.
+    fn picker_rows(&self, tab: &str, query: &str) -> Vec<ModelRow> {
+        let owns = tab == self.creation_provider();
+        let chosen = self
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.model.clone());
+        let listed = self
+            .models
+            .get(tab)
+            .filter(|models| models.state == ModelsState::Listed);
+        let default = listed.and_then(|models| models.default_model.as_deref());
+        let models: &[ModelChoice] = listed.map_or(&[], |models| &models.models);
+        let needle = query.to_lowercase();
+        let matches = |id: &str, name: &str| {
+            needle.is_empty()
+                || id.to_lowercase().contains(&needle)
+                || name.to_lowercase().contains(&needle)
+        };
+        let mut rows = Vec::new();
+        if listed.is_none() && needle.is_empty() {
+            rows.push(ModelRow {
+                value: None,
+                name: "Default model".into(),
+                default: false,
+                chosen: owns && chosen.is_none(),
+            });
+        }
+        if owns
+            && let Some(id) = chosen.as_deref()
+            && !models.iter().any(|model| model.id == id)
+            && matches(id, id)
         {
-            creation.picker = !creation.picker;
+            rows.push(ModelRow {
+                value: Some(id.to_owned()),
+                name: id.to_owned().into(),
+                default: false,
+                chosen: true,
+            });
+        }
+        for model in models
+            .iter()
+            .filter(|model| matches(&model.id, &model.name))
+        {
+            let is_default = default == Some(model.id.as_str());
+            rows.push(ModelRow {
+                value: (!is_default).then(|| model.id.clone()),
+                name: model.name.clone().into(),
+                default: is_default,
+                chosen: owns
+                    && match chosen.as_deref() {
+                        Some(id) => id == model.id,
+                        None => is_default,
+                    },
+            });
+        }
+        let typed = query.trim();
+        if !typed.is_empty()
+            && !models.iter().any(|model| model.id == typed)
+            && !(owns && chosen.as_deref() == Some(typed))
+        {
+            rows.push(ModelRow {
+                value: Some(typed.to_owned()),
+                name: format!("Use \u{201c}{typed}\u{201d}").into(),
+                default: false,
+                chosen: false,
+            });
+        }
+        rows
+    }
+
+    /// The reasoning levels of a model, and the one it starts on: its own
+    /// when the provider reported them, the provider's otherwise. `None` is
+    /// the default model of the provider.
+    pub(super) fn model_levels(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+    ) -> (Vec<ModelChoice>, Option<String>) {
+        let Some(models) = self.models.get(provider) else {
+            return (Vec::new(), None);
+        };
+        let id = model.or(models.default_model.as_deref());
+        match id
+            .and_then(|id| models.models.iter().find(|choice| choice.id == id))
+            .filter(|choice| !choice.efforts.is_empty())
+        {
+            Some(choice) => (choice.efforts.clone(), choice.default_effort.clone()),
+            None => (models.efforts.clone(), models.default_effort.clone()),
+        }
+    }
+
+    /// The model whose levels a tab shows: the bot's model on the tab of its
+    /// provider, and the default model of another provider.
+    fn tab_model(&self, tab: &str) -> Option<String> {
+        (tab == self.creation_provider())
+            .then(|| self.creation.as_ref()?.model.clone())
+            .flatten()
+    }
+
+    /// A model picked on a tab moves the bot to that provider, with the
+    /// reasoning level chosen on that tab. A level the new model does not
+    /// have goes back to the model's default. The picker stays open while
+    /// the model has levels to choose from.
+    fn pick_model(
+        &mut self,
+        tab: String,
+        value: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let moves = tab != self.creation_provider();
+        let (levels, _) = self.model_levels(&tab, value.as_deref());
+        let Some(creation) = self.creation.as_mut().filter(|creation| !creation.creating) else {
+            return;
+        };
+        if moves {
+            creation.provider = Some(tab.clone());
+            creation.effort = None;
+        }
+        if let Some((queued, effort)) = creation.queued_effort.take()
+            && queued == tab
+        {
+            creation.effort = effort;
+        }
+        if creation
+            .effort
+            .as_ref()
+            .is_some_and(|effort| !levels.iter().any(|level| level.id == *effort))
+        {
+            creation.effort = None;
+        }
+        creation.model = value;
+        creation.tab = None;
+        creation.effort_menu = false;
+        if levels.is_empty() {
+            creation.picker = false;
+        }
+        self.creation_model
+            .update(cx, |input, cx| input.clear(window, cx));
+        cx.notify();
+    }
+
+    /// Enter in the search picks the first row it shows.
+    pub(super) fn submit_model_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .creation
+            .as_ref()
+            .is_some_and(|creation| creation.picker)
+        {
+            return;
+        }
+        let tab = self.picker_tab();
+        let query = self.creation_model.read(cx).text().to_owned();
+        if let Some(row) = self.picker_rows(&tab, &query).into_iter().next() {
+            self.pick_model(tab, row.value, window, cx);
+        }
+    }
+
+    /// The reasoning level a tab shows: the chosen one on the tab of the
+    /// bot's provider, and one waiting for a model on another tab.
+    fn tab_effort(&self, tab: &str) -> Option<String> {
+        let creation = self.creation.as_ref()?;
+        if tab == self.creation_provider() {
+            return creation.effort.clone();
+        }
+        creation
+            .queued_effort
+            .as_ref()
+            .filter(|(queued, _)| queued == tab)
+            .and_then(|(_, effort)| effort.clone())
+    }
+
+    fn pick_effort(&mut self, tab: String, effort: Option<String>, cx: &mut Context<Self>) {
+        let owns = tab == self.creation_provider();
+        let Some(creation) = self.creation.as_mut().filter(|creation| !creation.creating) else {
+            return;
+        };
+        if owns {
+            creation.effort = effort;
+        } else {
+            creation.queued_effort = Some((tab, effort));
+        }
+        creation.effort_menu = false;
+        cx.notify();
+    }
+
+    fn toggle_effort_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(creation) = self.creation.as_mut() {
+            creation.effort_menu = !creation.effort_menu;
             cx.notify();
         }
     }
@@ -510,14 +740,16 @@ impl Workspace {
         &self,
         provider: &str,
         effort: Option<&str>,
-        cx: &Context<Self>,
     ) -> (SharedString, SharedString, Option<SharedString>) {
         let provider_name = self
             .providers
             .iter()
             .find(|status| status.id == provider)
             .map_or_else(|| provider.to_owned(), |status| status.name.clone());
-        let typed = self.creation_model.read(cx).text().trim().to_owned();
+        let chosen = self
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.model.clone());
         let models = self.models.get(provider);
         let named = |id: &str, listed: &[ModelChoice]| {
             listed
@@ -525,21 +757,24 @@ impl Workspace {
                 .find(|choice| choice.id == id)
                 .map_or_else(|| id.to_owned(), |choice| choice.name.clone())
         };
-        let model = match (typed.is_empty(), models) {
-            (false, Some(models)) => named(&typed, &models.models),
-            (false, None) => typed,
-            (true, Some(models)) => models.default_model.as_deref().map_or_else(
+        let model = match (chosen, models) {
+            (Some(id), Some(models)) => named(&id, &models.models),
+            (Some(id), None) => id,
+            (None, Some(models)) => models.default_model.as_deref().map_or_else(
                 || "Default model".to_owned(),
                 |id| named(id, &models.models),
             ),
-            (true, None) => "Default model".to_owned(),
+            (None, None) => "Default model".to_owned(),
         };
-        let level = models
-            .filter(|models| !models.efforts.is_empty())
-            .map(|models| match effort.or(models.default_effort.as_deref()) {
-                Some(id) => SharedString::from(named(id, &models.efforts)),
-                None => SharedString::from("Default"),
-            });
+        let chosen = self
+            .creation
+            .as_ref()
+            .and_then(|creation| creation.model.clone());
+        let (levels, default_level) = self.model_levels(provider, chosen.as_deref());
+        let level = (!levels.is_empty()).then(|| match effort.or(default_level.as_deref()) {
+            Some(id) => SharedString::from(named(id, &levels)),
+            None => SharedString::from("Default"),
+        });
         (provider_name.into(), model.into(), level)
     }
 
@@ -555,15 +790,23 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Div {
         let live = self.live();
-        let (provider_name, model, level) = self.model_summary(provider, effort, cx);
+        let (provider_name, model, level) = self.model_summary(provider, effort);
         let spoken = match &level {
             Some(level) => format!("Model: {provider_name}, {model}, {level}"),
             None => format!("Model: {provider_name}, {model}"),
         };
         let focus = theme.border_focus;
+        let bounds = self
+            .creation
+            .as_ref()
+            .map(|creation| creation.row_bounds.clone())
+            .unwrap_or_default();
+        let measured = bounds.clone();
+        let chevron = ui::icon(Icon::ChevronDown, icon_size::SM, theme.text_muted);
         let row = div()
             .id("creation-model-row")
             .debug_selector(|| "creation-model-row".into())
+            .relative()
             .focusable()
             .tab_stop(live)
             .role(Role::Button)
@@ -581,8 +824,17 @@ impl Workspace {
             .when(live, |row| {
                 row.cursor_pointer()
                     .focus_visible(move |style| style.border_color(focus))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_model_picker(cx)))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_model_picker(window, cx)),
+                    )
             })
+            .child(
+                canvas(move |area, _, _| measured.set(area), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
             .child(
                 div()
                     .flex_none()
@@ -601,10 +853,24 @@ impl Workspace {
                     .text_size(text::MD.size)
                     .line_height(text::MD.leading)
                     .child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.text_muted)
-                            .child(provider_name),
+                        match self.providers.iter().find(|status| {
+                            status.id == provider && provider_logo(&status.id).is_some()
+                        }) {
+                            // The logo names the provider; its name stays in the label.
+                            Some(status) => div().flex_none().flex().child(provider_glyph(
+                                status,
+                                picker::TRIGGER_LOGO,
+                                if status.id == "claude" {
+                                    theme.claude_mark
+                                } else {
+                                    theme.text
+                                },
+                            )),
+                            None => div()
+                                .flex_none()
+                                .text_color(theme.text_muted)
+                                .child(provider_name),
+                        },
                     )
                     .child(
                         div()
@@ -620,14 +886,23 @@ impl Workspace {
                             .child(SharedString::from(format!("· {level}")))
                     })),
             )
-            .child(ui::icon(Icon::ChevronDown, icon_size::SM, theme.text_muted));
+            .child(if open {
+                chevron.with_transformation(Transformation::rotate(radians(PI)))
+            } else {
+                chevron
+            });
         let picker = open.then(|| {
+            let room = window.viewport_size().height - picker::WINDOW_ROOM;
             deferred(
                 anchored()
-                    .offset(point(px(0.), layout::MODEL_ROW + menu::PADDING))
+                    .attach(bounds.get(), Anchor::BottomLeft)
+                    .anchor(Anchor::TopLeft)
+                    .offset(point(px(0.), picker::GUTTER))
                     .snap_to_window_with_margin(space::S2)
                     .child({
-                        let picker = self.render_model_picker(provider, effort, theme, window, cx);
+                        let picker = self
+                            .render_model_picker(theme, cx)
+                            .max_h(room.min(picker::MAX_HEIGHT).max(picker::MIN_HEIGHT));
                         ui::menu_reveal("creation-model-reveal", picker, cx)
                     }),
             )
@@ -651,6 +926,9 @@ impl Workspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
+                            if let Some(creation) = this.creation.as_mut() {
+                                creation.effort_menu = false;
+                            }
                             this.close_model_picker(cx);
                         }),
                     ),
@@ -660,189 +938,539 @@ impl Workspace {
         .into_any_element()
     }
 
-    fn render_picker_providers(
+    /// The column of provider tabs. A tab shows the letters of its provider:
+    /// muted at rest, full while its models are shown, and dimmer with a dot
+    /// while the provider cannot run a turn yet.
+    fn render_picker_tabs(
         &self,
-        provider: &str,
+        tab: &str,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let rows: Vec<Stateful<Div>> = self
-            .providers
-            .iter()
-            .enumerate()
-            .map(|(index, status)| {
-                let chosen = status.id == provider;
-                let (state, _) = forms::provider_state(status, theme);
-                let id = status.id.clone();
-                ui::menu_row(("creation-provider", index), chosen, true, theme)
-                    .debug_selector(move || {
-                        if chosen {
-                            format!("creation-provider-{index}-chosen")
-                        } else {
-                            format!("creation-provider-{index}")
-                        }
-                    })
-                    .focusable()
-                    .tab_stop(true)
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(if chosen {
-                        format!("{}, {state}, selected", status.name)
+        let tabs = self.providers.iter().enumerate().map(|(index, status)| {
+            let shown = status.id == tab;
+            let ready = status.state == ProviderState::Ready;
+            let (state, _) = forms::provider_state(status, theme);
+            let group = SharedString::from(format!("creation-provider-{index}"));
+            let ink = Hsla::from(theme.text);
+            let (rest, hover) = match (ready, shown) {
+                (true, true) => (1., 1.),
+                (true, false) => (picker::MARK_REST, picker::MARK_HOVER),
+                (false, true) => (picker::MARK_OFF_SHOWN, picker::MARK_OFF_SHOWN),
+                (false, false) => (picker::MARK_OFF, picker::MARK_OFF_SHOWN),
+            };
+            let dot = (!ready).then(|| {
+                div()
+                    .absolute()
+                    .top(picker::TAB_DOT_INSET - picker::TAB_DOT_RING)
+                    .right(picker::TAB_DOT_INSET - picker::TAB_DOT_RING)
+                    .size(picker::TAB_DOT + picker::TAB_DOT_RING * 2.)
+                    .rounded_full()
+                    .border(picker::TAB_DOT_RING)
+                    .border_color(theme.picker_rail)
+                    .bg(if status.state == ProviderState::SignedOut {
+                        theme.warning
                     } else {
-                        format!("{}, {state}", status.name)
-                    }))
-                    .text_color(if chosen {
-                        theme.text
-                    } else {
-                        theme.text_secondary
+                        theme.text_muted
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pick_creation_provider(Some(id.clone()), window, cx);
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(size::STATE_DOT)
-                            .rounded_full()
-                            .bg(forms::provider_color(status, theme)),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(status.name.clone())),
-                    )
-            })
-            .collect();
+            });
+            let id = status.id.clone();
+            let highlight = theme.menu_highlight;
+            div()
+                .id(("creation-provider", index))
+                .group(group.clone())
+                .debug_selector(move || {
+                    if shown {
+                        format!("creation-provider-{index}-chosen")
+                    } else {
+                        format!("creation-provider-{index}")
+                    }
+                })
+                .relative()
+                .flex_none()
+                .size(picker::TAB)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(picker::ROW_RADIUS)
+                .cursor_pointer()
+                .focusable()
+                .tab_stop(true)
+                .role(Role::Tab)
+                .aria_label(SharedString::from(format!("{}, {state}", status.name)))
+                .when(shown, |tab| {
+                    tab.bg(theme.picker_tab)
+                        .border_1()
+                        .border_color(theme.picker_tab_edge)
+                })
+                .when(!shown, |tab| tab.hover(move |style| style.bg(highlight)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.show_picker_tab(id.clone(), window, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .opacity(rest)
+                        .group_hover(group, move |style| style.opacity(hover))
+                        .child(provider_glyph(status, picker::TAB_LOGO, ink)),
+                )
+                .children(dot)
+        });
         div()
             .id("creation-provider")
             .debug_selector(|| "creation-provider".into())
-            .role(Role::Group)
-            .aria_label("Provider")
+            .role(Role::TabList)
+            .aria_label("Providers")
             .flex_none()
-            .w(layout::PICKER_PROVIDERS)
+            .w(picker::RAIL)
             .flex()
             .flex_col()
-            .child(ui::menu_heading("Providers", theme))
-            .children(rows)
+            .items_center()
+            .gap(space::S1)
+            .px(picker::RAIL_PADDING_X)
+            .py(picker::RAIL_PADDING_Y)
+            .rounded_l(picker::RADIUS - size::HAIRLINE)
+            .border_r_1()
+            .border_color(theme.border)
+            .bg(theme.picker_rail)
+            .children(tabs)
+            .child(div().flex_1())
+            .child(self.render_provider_settings_button(theme, cx))
     }
 
-    fn render_model_picker(
+    /// The foot of the tab column: the provider settings, where a provider
+    /// signs in, installs its runtime, or takes another executable.
+    fn render_provider_settings_button(
         &self,
-        provider: &str,
-        effort: Option<&str>,
         theme: &Theme,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let providers =
-            (self.providers.len() > 1).then(|| self.render_picker_providers(provider, theme, cx));
-        let typed = self.creation_model.read(cx).text().trim().to_owned();
-        let models: Vec<Stateful<Div>> = self
-            .model_choices(provider, (!typed.is_empty()).then_some(typed.as_str()))
-            .into_iter()
-            .enumerate()
-            .map(|(index, choice)| {
-                let forms::Choice {
-                    value,
-                    label,
-                    chosen,
-                } = choice;
-                ui::menu_row(("creation-model-choice", index), chosen, true, theme)
+        let (highlight, muted, ink) = (theme.menu_highlight, theme.text_muted, theme.text);
+        div()
+            .id("creation-provider-settings")
+            .debug_selector(|| "creation-provider-settings".into())
+            .group("creation-provider-settings")
+            .flex_none()
+            .size(picker::TAB)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(picker::ROW_RADIUS)
+            .cursor_pointer()
+            .focusable()
+            .tab_stop(true)
+            .role(Role::Button)
+            .aria_label("Provider settings")
+            .hover(move |style| style.bg(highlight))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if let Some(creation) = this.creation.as_mut() {
+                    creation.picker = false;
+                    creation.effort_menu = false;
+                }
+                this.open_settings_at(Section::Providers, window, cx);
+            }))
+            .child(
+                ui::icon(Icon::Settings, icon_size::MD, muted)
+                    .group_hover("creation-provider-settings", move |style| {
+                        style.text_color(ink)
+                    }),
+            )
+    }
+
+    fn render_model_option(
+        &self,
+        index: usize,
+        tab: &str,
+        row: ModelRow,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let ModelRow {
+            value,
+            name,
+            default,
+            chosen,
+        } = row;
+        let highlight = theme.menu_highlight;
+        let radio = div()
+            .flex_none()
+            .size(picker::RADIO)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .when(chosen, |radio| {
+                radio.bg(theme.text).child(ui::icon(
+                    Icon::Check,
+                    picker::RADIO_CHECK,
+                    theme.picker_surface,
+                ))
+            })
+            .when(!chosen, |radio| {
+                radio.border_1().border_color(theme.radio_edge)
+            });
+        let spoken = match (default, chosen) {
+            (true, true) => format!("{name}, default, selected"),
+            (true, false) => format!("{name}, default"),
+            (false, true) => format!("{name}, selected"),
+            (false, false) => name.to_string(),
+        };
+        let tab = tab.to_owned();
+        div()
+            .id(("creation-model-choice", index))
+            .debug_selector(move || {
+                if chosen {
+                    format!("creation-model-choice-{index}-chosen")
+                } else {
+                    format!("creation-model-choice-{index}")
+                }
+            })
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(space::S2)
+            .rounded(picker::ROW_RADIUS)
+            .py(picker::ROW_PADDING_Y)
+            .pl(picker::INSET + picker::RADIO + space::S2)
+            .pr(picker::INSET)
+            .cursor_pointer()
+            .focusable()
+            .tab_stop(true)
+            .role(Role::RadioButton)
+            .aria_label(SharedString::from(spoken))
+            .hover(move |style| style.bg(highlight))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pick_model(tab.clone(), value.clone(), window, cx);
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(picker::INSET)
+                    .flex()
+                    .items_center()
+                    .child(radio),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(picker::NAME_GAP)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(text::MD.size)
+                            .line_height(text::MD.leading)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(name),
+                    )
+                    .children(default.then(|| badge("default", theme))),
+            )
+    }
+
+    /// The reasoning level of the tab, under a line at the foot of the
+    /// picker, as a select that opens its levels over the picker.
+    fn render_effort_select(
+        &self,
+        tab: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let (levels, default_level) = self.model_levels(tab, self.tab_model(tab).as_deref());
+        if levels.is_empty() {
+            return None;
+        }
+        let current = self.tab_effort(tab);
+        let chosen_id = current.clone().or_else(|| default_level.clone());
+        let label = chosen_id.as_deref().map_or_else(
+            || SharedString::from("Default"),
+            |id| {
+                levels
+                    .iter()
+                    .find(|level| level.id == id)
+                    .map_or_else(|| id.to_owned(), |level| level.name.clone())
+                    .into()
+            },
+        );
+        let (open, bounds) = self
+            .creation
+            .as_ref()
+            .map(|creation| (creation.effort_menu, creation.effort_bounds.clone()))
+            .unwrap_or_default();
+        let measured = bounds.clone();
+        let fill = theme.menu_highlight;
+        let pressed = theme.picker_tab;
+        let select = div()
+            .id("creation-effort")
+            .debug_selector(|| "creation-effort".into())
+            .relative()
+            .flex_none()
+            .w(picker::SELECT_WIDTH)
+            .h(control::MD)
+            .px(picker::INSET)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(space::S2)
+            .rounded(picker::ROW_RADIUS)
+            .bg(if open { pressed } else { fill })
+            .hover(move |style| style.bg(pressed))
+            .cursor_pointer()
+            .focusable()
+            .tab_stop(true)
+            .role(Role::ComboBox)
+            .aria_label(SharedString::from(format!("Reasoning: {label}")))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_effort_menu(cx)))
+            .child(
+                canvas(move |area, _, _| measured.set(area), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(text::MD.size)
+                    .line_height(text::MD.leading)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(label),
+            )
+            .child(ui::icon(
+                Icon::ChevronUpDown,
+                icon_size::SM,
+                theme.text_muted,
+            ));
+        let menu = open.then(|| {
+            let entries = std::iter::once((None, None::<SharedString>))
+                .take(usize::from(default_level.is_none()))
+                .chain(levels.iter().map(|level| {
+                    let value = (default_level.as_deref() != Some(level.id.as_str()))
+                        .then(|| level.id.clone());
+                    (value, Some(SharedString::from(level.name.clone())))
+                }));
+            let rows = entries.enumerate().map(|(index, (value, name))| {
+                let chosen = value == current;
+                let tab = tab.to_owned();
+                ui::menu_row(("creation-effort", index), chosen, false, theme)
                     .debug_selector(move || {
                         if chosen {
-                            format!("creation-model-choice-{index}-chosen")
+                            format!("creation-effort-{index}-chosen")
                         } else {
-                            format!("creation-model-choice-{index}")
+                            format!("creation-effort-{index}")
                         }
                     })
                     .focusable()
                     .tab_stop(true)
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(if chosen {
-                        format!("{label}, selected")
-                    } else {
-                        label.to_string()
+                    .role(Role::ListBoxOption)
+                    .text_size(text::MD.size)
+                    .line_height(text::MD.leading)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pick_effort(tab.clone(), value.clone(), cx);
                     }))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pick_creation_model(value.clone(), window, cx);
-                        cx.notify();
-                    }))
-                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(name.unwrap_or_else(|| "Default".into())),
+                    )
                     .children(chosen.then(|| ui::menu_check(theme)))
-            })
-            .collect();
-        let levels = self.effort_choices(provider, effort);
-        let reasoning = (!levels.is_empty()).then(|| {
+            });
+            deferred(
+                anchored()
+                    .attach(bounds.get(), Anchor::BottomRight)
+                    .anchor(Anchor::TopRight)
+                    .offset(point(px(0.), menu::PADDING))
+                    .snap_to_window_with_margin(space::S2)
+                    .child(ui::menu_reveal(
+                        "creation-effort-reveal",
+                        ui::menu_panel(false, theme)
+                            .id("creation-effort-menu")
+                            .debug_selector(|| "creation-effort-menu".into())
+                            .occlude()
+                            .role(Role::ListBox)
+                            .aria_label("Reasoning")
+                            .min_w(picker::SELECT_WIDTH)
+                            .children(rows),
+                        cx,
+                    )),
+            )
+            .with_priority(3)
+        });
+        Some(
             div()
+                .flex_none()
+                .mt(picker::PADDING)
+                .mx(-picker::PADDING)
+                .pt(picker::PADDING)
+                .pl(picker::PADDING + picker::INSET)
+                .pr(picker::PADDING)
                 .flex()
-                .flex_col()
-                .child(ui::menu_separator(theme))
-                .child(ui::menu_heading("Reasoning", theme))
-                .child(div().px(menu::ROW_INSET).child(self.choice_chips(
-                    "creation-effort",
-                    "Reasoning level",
-                    levels,
-                    Self::pick_creation_effort,
-                    theme,
-                    cx,
-                )))
+                .items_center()
+                .justify_between()
+                .gap(space::S3)
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .text_size(text::SM.size)
+                        .line_height(text::SM.leading)
+                        .text_color(theme.text_muted)
+                        .child("Reasoning"),
+                )
+                .child(select)
+                .children(menu),
+        )
+    }
+
+    fn render_model_picker(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let tab = self.picker_tab();
+        let status = self.providers.iter().find(|status| status.id == tab);
+        let name = status.map_or_else(|| tab.clone(), |status| status.name.clone());
+        let summary: SharedString = match status {
+            Some(status) if status.state == ProviderState::Ready => status
+                .account
+                .clone()
+                .or_else(|| status.runtime.clone())
+                .unwrap_or_else(|| "Ready".to_owned())
+                .into(),
+            Some(status) => forms::provider_state(status, theme).0.into(),
+            None => SharedString::default(),
+        };
+        let notice = status
+            .and_then(forms::provider_notice)
+            .map(|(text, _)| text)
+            .or_else(|| self.models_note(&tab));
+        let query = self.creation_model.read(cx).text().to_owned();
+        let rows: Vec<Stateful<Div>> = self
+            .picker_rows(&tab, &query)
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| self.render_model_option(index, &tab, row, theme, cx))
+            .collect();
+        let heading = div()
+            .flex_none()
+            .pt(picker::HEADING_TOP)
+            .pb(picker::HEADING_BOTTOM)
+            .pl(picker::INSET)
+            .flex()
+            .flex_col()
+            .gap(size::HAIRLINE)
+            .child(
+                div()
+                    .truncate()
+                    .text_size(text::LG.size)
+                    .line_height(text::LG.leading)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(SharedString::from(name)),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(text::SM.size)
+                    .line_height(text::SM.leading)
+                    .text_color(theme.text_muted)
+                    .child(summary),
+            );
+        let notice = notice.map(|reason| {
+            div()
+                .flex_none()
+                .mb(picker::PADDING)
+                .py(space::S2)
+                .px(picker::INSET)
+                .rounded(picker::ROW_RADIUS)
+                .bg(theme.menu_highlight)
+                .child(forms::note(
+                    "creation-models-note",
+                    reason,
+                    theme.text_secondary,
+                ))
         });
-        let note = self.models_note(provider).map(|reason| {
-            div().px(menu::ROW_INSET).pb(space::S1).child(forms::note(
-                "creation-models-note",
-                reason,
-                theme.text_muted,
-            ))
+        // The search sits in the picker like a row, on the row highlight,
+        // with no edge of its own.
+        let handle = self.creation_model.focus_handle(cx);
+        let search = div()
+            .id("creation-model")
+            .debug_selector(|| "creation-model".into())
+            .flex_none()
+            .h(control::MD)
+            .px(picker::INSET)
+            .flex()
+            .items_center()
+            .rounded(picker::ROW_RADIUS)
+            .bg(theme.menu_highlight)
+            .cursor_text()
+            .on_click(move |_, window, cx| window.focus(&handle, cx))
+            .child(div().flex_1().min_w_0().child(self.creation_model.clone()));
+        let empty = rows.is_empty().then(|| {
+            div()
+                .px(picker::INSET)
+                .py(picker::ROW_PADDING_Y)
+                .text_size(text::MD.size)
+                .line_height(text::MD.leading)
+                .text_color(theme.text_muted)
+                .child("No model matches.")
         });
-        let other = self.input_box(
-            "creation-model",
-            &self.creation_model,
-            false,
-            theme,
-            window,
-            cx,
-        );
         let options = div()
             .id("creation-model-options")
             .flex_1()
-            .min_w_0()
+            .min_h_0()
             .overflow_y_scroll()
+            .pt(picker::PADDING)
             .flex()
             .flex_col()
-            .child(ui::menu_heading("Models", theme))
-            .children(models)
-            .children(note)
-            .children(reasoning)
-            .child(ui::menu_separator(theme))
-            .child(ui::menu_heading("Other model", theme))
-            .child(div().p(size::FOCUS_RING).child(other));
-        let split = providers.map(|column| {
-            div().flex().child(column).child(
-                div()
-                    .flex_none()
-                    .w(size::HAIRLINE)
-                    .my(menu::SEPARATOR_MARGIN)
-                    .mx(menu::WIDE_PADDING)
-                    .bg(theme.menu_separator),
-            )
-        });
-        ui::menu_panel(true, theme)
+            .children(rows)
+            .children(empty);
+        let content = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .p(picker::PADDING)
+            .flex()
+            .flex_col()
+            .child(heading)
+            .children(notice)
+            .child(search)
+            .child(options)
+            .children(self.render_effort_select(&tab, theme, cx));
+        div()
             .id("creation-model-picker")
             .debug_selector(|| "creation-model-picker".into())
             .occlude()
-            .role(Role::Group)
+            .role(Role::Dialog)
             .aria_label("Choose a model")
-            .w(layout::CREATION_WIDTH)
-            .max_h(menu::MAX_HEIGHT)
-            .flex_row()
+            .w(picker::WIDTH)
+            .min_h(picker::MIN_HEIGHT)
+            .flex()
+            .rounded(picker::RADIUS)
+            .border_1()
+            .border_color(theme.dialog_ring)
+            .bg(theme.picker_surface)
+            .shadow(theme.menu_shadow())
+            .text_color(theme.text)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if let Some(creation) = this.creation.as_mut()
+                        && std::mem::take(&mut creation.effort_menu)
+                    {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && this.close_model_picker(cx) {
                     cx.stop_propagation();
                 }
             }))
-            .children(split)
-            .child(options)
+            .child(self.render_picker_tabs(&tab, theme, cx))
+            .child(content)
     }
 
     pub(super) fn render_creation_header(

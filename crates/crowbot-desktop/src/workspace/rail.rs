@@ -1,5 +1,7 @@
+use crowbot_protocol::ProviderStatus;
 use gpui::{
-    Context, Div, FontWeight, Role, SharedString, Stateful, WindowControlArea, div, prelude::*,
+    AnyElement, Context, Div, FontWeight, Hsla, Pixels, Role, SharedString, Stateful,
+    WindowControlArea, div, prelude::*,
 };
 
 use super::Workspace;
@@ -10,6 +12,37 @@ use crate::theme::{Theme, control, icon as icon_size, layout, radius, size, spac
 use crate::ui;
 
 const RAIL_BUTTON_GROUP: &str = "rail-button";
+
+/// The logo Crow Bot ships for a provider, to name it at a glance. The marks
+/// come from LobeHub Icons (MIT); see `assets/icons/providers/LICENSE`.
+pub(super) fn provider_logo(id: &str) -> Option<Icon> {
+    match id {
+        "claude" => Some(Icon::ProviderClaude),
+        "codex" => Some(Icon::ProviderOpenAi),
+        "grok" => Some(Icon::ProviderGrok),
+        _ => None,
+    }
+}
+
+/// The mark of a provider: its logo at `logo`, or the letters of its name
+/// for a provider with no logo.
+pub(super) fn provider_glyph(
+    status: &ProviderStatus,
+    logo: Pixels,
+    color: impl Into<Hsla>,
+) -> AnyElement {
+    let color = color.into();
+    match provider_logo(&status.id) {
+        Some(icon) => ui::icon(icon, logo, color).into_any_element(),
+        None => div()
+            .text_size(text::SM.size)
+            .line_height(text::SM.leading)
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(color)
+            .child(provider_mark(&status.name))
+            .into_any_element(),
+    }
+}
 
 /// The short mark of a provider inside its ring: two letters, since two
 /// providers share their first one.
@@ -57,7 +90,7 @@ fn rail_icon(id: &'static str, glyph: Icon, label: &'static str, theme: &Theme) 
 
 impl Workspace {
     /// The column of app-wide controls at the left edge of the window: the
-    /// search, the state of each provider, and the settings.
+    /// state of each provider, and the settings.
     pub(super) fn render_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let logo = div()
             .id("rail-logo")
@@ -71,8 +104,6 @@ impl Workspace {
             .when(!cfg!(target_os = "macos"), |row| {
                 row.child(ui::icon(Icon::Bird, layout::RAIL_LOGO, theme.text))
             });
-        let search = rail_icon("open-search", Icon::Search, "Search everything", theme)
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)));
         let providers: Vec<Stateful<Div>> = self
             .providers
             .iter()
@@ -95,11 +126,11 @@ impl Workspace {
                             .rounded_full()
                             .border(size::RING)
                             .border_color(forms::provider_color(status, theme))
-                            .text_size(text::SM.size)
-                            .line_height(text::SM.leading)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_secondary)
-                            .child(provider_mark(&status.name)),
+                            .child(provider_glyph(
+                                status,
+                                size::PROVIDER_LOGO,
+                                theme.text_secondary,
+                            )),
                     )
             })
             .collect();
@@ -119,7 +150,6 @@ impl Workspace {
             .items_center()
             .gap(space::S1_5)
             .child(logo)
-            .child(search)
             .child(
                 div()
                     .id("rail-spacer")

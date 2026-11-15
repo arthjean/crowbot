@@ -59,6 +59,23 @@ pub struct Theme {
     pub menu_separator: Rgba,
     /// The resting edge of a text field, on the `control` fill.
     pub input_edge: Rgba,
+    /// The model picker: its panel, the column of its provider tabs, and the
+    /// fill and edge of the tab shown.
+    pub picker_surface: Rgba,
+    pub picker_rail: Rgba,
+    pub picker_tab: Rgba,
+    pub picker_tab_edge: Rgba,
+    /// The ring of a model that is not chosen.
+    pub radio_edge: Rgba,
+    /// The fill of a small pill beside a name, such as "default".
+    pub badge: Rgba,
+    /// The Claude logo beside its model, in Claude's own color.
+    pub claude_mark: Rgba,
+    /// A round icon button: its fill, its fill under the pointer, and its
+    /// edge.
+    pub round_button: Rgba,
+    pub round_button_hover: Rgba,
+    pub round_button_edge: Rgba,
 }
 
 impl Global for Theme {}
@@ -135,6 +152,16 @@ impl Theme {
             menu_selected: white(0.1),
             menu_separator: white(0.08),
             input_edge: white(0.045),
+            picker_surface: rgb(0x21_21_21),
+            picker_rail: rgb(0x10_10_10),
+            picker_tab: white(0.08),
+            picker_tab_edge: white(0.11),
+            radio_edge: white(0.22),
+            badge: white(0.07),
+            claude_mark: rgb(0xd9_77_57),
+            round_button: rgb(0x26_26_26),
+            round_button_hover: rgb(0x2e_2e_2e),
+            round_button_edge: white(0.08),
         }
     }
 
@@ -191,6 +218,16 @@ impl Theme {
             menu_selected: ink(0.1),
             menu_separator: ink(0.08),
             input_edge: ink(0.1),
+            picker_surface: rgb(0xff_ff_ff),
+            picker_rail: rgb(0xf4_f4_f5),
+            picker_tab: ink(0.06),
+            picker_tab_edge: ink(0.1),
+            radio_edge: ink(0.22),
+            badge: ink(0.06),
+            claude_mark: rgb(0xd9_77_57),
+            round_button: rgb(0xf0_f0_f2),
+            round_button_hover: rgb(0xe8_e8_eb),
+            round_button_edge: ink(0.08),
         }
     }
 
@@ -318,7 +355,6 @@ pub mod space {
     pub const S3: Pixels = px(12.);
     pub const S4: Pixels = px(16.);
     pub const S6: Pixels = px(24.);
-    pub const S8: Pixels = px(32.);
 }
 
 pub mod radius {
@@ -350,11 +386,57 @@ pub mod menu {
     pub const ROW_GAP: Pixels = px(8.);
     pub const CHECK: Pixels = px(14.);
     pub const SEPARATOR_MARGIN: Pixels = px(4.);
-    pub const MAX_HEIGHT: Pixels = px(400.);
     pub const SHADOW_DROP: Pixels = px(18.);
     pub const SHADOW_BLUR: Pixels = px(44.);
     pub const REVEAL_DROP: Pixels = px(4.);
     pub const DISABLED_OPACITY: f32 = 0.64;
+}
+
+/// The model picker of the creation form: a column of provider tabs beside
+/// the models of the tab shown.
+pub mod picker {
+    use super::{Pixels, px};
+
+    pub const WIDTH: Pixels = px(360.);
+    pub const MIN_HEIGHT: Pixels = px(226.);
+    pub const MAX_HEIGHT: Pixels = px(520.);
+    /// The picker leaves at least this much of the window height free.
+    pub const WINDOW_ROOM: Pixels = px(100.);
+    /// The space between the picker and its trigger.
+    pub const GUTTER: Pixels = px(8.);
+    pub const RADIUS: Pixels = px(14.);
+    pub const PADDING: Pixels = px(6.);
+    pub const ROW_RADIUS: Pixels = px(8.);
+    /// Text in a row starts this far in from the row's edge.
+    pub const INSET: Pixels = px(10.);
+    pub const RAIL: Pixels = px(52.);
+    pub const RAIL_PADDING_X: Pixels = px(7.);
+    pub const RAIL_PADDING_Y: Pixels = px(9.);
+    pub const TAB: Pixels = px(36.);
+    /// The provider logo of a tab, and the one beside the model in the
+    /// trigger.
+    pub const TAB_LOGO: Pixels = px(19.);
+    pub const TRIGGER_LOGO: Pixels = px(15.);
+    pub const TAB_DOT: Pixels = px(6.);
+    pub const TAB_DOT_INSET: Pixels = px(6.);
+    /// The ring of background around the dot of a tab.
+    pub const TAB_DOT_RING: Pixels = px(2.);
+    pub const HEADING_TOP: Pixels = px(6.);
+    pub const HEADING_BOTTOM: Pixels = px(8.);
+    pub const ROW_PADDING_Y: Pixels = px(6.);
+    pub const RADIO: Pixels = px(16.);
+    pub const RADIO_CHECK: Pixels = px(12.);
+    pub const NAME_GAP: Pixels = px(7.);
+    pub const BADGE_PADDING_X: Pixels = px(6.);
+    pub const BADGE_PADDING_Y: Pixels = px(1.);
+    pub const BADGE_LEADING: Pixels = px(15.);
+    pub const SELECT_WIDTH: Pixels = px(128.);
+    /// How a tab mark shows: muted at rest, brighter under the pointer, full
+    /// when its tab is shown; a provider that cannot run is dimmer.
+    pub const MARK_REST: f32 = 0.48;
+    pub const MARK_HOVER: f32 = 0.8;
+    pub const MARK_OFF: f32 = 0.28;
+    pub const MARK_OFF_SHOWN: f32 = 0.6;
 }
 
 pub mod control {
@@ -468,9 +550,12 @@ pub mod size {
     pub const SWATCH: Pixels = px(18.);
     pub const GLYPH_CELL: Pixels = px(33.);
     pub const STATE_DOT: Pixels = px(8.);
-    pub const FOCUS_RING: Pixels = px(3.);
     pub const RING: Pixels = px(2.);
     pub const PROVIDER_RING: Pixels = px(28.);
+    /// A round icon button, such as search and new bot over the bot list.
+    pub const ROUND_BUTTON: Pixels = px(36.);
+    /// A provider logo inside its ring on the rail.
+    pub const PROVIDER_LOGO: Pixels = px(14.);
     pub const RAIL_SEPARATOR: Pixels = px(24.);
 }
 
@@ -497,8 +582,9 @@ pub mod layout {
     pub const CAPTION_BUTTON: Pixels = px(46.);
     pub const MAC_TRAFFIC_LIGHTS: Pixels = px(78.);
     pub const TOPBAR_PADDING_START: Pixels = px(10.);
-    pub const SEARCH_PADDING_TOP: Pixels = px(11.);
-    pub const SEARCH_FIELD_PADDING: Pixels = px(9.);
+    /// The round actions over the bot list start this far below its top, so
+    /// the list starts where it did under the old 32 search field.
+    pub const SIDEBAR_ACTIONS_TOP: Pixels = px(9.);
     pub const ROW_HEIGHT: Pixels = px(62.);
     pub const TILE_WIDTH: Pixels = px(72.);
     pub const TILE_HEIGHT: Pixels = px(102.);
@@ -559,7 +645,6 @@ pub mod layout {
     pub const PURPOSE_MIN_ROWS: f32 = 2.;
     pub const PURPOSE_MAX_ROWS: f32 = 9.;
     pub const MODEL_ROW: Pixels = px(44.);
-    pub const PICKER_PROVIDERS: Pixels = px(136.);
     pub const TEMPLATE_WIDTH: Pixels = px(256.);
     pub const TEMPLATE_HEIGHT: Pixels = px(112.);
     /// The suggestion row fades over this width at an edge it can scroll past.
