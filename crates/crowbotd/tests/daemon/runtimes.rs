@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -131,6 +131,38 @@ fn installed(daemon: &Daemon) -> PathBuf {
         .join("runtimes")
         .join(CLAUDE)
         .join(VERSION)
+}
+
+/// Writes a program of the runtime once nothing runs it: the agent of a
+/// killed daemon ends a moment after it, when its guard sees the daemon gone.
+fn write_once_free(path: &Path, content: &[u8]) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::fs::write(path, content) {
+            Ok(()) => return,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("cannot write {}: {error}", path.display()),
+        }
+    }
+}
+
+/// What the runtime folder of Claude holds besides its lock file, which stays
+/// so that every daemon locks the same file.
+fn left_of_downloads(daemon: &Daemon) -> Vec<PathBuf> {
+    let runtimes = daemon.data_dir().join("runtimes").join(CLAUDE);
+    std::fs::read_dir(&runtimes)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| path.extension().is_none_or(|extension| extension != "lock"))
+        .collect()
 }
 
 async fn providers(client: &mut Client) -> Vec<ProviderStatus> {
@@ -280,11 +312,7 @@ async fn a_download_that_does_not_match_its_hash_is_removed_and_nothing_of_it_ru
     assert_eq!(publisher.requests(), 1);
 
     // The file is gone, and the agent in it never started.
-    let runtimes = daemon.data_dir().join("runtimes").join(CLAUDE);
-    let left: Vec<PathBuf> = std::fs::read_dir(&runtimes)
-        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-        .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(left_of_downloads(&daemon), Vec::<PathBuf>::new());
     assert_eq!(daemon.heartbeat(), None);
     assert_eq!(failed.reply, "");
 }
@@ -307,7 +335,7 @@ async fn a_runtime_changed_after_its_install_is_downloaded_again_before_it_runs(
     // What a bot that may write files could do to the runtime: change the
     // program, and add a file that a program loads from its own folder.
     let program = installed(&daemon).join(program());
-    std::fs::write(&program, "not the pinned agent").unwrap();
+    write_once_free(&program, b"not the pinned agent");
     std::fs::write(installed(&daemon).join("version.dll"), "planted").unwrap();
     daemon.spawn();
     let mut client = daemon.client().await;
@@ -347,7 +375,7 @@ async fn a_changed_runtime_that_cannot_be_removed_does_not_run() {
     let folder = installed(&daemon);
     let mut changed = runtime();
     changed.push(0);
-    std::fs::write(folder.join(program()), changed).unwrap();
+    write_once_free(&folder.join(program()), &changed);
     let heartbeat = daemon.data_dir().join("heartbeat");
     std::fs::remove_file(&heartbeat).ok();
     // The marker cannot be removed: on Windows another process holds it with
@@ -401,11 +429,7 @@ async fn a_download_larger_than_its_pinned_size_stops_and_nothing_of_it_runs() {
         message.contains(&format!("larger than the pinned {pinned} bytes")),
         "{message}"
     );
-    let runtimes = daemon.data_dir().join("runtimes").join(CLAUDE);
-    let left: Vec<PathBuf> = std::fs::read_dir(&runtimes)
-        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-        .unwrap_or_default();
-    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(left_of_downloads(&daemon), Vec::<PathBuf>::new());
     assert_eq!(daemon.heartbeat(), None);
 }
 

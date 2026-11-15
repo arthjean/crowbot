@@ -211,7 +211,9 @@ impl Runtimes {
     }
 
     /// Installs the runtime of the provider when it is not there yet. Two
-    /// callers for one provider share one download.
+    /// callers for one provider share one download, and so do two daemons
+    /// that keep their runtimes in one folder: a lock file beside the runtime
+    /// makes the second wait, and then find the runtime installed.
     pub async fn ensure(
         &self,
         provider: &str,
@@ -224,6 +226,7 @@ impl Runtimes {
         };
         let _held = gate.lock().await;
         let folder = self.folder(provider, &spec);
+        let _locked = lock_beside(&folder, &spec).await?;
         // A marker alone is not trusted: the runtime may have failed its
         // check, with a marker that could not be removed.
         if let Some(installed) = self.installed(provider) {
@@ -233,7 +236,7 @@ impl Runtimes {
                 return Ok(installed);
             }
         }
-        let staging = folder.with_extension("partial");
+        let staging = beside(&folder, &spec, "partial");
         let result = install(&spec, &staging, &folder, &progress).await;
         if result.is_err() {
             tokio::fs::remove_dir_all(&staging).await.ok();
@@ -466,6 +469,36 @@ fn launch(folder: &Path, spec: &RuntimeSpec) -> Result<Installed, String> {
     })
 }
 
+/// A path next to the folder of a runtime, named after its version.
+fn beside(folder: &Path, spec: &RuntimeSpec, extension: &str) -> PathBuf {
+    folder.with_file_name(format!("{}.{extension}", spec.version))
+}
+
+/// Takes the lock file of a runtime, waiting while another daemon holds it.
+/// The system releases it when the file closes, also when its daemon is
+/// killed.
+async fn lock_beside(folder: &Path, spec: &RuntimeSpec) -> Result<std::fs::File, RuntimeError> {
+    let path = beside(folder, spec, "lock");
+    let failed = |error: std::io::Error| RuntimeError::Unpack {
+        message: format!("cannot lock {}: {error}", path.display()),
+    };
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(failed)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(failed)?;
+    tokio::task::spawn_blocking(move || file.lock().map(|()| file))
+        .await
+        .map_err(|error| RuntimeError::Unpack {
+            message: error.to_string(),
+        })?
+        .map_err(failed)
+}
+
 /// Checks that the files of a runtime folder are the ones its marker lists,
 /// none changed, removed, or added. A folder that fails loses its marker, so
 /// the runtime is no longer installed; a marker that cannot be removed does
@@ -683,6 +716,79 @@ mod tests {
             ..artifact
         };
         assert!(unpack(&nameless, &archive, &root).is_err());
+    }
+
+    /// Serves `body` to each request, slowly, and counts the requests.
+    fn publisher(body: &'static [u8]) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/agent", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = requests.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut head = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                        head.push(byte[0]);
+                    }
+                    let answer = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(answer.as_bytes()).ok();
+                    for part in body.chunks(64) {
+                        if stream.write_all(part).is_err() {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                });
+            }
+        });
+        (url, requests)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_daemons_on_one_folder_install_a_runtime_once() {
+        const BODY: &[u8] = &[7; 4096];
+        let (url, requests) = publisher(BODY);
+        let root = folder("shared");
+        let pinned = RuntimeSpec {
+            artifacts: vec![Artifact {
+                url,
+                sha256: hex(&Sha256::digest(BODY)),
+                bytes: BODY.len() as u64,
+                unpack: Unpack::File,
+                into: String::new(),
+                file: Some("agent".to_owned()),
+            }],
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            ..spec("agent")
+        };
+        let manifest = || Some(HashMap::from([("claude".to_owned(), pinned.clone())]));
+        // Each daemon has its own lock between its own callers.
+        let (first, second) = (
+            Runtimes::new(root.clone(), manifest()),
+            Runtimes::new(root.clone(), manifest()),
+        );
+        let quiet: Progress = Arc::new(|_, _| {});
+        let (one, two) = tokio::join!(
+            first.ensure("claude", quiet.clone()),
+            second.ensure("claude", quiet.clone())
+        );
+        assert!(one.is_ok(), "{one:?}");
+        assert!(two.is_ok(), "{two:?}");
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read(root.join("claude").join("1.0.0").join("agent")).unwrap(),
+            BODY
+        );
+        assert!(first.verify("claude").is_ok());
     }
 
     #[test]
