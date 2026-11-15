@@ -17,6 +17,8 @@ cargo run --manifest-path crates/crowbot-desktop/Cargo.toml -- --daemon target/d
 
 The client is its own Cargo workspace, so its commands run from `crates/crowbot-desktop` or with `--manifest-path`.
 
+To try a change apart from your own data, `scripts/sandbox.ps1` (Windows) or `zsh scripts/sandbox.zsh` (Linux, macOS) builds both and opens the client on a throwaway daemon with its own database, runtimes, and provider sign-ins. `stop`, `reset`, and `clean` end it, wipe it, or remove it.
+
 The daemon:
 
 - `--cwd <dir>` is the folder where new conversations work. The default is the folder the daemon starts in.
