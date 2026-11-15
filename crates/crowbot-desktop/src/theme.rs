@@ -673,6 +673,7 @@ mod tests {
     ];
 
     fn literal_values(source: &str) -> Vec<String> {
+        let source = source.replace("\r\n", "\n");
         let code = source
             .split(
                 "#[cfg(test)]
@@ -739,6 +740,9 @@ mod tests {",
             literal_values("with_animation(Duration::from_millis(5))").len(),
             1
         );
+        // A checkout with CRLF line ends still stops at the tests.
+        let tested = "div()\r\n#[cfg(test)]\r\nmod tests {\r\n    px(4.)\r\n}\r\n";
+        assert_eq!(literal_values(tested), Vec::<String>::new());
     }
 
     #[test]
