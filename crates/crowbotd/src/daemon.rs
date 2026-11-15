@@ -1,6 +1,8 @@
 //! What every connection and every conversation share: the bots, the attached
 //! clients, the running conversations, and what each bot is doing.
 
+mod providers;
+
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -9,7 +11,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crowbot_protocol::{
-    Avatar, BOT_NAME_LENGTH, BotDraft, BotPatch, BotState, BotSummary, ConversationSummary,
+    AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH as INSTRUCTIONS_LENGTH,
+    BOT_MODEL_LENGTH as MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH as TITLE_LENGTH, BotDraft,
+    BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, PROTOCOL_VERSION,
     PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage,
 };
 use tokio::sync::oneshot;
@@ -22,15 +26,8 @@ use crate::store::{BotRow, NewBot, SharedStore, StoreError};
 /// The provider of a bot that runs the agent command given to the daemon.
 pub const CUSTOM_PROVIDER: &str = "custom";
 
-const TITLE_LENGTH: usize = 80;
-const INSTRUCTIONS_LENGTH: usize = 20_000;
-const MODEL_LENGTH: usize = 200;
 const GLYPH_LENGTH: usize = 16;
 const SLUG_LENGTH: usize = 48;
-/// A bot created with no avatar takes the next color of this list.
-const AVATAR_COLORS: [&str; 8] = [
-    "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316",
-];
 /// How long a deleted bot's conversation gets to stop its turn. A turn ends
 /// within the stop timeout of the conversation, which is shorter.
 const SHUTDOWN_PATIENCE: Duration = Duration::from_secs(15);
@@ -98,7 +95,9 @@ struct State {
     activity: HashMap<i64, Activity>,
     /// The last summary sent for each bot: a summary that did not change is not sent again.
     published: HashMap<i64, BotSummary>,
+    /// The bots whose conversations are being removed: none of them starts a task.
     deleting: HashSet<i64>,
+    providers: HashMap<&'static str, providers::ProviderEntry>,
 }
 
 impl State {
@@ -110,6 +109,7 @@ impl State {
 
 pub struct Daemon {
     store: SharedStore,
+    database: PathBuf,
     bots_dir: PathBuf,
     command: Option<String>,
     state: Mutex<State>,
@@ -117,9 +117,15 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(store: SharedStore, bots_dir: PathBuf, command: Option<String>) -> Self {
+    pub fn new(
+        store: SharedStore,
+        database: PathBuf,
+        bots_dir: PathBuf,
+        command: Option<String>,
+    ) -> Self {
         Self {
             store,
+            database,
             bots_dir,
             command,
             state: Mutex::new(State::default()),
@@ -129,6 +135,21 @@ impl Daemon {
 
     pub fn store(&self) -> &SharedStore {
         &self.store
+    }
+
+    pub fn info(&self) -> ServerMessage {
+        ServerMessage::DaemonInfo(DaemonInfo {
+            daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            database: self.database.to_string_lossy().into_owned(),
+        })
+    }
+
+    pub fn search(&self, request: u64, query: &str) -> Result<ServerMessage, String> {
+        self.store
+            .with(|store| store.search(request, query))
+            .map(ServerMessage::SearchResults)
+            .map_err(|error| error.to_string())
     }
 
     // The state is locked before the store, never the other way around.
@@ -160,7 +181,7 @@ impl Daemon {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("conversation {id} does not exist"))?;
         if state.deleting.contains(&conversation.bot_id) {
-            return Err("This bot is being deleted.".to_owned());
+            return Err("This bot's conversations are being deleted.".to_owned());
         }
         let handle = conversation::spawn(self.clone(), &conversation);
         state.conversations.insert(id, handle.clone());
@@ -420,13 +441,13 @@ impl Daemon {
             .collect())
     }
 
-    /// Stops the running turns of a bot, then removes it and its conversations.
-    /// The folder of the bot stays: it holds the user's files.
-    pub async fn delete_bot(&self, bot_id: i64) -> Result<(), String> {
+    /// Stops the running turns of a bot and ends the tasks of its
+    /// conversations. Until `deleting` lets go of the bot, none starts again.
+    async fn shut_down_conversations(&self, bot_id: i64) -> Result<(), String> {
         let running = {
             let mut state = self.state();
             if state.deleting.contains(&bot_id) {
-                return Err("This bot is already being deleted.".to_owned());
+                return Err("This bot's conversations are already being deleted.".to_owned());
             }
             let ids = self
                 .store
@@ -448,6 +469,13 @@ impl Daemon {
             handle.send(Command::ShutDown { done });
             tokio::time::timeout(SHUTDOWN_PATIENCE, stopped).await.ok();
         }
+        Ok(())
+    }
+
+    /// Stops the running turns of a bot, then removes it and its conversations.
+    /// The folder of the bot stays: it holds the user's files.
+    pub async fn delete_bot(&self, bot_id: i64) -> Result<(), String> {
+        self.shut_down_conversations(bot_id).await?;
         let deleted = self.store.with(|store| store.delete_bot(bot_id));
         let mut state = self.state();
         state.deleting.remove(&bot_id);
@@ -457,6 +485,29 @@ impl Daemon {
         state.published.remove(&bot_id);
         deleted.map_err(|error| error.to_string())?;
         state.broadcast(&ServerMessage::BotDeleted { bot_id });
+        Ok(())
+    }
+
+    /// Stops the running turns of a bot, then removes every conversation it
+    /// has and gives it a new, empty one. The bot and its folder stay.
+    pub async fn delete_history(&self, bot_id: i64) -> Result<(), String> {
+        self.shut_down_conversations(bot_id).await?;
+        let current = self.store.with(|store| store.delete_history(bot_id));
+        {
+            let mut state = self.state();
+            state.deleting.remove(&bot_id);
+            state
+                .activity
+                .retain(|_, activity| activity.bot_id != bot_id);
+            let current = current
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| missing_bot(bot_id))?;
+            state.broadcast(&ServerMessage::HistoryDeleted {
+                bot_id,
+                current_conversation_id: current,
+            });
+        }
+        self.publish_bot(bot_id);
         Ok(())
     }
 
@@ -481,7 +532,7 @@ impl Daemon {
     /// conversations of the bot go on as they were.
     pub fn new_conversation(&self, bot_id: i64) -> Result<ConversationSummary, String> {
         if self.state().deleting.contains(&bot_id) {
-            return Err("This bot is being deleted.".to_owned());
+            return Err("This bot's conversations are being deleted.".to_owned());
         }
         let summary = self
             .store

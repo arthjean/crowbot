@@ -25,6 +25,17 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// A selection that covers a range of the rendered text of a message.
+    pub fn spanning(key: i64, range: Range<usize>) -> Self {
+        Self {
+            key,
+            anchor: range.start,
+            head: range.end,
+            origin: (range.start, range.end),
+            dragging: false,
+        }
+    }
+
     pub fn range(&self) -> Range<usize> {
         self.anchor.min(self.head)..self.anchor.max(self.head)
     }

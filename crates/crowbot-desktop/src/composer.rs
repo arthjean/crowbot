@@ -20,6 +20,7 @@ pub struct InputStyle {
     pub step: text::Step,
     pub single_line: bool,
     pub label: &'static str,
+    pub min_rows: f32,
     pub max_rows: f32,
 }
 
@@ -29,7 +30,28 @@ impl InputStyle {
             step: text::LG,
             single_line: false,
             label: "Message",
+            min_rows: 1.,
             max_rows: layout::COMPOSER_MAX_ROWS,
+        }
+    }
+
+    pub fn field(label: &'static str) -> Self {
+        Self {
+            step: text::LG,
+            single_line: true,
+            label,
+            min_rows: 1.,
+            max_rows: 1.,
+        }
+    }
+
+    pub fn area(label: &'static str, min_rows: f32, max_rows: f32) -> Self {
+        Self {
+            step: text::LG,
+            single_line: false,
+            label,
+            min_rows,
+            max_rows,
         }
     }
 
@@ -38,6 +60,7 @@ impl InputStyle {
             step: text::MD,
             single_line: true,
             label: "Search bots",
+            min_rows: 1.,
             max_rows: 1.,
         }
     }
@@ -123,6 +146,9 @@ pub fn bind_keys(cx: &mut App) {
 
 pub enum ComposerEvent {
     Submit,
+    /// The up or the down key in a field of one line: the owner moves through
+    /// what it lists under the field.
+    Step(bool),
 }
 
 pub struct Composer {
@@ -139,6 +165,7 @@ pub struct Composer {
     style: InputStyle,
     enabled: bool,
     enter_submits: bool,
+    max_length: Option<usize>,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -290,11 +317,33 @@ impl Composer {
             style,
             enabled: true,
             enter_submits: true,
+            max_length: None,
         }
+    }
+
+    /// The field stops taking text once it holds this many characters.
+    pub fn with_max_length(mut self, characters: usize) -> Self {
+        self.max_length = Some(characters);
+        self
     }
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.max_length
+            .is_some_and(|limit| self.content.chars().count() >= limit)
+    }
+
+    /// The part of `text` that still fits once `replaced` is taken out.
+    fn fitted(&self, text: &str, replaced: &Range<usize>) -> String {
+        let text = self.accepted(text);
+        let Some(limit) = self.max_length else {
+            return text;
+        };
+        let kept = self.content.chars().count() - self.content[replaced.clone()].chars().count();
+        text.chars().take(limit.saturating_sub(kept)).collect()
     }
 
     pub fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -328,7 +377,7 @@ impl Composer {
     }
 
     pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.content = self.accepted(text);
+        self.content = self.fitted(text, &(0..self.content.len()));
         let end = self.content.len();
         self.selected_range = end..end;
         self.selection_reversed = false;
@@ -516,11 +565,19 @@ impl Composer {
     }
 
     fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.vertical_target(-1), window, cx);
+        if self.style.single_line {
+            cx.emit(ComposerEvent::Step(false));
+        } else {
+            self.move_to(self.vertical_target(-1), window, cx);
+        }
     }
 
     fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.vertical_target(1), window, cx);
+        if self.style.single_line {
+            cx.emit(ComposerEvent::Step(true));
+        } else {
+            self.move_to(self.vertical_target(1), window, cx);
+        }
     }
 
     fn word_left(&mut self, _: &WordLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -763,8 +820,8 @@ impl EntityInputHandler for Composer {
         if !self.enabled {
             return;
         }
-        let new_text = &self.accepted(new_text);
         let range = self.replacement_range(range_utf16);
+        let new_text = &self.fitted(new_text, &range);
         self.content.replace_range(range.clone(), new_text);
         let cursor = range.start + new_text.len();
         self.selected_range = cursor..cursor;
@@ -786,8 +843,8 @@ impl EntityInputHandler for Composer {
         if !self.enabled {
             return;
         }
-        let new_text = &self.accepted(new_text);
         let range = self.replacement_range(range_utf16);
+        let new_text = &self.fitted(new_text, &range);
         self.content.replace_range(range.clone(), new_text);
         let inserted_end = range.start + new_text.len();
         self.marked_range = (!new_text.is_empty()).then_some(range.start..inserted_end);
@@ -1148,6 +1205,7 @@ impl Render for Composer {
                 div()
                     .id("composer-scroll")
                     .w_full()
+                    .min_h(step.leading * self.style.min_rows)
                     .max_h(step.leading * self.style.max_rows)
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)

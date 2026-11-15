@@ -1,5 +1,6 @@
 mod bots;
 mod preferences;
+mod search;
 
 pub use bots::{BotRow, NewBot};
 
@@ -14,7 +15,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -95,6 +96,35 @@ CREATE TABLE preferences (
 
 const SCHEMA_V5: &str = "
 ALTER TABLE conversations ADD COLUMN draft TEXT NOT NULL DEFAULT '';
+";
+
+const SCHEMA_V6: &str = "
+CREATE VIRTUAL TABLE event_text USING fts5(
+    body,
+    tokenize = 'trigram remove_diacritics 1',
+    content = '',
+    contentless_delete = 1
+);
+CREATE TRIGGER event_text_insert AFTER INSERT ON events
+WHEN new.kind IN ('user_text', 'message_text') AND json_valid(new.payload)
+BEGIN
+    INSERT INTO event_text (rowid, body) VALUES (new.id, json_extract(new.payload, '$.data'));
+END;
+CREATE TRIGGER event_text_update AFTER UPDATE OF payload ON events
+WHEN new.kind IN ('user_text', 'message_text')
+BEGIN
+    DELETE FROM event_text WHERE rowid = old.id;
+    INSERT INTO event_text (rowid, body)
+        SELECT new.id, json_extract(new.payload, '$.data') WHERE json_valid(new.payload);
+END;
+CREATE TRIGGER event_text_delete AFTER DELETE ON events
+WHEN old.kind IN ('user_text', 'message_text')
+BEGIN
+    DELETE FROM event_text WHERE rowid = old.id;
+END;
+INSERT INTO event_text (rowid, body)
+    SELECT id, json_extract(payload, '$.data') FROM events
+    WHERE kind IN ('user_text', 'message_text') AND json_valid(payload);
 ";
 
 const UNFINISHED_TURNS: &str = "
@@ -182,6 +212,13 @@ pub struct EventsPage {
     pub older: Option<i64>,
 }
 
+/// A part of a conversation that may end before its last event.
+pub struct EventsWindow {
+    pub events: Vec<TimedEvent>,
+    pub older: Option<i64>,
+    pub newer: Option<i64>,
+}
+
 pub struct Store {
     connection: Connection,
 }
@@ -231,6 +268,9 @@ impl Store {
         }
         if version < 5 {
             transaction.execute_batch(SCHEMA_V5)?;
+        }
+        if version < 6 {
+            transaction.execute_batch(SCHEMA_V6)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -550,16 +590,108 @@ impl Store {
         rows.truncate(limit);
         rows.reverse();
         let older = rows.first().map(|(id, ..)| *id).filter(|_| more);
-        let events = rows
-            .into_iter()
-            .map(|(_, payload, at_ms)| {
-                Ok(TimedEvent {
-                    at_ms,
-                    event: serde_json::from_str(&payload)?,
-                })
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        Ok(EventsPage { events, older })
+        Ok(EventsPage {
+            events: timed(rows)?,
+            older,
+        })
+    }
+
+    /// The events that show a stored event to a client that holds the ones
+    /// from `before` on. When at most `joined` events lie between the start of
+    /// the event's turn and `before`, all of them come and `newer` is empty.
+    /// Otherwise `page` events around the event come, and `newer` names the
+    /// last of them.
+    pub fn events_around(
+        &self,
+        conversation_id: i64,
+        event_id: i64,
+        before: i64,
+        joined: usize,
+        page: usize,
+    ) -> Result<EventsWindow, StoreError> {
+        let turn: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(id), ?2) FROM events
+             WHERE conversation_id = ?1 AND id <= ?2 AND kind = 'user_text'",
+            params![conversation_id, event_id],
+            |row| row.get(0),
+        )?;
+        let rows = self.event_rows(conversation_id, turn, before, joined.saturating_add(1))?;
+        let (rows, newer) = if rows.len() <= joined {
+            (rows, None)
+        } else {
+            let lead = i64::try_from(page / 2).unwrap_or(i64::MAX);
+            let from: i64 = self.connection.query_row(
+                "SELECT COALESCE(MIN(id), ?2) FROM (
+                     SELECT id FROM events
+                     WHERE conversation_id = ?1 AND id >= ?2 AND id <= ?3
+                     ORDER BY id DESC LIMIT ?4)",
+                params![conversation_id, turn, event_id, lead],
+                |row| row.get(0),
+            )?;
+            let mut rows =
+                self.event_rows(conversation_id, from, before, page.saturating_add(1))?;
+            let more = rows.len() > page;
+            rows.truncate(page);
+            let newer = rows.last().map(|(id, ..)| *id).filter(|_| more);
+            (rows, newer)
+        };
+        let lowest = rows.first().map_or(before, |(id, ..)| *id);
+        let more: bool = self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE conversation_id = ?1 AND id < ?2)",
+            params![conversation_id, lowest],
+            |row| row.get(0),
+        )?;
+        Ok(EventsWindow {
+            events: timed(rows)?,
+            older: more.then_some(lowest),
+            newer,
+        })
+    }
+
+    /// At most `limit` events after `after` and before `until`. `newer` names
+    /// the last of them when more lie before `until`.
+    pub fn events_between(
+        &self,
+        conversation_id: i64,
+        after: i64,
+        until: i64,
+        limit: usize,
+    ) -> Result<EventsWindow, StoreError> {
+        let from = after.saturating_add(1);
+        let mut rows = self.event_rows(conversation_id, from, until, limit.saturating_add(1))?;
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        let newer = rows.last().map(|(id, ..)| *id).filter(|_| more);
+        Ok(EventsWindow {
+            events: timed(rows)?,
+            older: None,
+            newer,
+        })
+    }
+
+    fn event_rows(
+        &self,
+        conversation_id: i64,
+        from: i64,
+        before: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, i64)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, payload, created_at_ms FROM events
+             WHERE conversation_id = ?1 AND id >= ?2 AND id < ?3
+             ORDER BY id LIMIT ?4",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement
+            .query_map(params![conversation_id, from, before, limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn draft(&self, conversation_id: i64) -> Result<String, StoreError> {
@@ -595,6 +727,18 @@ impl Store {
             .map(|payload| serde_json::from_str(payload).map_err(StoreError::from))
             .collect()
     }
+}
+
+fn timed(rows: Vec<(i64, String, i64)>) -> Result<Vec<TimedEvent>, StoreError> {
+    rows.into_iter()
+        .map(|(id, payload, at_ms)| {
+            Ok(TimedEvent {
+                id,
+                at_ms,
+                event: serde_json::from_str(&payload)?,
+            })
+        })
+        .collect()
 }
 
 fn kind(event: &Event) -> &'static str {
@@ -1293,10 +1437,12 @@ mod tests {
             page.events,
             vec![
                 TimedEvent {
+                    id: 1,
                     at_ms: 1_000,
                     event: Event::UserText("first".to_owned()),
                 },
                 TimedEvent {
+                    id: 2,
                     at_ms: 2_500,
                     event: Event::UserText("second".to_owned()),
                 },

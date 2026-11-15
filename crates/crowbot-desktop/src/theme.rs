@@ -327,6 +327,9 @@ pub mod duration {
     pub const COPIED: Duration = Duration::from_secs(2);
     pub const SHINE: Duration = Duration::from_millis(2250);
     pub const DRAFT_SAVE: Duration = Duration::from_millis(400);
+    pub const FIELD_SAVE: Duration = Duration::from_millis(600);
+    pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+    pub const FLASH: Duration = Duration::from_millis(1600);
     pub const QUIT_FLUSH: Duration = Duration::from_millis(60);
 }
 
@@ -348,7 +351,6 @@ pub mod size {
     pub const AVATAR_TILE_COMPACT: Pixels = px(48.);
     pub const AVATAR_HEADER: Pixels = px(18.);
     pub const AVATAR_HEADER_GLYPH: Pixels = px(10.);
-    pub const AVATAR_DIALOG: Pixels = px(44.);
     pub const AVATAR_RING: Pixels = px(2.);
     pub const BADGE: Pixels = px(18.);
     pub const BADGE_WORKING_WIDTH: Pixels = px(30.);
@@ -374,6 +376,19 @@ pub mod size {
     pub const JUMP: Pixels = px(44.);
     pub const SEND: Pixels = px(28.);
     pub const ACTION_ICON: Pixels = px(17.);
+    pub const AVATAR_CREATION: Pixels = px(72.);
+    pub const AVATAR_CREATION_GLYPH: Pixels = px(32.);
+    pub const AVATAR_TEMPLATE: Pixels = px(42.);
+    pub const AVATAR_TEMPLATE_GLYPH: Pixels = px(18.);
+    pub const AVATAR_PANEL: Pixels = px(62.);
+    pub const AVATAR_PANEL_GLYPH: Pixels = px(26.);
+    pub const AVATAR_RESULT: Pixels = px(20.);
+    pub const AVATAR_RESULT_GLYPH: Pixels = px(11.);
+    pub const SWATCH_BUTTON: Pixels = px(28.);
+    pub const SWATCH: Pixels = px(18.);
+    pub const GLYPH_CELL: Pixels = px(33.);
+    pub const GLYPH_CELL_TEXT: Pixels = px(16.);
+    pub const STATE_DOT: Pixels = px(8.);
 }
 
 pub mod layout {
@@ -452,6 +467,30 @@ pub mod layout {
     pub const COMPOSER_BOTTOM: Pixels = px(20.);
     pub const STATUS_ROW: Pixels = px(20.);
     pub const COMPOSER_MAX_ROWS: f32 = 8.;
+    pub const FIELD_HEIGHT: Pixels = px(38.);
+    pub const FIELD_PADDING_Y: Pixels = px(8.);
+    pub const FIELD_LABEL_INDENT: Pixels = px(8.);
+    pub const CREATION_WIDTH: Pixels = px(420.);
+    pub const CREATE_MIN_WIDTH: Pixels = px(132.);
+    pub const PURPOSE_MIN_ROWS: f32 = 2.;
+    pub const PURPOSE_MAX_ROWS: f32 = 10.;
+    pub const TEMPLATE_WIDTH: Pixels = px(256.);
+    pub const TEMPLATE_HEIGHT: Pixels = px(112.);
+    pub const PANEL_PADDING_X: Pixels = px(15.);
+    pub const PANEL_PADDING_BOTTOM: Pixels = px(28.);
+    pub const PANEL_ROW: Pixels = px(40.);
+    pub const INSTRUCTIONS_MIN_ROWS: f32 = 3.;
+    pub const INSTRUCTIONS_MAX_ROWS: f32 = 12.;
+    pub const SETTINGS_WIDTH: Pixels = px(760.);
+    pub const SETTINGS_HEIGHT: Pixels = px(520.);
+    pub const SETTINGS_NAV: Pixels = px(196.);
+    pub const SETTINGS_ROW: Pixels = px(64.);
+    pub const PALETTE_TOP: Pixels = px(112.);
+    pub const PALETTE_WIDTH: Pixels = px(640.);
+    pub const PALETTE_INPUT: Pixels = px(48.);
+    pub const PALETTE_RESULTS: Pixels = px(400.);
+    pub const PALETTE_ROW: Pixels = px(36.);
+    pub const PALETTE_HEADING: Pixels = px(28.);
 }
 
 #[cfg(test)]
@@ -612,7 +651,7 @@ mod tests {
         assert_eq!(compared, 84);
     }
 
-    const VIEWS: [&str; 13] = [
+    const VIEWS: [&str; 18] = [
         "main.rs",
         "composer.rs",
         "ui.rs",
@@ -626,6 +665,11 @@ mod tests {
         "workspace/compose.rs",
         "workspace/overlays.rs",
         "workspace/screens.rs",
+        "workspace/forms.rs",
+        "workspace/creation.rs",
+        "workspace/bot_panel.rs",
+        "workspace/settings.rs",
+        "workspace/palette.rs",
     ];
 
     fn literal_values(source: &str) -> Vec<String> {

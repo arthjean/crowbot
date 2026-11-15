@@ -34,10 +34,18 @@ impl Workspace {
         } else {
             "Collapse sidebar"
         };
-        let toggle = div().occlude().child(
-            ui::icon_button("toggle-sidebar", Icon::PanelLeft, label, theme)
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-        );
+        let toggle = div()
+            .occlude()
+            .flex()
+            .items_center()
+            .children((!shown.compact).then(|| {
+                ui::icon_button("open-settings", Icon::Settings, "Settings", theme)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
+            }))
+            .child(
+                ui::icon_button("toggle-sidebar", Icon::PanelLeft, label, theme)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            );
         div()
             .id("sidebar-topbar")
             .window_control_area(WindowControlArea::Drag)
@@ -166,10 +174,7 @@ impl Workspace {
         .child(
             ui::icon_button("new-bot", Icon::Plus, "New bot", theme)
                 .size(control::MD)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.new_bot();
-                    this.focus_composer(window, cx);
-                })),
+                .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx))),
         )
     }
 
@@ -198,10 +203,7 @@ impl Workspace {
                 row.justify_center()
                     .tooltip(ui::tooltip("Create your first bot"))
             })
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.new_bot();
-                this.focus_composer(window, cx);
-            }))
+            .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx)))
             .child(
                 div()
                     .flex_none()

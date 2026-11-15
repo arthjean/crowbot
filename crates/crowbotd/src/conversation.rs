@@ -15,11 +15,14 @@ use crate::daemon::Daemon;
 use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
-use crate::store::{BotRow, Conversation, Recorder, SharedStore, StoreError};
+use crate::store::{BotRow, Conversation, EventsPage, Recorder, SharedStore, StoreError};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const PAGE_EVENTS: usize = 200;
+/// How many events a client gets in one answer so that an event it asked for
+/// joins the ones it holds. Past that, it gets a page around the event.
+const JOINED_EVENTS: usize = 5 * PAGE_EVENTS;
 
 pub type Sink = UnboundedSender<ServerMessage>;
 
@@ -37,6 +40,19 @@ pub enum Command {
     },
     LoadOlder {
         before: i64,
+        sink: Sink,
+    },
+    /// A client wants an event that it has not loaded. It gets the events from
+    /// the start of that event's turn up to the oldest one it holds, or a page
+    /// around the event when too many lie between.
+    Reveal {
+        event_id: i64,
+        before: i64,
+        sink: Sink,
+    },
+    LoadNewer {
+        after: i64,
+        until: i64,
         sink: Sink,
     },
     SetDraft {
@@ -285,7 +301,56 @@ impl Actor {
                 sink,
             } => self.mark_read(connection, following, &sink),
             Command::Prompt { text, sink } => self.prompt(text, &sink),
-            Command::LoadOlder { before, sink } => self.load_older(before, &sink),
+            Command::LoadOlder { before, sink } => {
+                let page = self
+                    .store
+                    .with(|store| store.events_page(self.id, Some(before), PAGE_EVENTS));
+                self.send_older(page, &sink);
+            }
+            Command::Reveal {
+                event_id,
+                before,
+                sink,
+            } => {
+                let window = self.store.with(|store| {
+                    store.events_around(self.id, event_id, before, JOINED_EVENTS, PAGE_EVENTS)
+                });
+                let answer = match window {
+                    Ok(window) if window.newer.is_some() => ServerMessage::EventsWindow {
+                        conversation_id: self.id,
+                        events: window.events,
+                        older: window.older,
+                        newer: window.newer,
+                    },
+                    Ok(window) => ServerMessage::OlderEvents {
+                        conversation_id: self.id,
+                        events: window.events,
+                        older: window.older,
+                    },
+                    Err(error) => ServerMessage::OlderEventsFailed {
+                        conversation_id: self.id,
+                        message: error.to_string(),
+                    },
+                };
+                sink.send(answer).ok();
+            }
+            Command::LoadNewer { after, until, sink } => {
+                let page = self
+                    .store
+                    .with(|store| store.events_between(self.id, after, until, PAGE_EVENTS));
+                let answer = match page {
+                    Ok(page) => ServerMessage::NewerEvents {
+                        conversation_id: self.id,
+                        events: page.events,
+                        newer: page.newer,
+                    },
+                    Err(error) => ServerMessage::NewerEventsFailed {
+                        conversation_id: self.id,
+                        message: error.to_string(),
+                    },
+                };
+                sink.send(answer).ok();
+            }
             Command::SetDraft { text, sink } => {
                 if let Err(error) = self.store.with(|store| store.set_draft(self.id, &text)) {
                     report(&sink, error.to_string());
@@ -450,10 +515,7 @@ impl Actor {
         })
     }
 
-    fn load_older(&mut self, before: i64, sink: &Sink) {
-        let page = self
-            .store
-            .with(|store| store.events_page(self.id, Some(before), PAGE_EVENTS));
+    fn send_older(&self, page: Result<EventsPage, StoreError>, sink: &Sink) {
         let answer = match page {
             Ok(page) => ServerMessage::OlderEvents {
                 conversation_id: self.id,

@@ -52,25 +52,35 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let shown = self.sidebar.shown(f32::from(window.viewport_size().width));
+        let width = f32::from(window.viewport_size().width);
+        let shown = self.sidebar.shown(width);
+        // The panel takes its place beside the conversation while enough of
+        // it stays, and covers it in a narrower window.
+        let docked =
+            width - shown.width - f32::from(layout::SIDE_PANEL) >= layout::CONVERSATION_MIN;
         let live = self.live();
         self.guard_focus(live, window, cx);
         let composing =
             self.history.is_none() && self.selected_bot.is_some() && self.load_error.is_none();
+        let creating = self.creation.is_some();
         let pane = div()
             .id("conversation")
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
-            .flex_col()
-            .child(
+            .flex_col();
+        let pane = if creating {
+            pane.child(self.render_creation(theme, window, cx))
+        } else {
+            pane.child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .child(self.render_transcript(theme, cx)),
             )
-            .children(composing.then(|| self.render_composer(theme, window, cx)));
+            .children(composing.then(|| self.render_composer(theme, window, cx)))
+        };
         let panes = div()
             .relative()
             .flex_1()
@@ -79,7 +89,7 @@ impl Workspace {
             .child(self.render_sidebar(shown, theme, cx))
             .child(pane)
             .child(self.render_resizer(shown, theme, cx))
-            .children(self.render_side_panel(theme, cx))
+            .children(self.render_bot_panel(docked, theme, window, cx))
             .children((!live).then(|| {
                 div()
                     .id("inert")
@@ -94,7 +104,11 @@ impl Workspace {
                 .h(layout::TOP_ROW)
                 .flex()
                 .child(self.render_sidebar_topbar(shown, theme, cx))
-                .child(self.render_header(theme, window, cx))
+                .child(if creating {
+                    self.render_creation_header(theme, cx)
+                } else {
+                    self.render_header(theme, window, cx)
+                })
                 .children(self.render_caption_buttons(theme, window, cx)),
         )
         .child(

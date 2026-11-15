@@ -1,22 +1,12 @@
-use crowbot_protocol::PermissionLevel;
 use gpui::{
     AnyElement, Context, Div, FontWeight, KeyDownEvent, Role, SharedString, Stateful, anchored,
     deferred, div, point, prelude::*,
 };
 
-use super::{MenuTarget, Workspace, model_label};
+use super::{Confirm, MenuTarget, Workspace};
 use crate::assets::Icon;
-use crate::theme::{
-    Theme, control, font, icon as icon_size, layout, opacity, radius, size, space, text,
-};
+use crate::theme::{Theme, control, icon as icon_size, layout, opacity, radius, size, space, text};
 use crate::ui::{self, ButtonKind};
-
-fn permission_label(level: PermissionLevel) -> &'static str {
-    match level {
-        PermissionLevel::AskFirst => "Ask first",
-        PermissionLevel::FullAccess => "Full access",
-    }
-}
 
 impl Workspace {
     pub(super) fn render_menu(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -365,137 +355,114 @@ impl Workspace {
         )
     }
 
-    pub(super) fn render_side_panel(
+    pub(super) fn render_confirm_dialog(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.side_panel {
-            return None;
-        }
-        let bot = &self.selected_bot()?.bot;
-        let field = |label: &'static str, value: Div| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::S1)
-                .child(
-                    div()
-                        .text_size(text::SM.size)
-                        .line_height(text::SM.leading)
-                        .text_color(theme.text_muted)
-                        .child(label),
-                )
-                .child(value)
+        let confirm = self.confirm?;
+        let (Confirm::DeleteHistory(bot_id) | Confirm::FullAccess(bot_id)) = confirm;
+        let name = self.bot(bot_id)?.bot.name.clone();
+        let (title, description, action, kind) = match confirm {
+            Confirm::DeleteHistory(_) => (
+                format!("Delete the history of {name}?"),
+                format!(
+                    "This removes every conversation of {name}, with all of their messages. The bot, its settings, and its folder stay. This cannot be undone."
+                ),
+                "Delete history",
+                ButtonKind::Danger,
+            ),
+            Confirm::FullAccess(_) => (
+                format!("Give {name} full access?"),
+                format!(
+                    "{name} then runs every tool without asking, in this conversation and in the next ones. The requests that wait now are allowed."
+                ),
+                "Move to Full access",
+                ButtonKind::Primary,
+            ),
         };
-        let plain = |value: SharedString| div().child(value);
-        let or = |value: &str, missing: &'static str| -> SharedString {
-            if value.trim().is_empty() {
-                missing.into()
-            } else {
-                value.to_owned().into()
-            }
-        };
+        let (title, description) = (SharedString::from(title), SharedString::from(description));
+        let dialog = div()
+            .id("confirm-dialog")
+            .debug_selector(|| "confirm-dialog".into())
+            .occlude()
+            .role(Role::AlertDialog)
+            .aria_label(title.clone())
+            .aria_description(description.clone())
+            .w(layout::DIALOG_WIDTH)
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .rounded(radius::XL)
+            .bg(theme.canvas)
+            .border_1()
+            .border_color(theme.dialog_ring)
+            .shadow(theme.menu_shadow())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.cancel_confirm(window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .p(space::S6)
+                    .flex()
+                    .flex_col()
+                    .gap(space::S2)
+                    .child(
+                        div()
+                            .text_size(text::XL.size)
+                            .line_height(text::XL.leading)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "confirm-description".into())
+                            .text_size(text::LG.size)
+                            .line_height(text::LG.leading)
+                            .text_color(theme.text_muted)
+                            .child(description),
+                    ),
+            )
+            .child(
+                div()
+                    .px(space::S6)
+                    .py(space::S4)
+                    .flex()
+                    .justify_end()
+                    .gap(space::S2)
+                    .border_t_1()
+                    .border_color(theme.border_strong)
+                    .child(
+                        ui::button("confirm-cancel", "Cancel", ButtonKind::Ghost, theme)
+                            .track_focus(&self.confirm_focus)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_confirm(window, cx)),
+                            ),
+                    )
+                    .child(
+                        ui::button("confirm-ok", action, kind, theme)
+                            .track_focus(&self.confirm_ok_focus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.confirmed(window, cx);
+                            })),
+                    ),
+            );
         Some(
             div()
-                .id("side-panel")
-                .debug_selector(|| "side-panel".into())
+                .id("confirm-overlay")
                 .occlude()
-                .role(Role::Group)
-                .aria_label("Bot settings")
                 .absolute()
-                .top_0()
-                .bottom_0()
-                .right_0()
-                .w(layout::SIDE_PANEL)
-                .max_w_full()
+                .inset_0()
+                .p(space::S6)
                 .flex()
-                .flex_col()
-                .rounded_r(radius::CARD)
-                .bg(theme.canvas)
-                .border_l_1()
-                .border_color(theme.border_strong)
-                .child(
-                    div()
-                        .flex_none()
-                        .h(layout::SIDE_PANEL_HEADER)
-                        .px(space::S1)
-                        .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .child(div().flex_none().size(control::SM))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_center()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("Bot settings"),
-                        )
-                        .child(
-                            ui::icon_button(
-                                "close-side-panel",
-                                Icon::X,
-                                "Close bot settings",
-                                theme,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_side_panel(cx))),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("side-panel-body")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .p(space::S4)
-                        .flex()
-                        .flex_col()
-                        .gap(space::S4)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(space::S3)
-                                .child(ui::avatar(bot, size::AVATAR_DIALOG, text::XXL.size, theme))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_size(text::XL.size)
-                                                .line_height(text::XL.leading)
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(SharedString::from(bot.name.clone())),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_color(theme.text_muted)
-                                                .child(or(&bot.title, "No title")),
-                                        ),
-                                ),
-                        )
-                        .child(field(
-                            "Instructions",
-                            plain(or(&bot.instructions, "No instructions")),
-                        ))
-                        .child(field("Model", plain(model_label(&bot.model))))
-                        .child(field("Provider", plain(or(&bot.provider, "Not set"))))
-                        .child(field(
-                            "Permissions",
-                            plain(permission_label(bot.permission_level).into()),
-                        ))
-                        .child(field(
-                            "Folder",
-                            plain(or(&bot.workspace, "Not set")).font(font::mono()),
-                        )),
-                )
+                .items_center()
+                .justify_center()
+                .bg(theme.overlay)
+                .on_click(cx.listener(|this, _, window, cx| this.cancel_confirm(window, cx)))
+                .child(dialog)
                 .into_any_element(),
         )
     }

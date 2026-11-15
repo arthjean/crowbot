@@ -2,6 +2,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 /// The longest name a bot can have, in characters.
 pub const BOT_NAME_LENGTH: usize = 80;
+/// The longest title a bot can have, in characters.
+pub const BOT_TITLE_LENGTH: usize = 80;
+/// The longest instructions a bot can have, in characters.
+pub const BOT_INSTRUCTIONS_LENGTH: usize = 20_000;
+/// The longest model name a bot can have, in characters.
+pub const BOT_MODEL_LENGTH: usize = 200;
+/// The colors an avatar is picked from, as `#rrggbb`. A bot created with no
+/// avatar takes the next one of this list.
+pub const AVATAR_COLORS: [&str; 8] = [
+    "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316",
+];
 
 /// What a bot may do without asking.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

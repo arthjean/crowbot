@@ -11,8 +11,19 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-agent-client-protocol = { version = "=5.2.0", features = ["process"] }
+agent-client-protocol = { version = "=5.2.0", features = ["process", "unstable_auth_status"] }
 crowbot-protocol = { workspace = true, features = ["transport"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

@@ -1,6 +1,6 @@
 //! How a bot and its conversations read in the window.
 
-use crowbot_protocol::{BotSummary, Event};
+use crowbot_protocol::Event;
 use gpui::Rgba;
 
 /// The color of an avatar written `#rrggbb`.
@@ -19,14 +19,6 @@ pub fn marks_read(event: &Event) -> bool {
     !matches!(event, Event::MessageText(_) | Event::ThoughtText(_))
 }
 
-/// The name of the next bot made with no form: "Bot 1", "Bot 2", and so on.
-pub fn next_name(bots: &[BotSummary]) -> String {
-    (bots.len() + 1..)
-        .map(|number| format!("Bot {number}"))
-        .find(|name| bots.iter().all(|known| known.bot.name != *name))
-        .unwrap_or_else(|| "Bot".to_owned())
-}
-
 /// How long ago a conversation was last active, in a few words.
 pub fn ago(now_ms: i64, then_ms: i64) -> String {
     let minutes = (now_ms - then_ms).max(0) / 60_000;
@@ -40,10 +32,9 @@ pub fn ago(now_ms: i64, then_ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crowbot_protocol::{BotState, TurnEnd};
+    use crowbot_protocol::TurnEnd;
 
     use super::*;
-    use crate::sidebar::tests::summary;
 
     #[test]
     fn an_avatar_color_is_read_from_its_hex_form() {
@@ -64,16 +55,6 @@ mod tests {
             provider: None,
         }));
         assert!(marks_read(&Event::UserText("go".to_owned())));
-    }
-
-    #[test]
-    fn a_bot_made_with_no_form_takes_the_next_free_name() {
-        assert_eq!(next_name(&[]), "Bot 1");
-        let bots = [
-            summary(1, "Atlas", BotState::Idle),
-            summary(2, "Bot 3", BotState::Idle),
-        ];
-        assert_eq!(next_name(&bots), "Bot 4");
     }
 
     #[test]

@@ -279,9 +279,11 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "crowbot-protocol",
+ "libc",
  "rusqlite",
  "serde_json",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]
@@ -1247,6 +1249,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys",

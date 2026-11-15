@@ -1,10 +1,15 @@
 mod bot_list;
+mod bot_panel;
 mod compose;
 mod conversation;
+mod creation;
+mod forms;
 mod header;
 mod overlays;
+mod palette;
 mod rows;
 mod screens;
+mod settings;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -15,9 +20,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crowbot_protocol::{
-    ApprovalDecision, BotDraft, BotPatch, BotState, BotSummary, ClientMessage, ConversationSummary,
-    Event, MESSAGE_LENGTH, PermissionLevel, Preferences, QueueState, SendShortcut, ServerMessage,
-    TimedEvent,
+    ApprovalDecision, BOT_INSTRUCTIONS_LENGTH, BOT_MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH,
+    BotPatch, BotState, BotSummary, ClientMessage, ConversationSummary, DaemonInfo, Event,
+    MESSAGE_LENGTH, PermissionLevel, Preferences, ProviderStatus, QueueState, SEARCH_QUERY_LENGTH,
+    SendShortcut, ServerMessage, TimedEvent,
 };
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, KeyBinding,
@@ -26,6 +32,10 @@ use gpui::{
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use self::bot_panel::{BotPanel, PanelField};
+use self::creation::Creation;
+use self::palette::{Palette, RevealTarget};
+use self::settings::Section;
 use crate::bots;
 use crate::composer::{self, Composer, ComposerEvent, InputStyle};
 use crate::connection::{Connection, ConnectionEvent};
@@ -38,13 +48,24 @@ use crate::sidebar;
 use crate::theme::{Theme, duration, font, layout, text};
 use crate::transcript::{RowKind, Transcript};
 
-actions!(workspace, [FocusNext, FocusPrevious, CopySelection]);
+actions!(
+    workspace,
+    [
+        FocusNext,
+        FocusPrevious,
+        CopySelection,
+        ToggleSearch,
+        ToggleSettings
+    ]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", FocusNext, None),
         KeyBinding::new("shift-tab", FocusPrevious, None),
         KeyBinding::new(COPY_KEYS, CopySelection, None),
+        KeyBinding::new(SEARCH_KEYS, ToggleSearch, None),
+        KeyBinding::new(SETTINGS_KEYS, ToggleSettings, None),
     ]);
 }
 
@@ -52,6 +73,14 @@ pub fn bind_keys(cx: &mut App) {
 const COPY_KEYS: &str = "cmd-c";
 #[cfg(not(target_os = "macos"))]
 const COPY_KEYS: &str = "ctrl-c";
+#[cfg(target_os = "macos")]
+const SEARCH_KEYS: &str = "cmd-k";
+#[cfg(not(target_os = "macos"))]
+const SEARCH_KEYS: &str = "ctrl-k";
+#[cfg(target_os = "macos")]
+const SETTINGS_KEYS: &str = "cmd-,";
+#[cfg(not(target_os = "macos"))]
+const SETTINGS_KEYS: &str = "ctrl-,";
 
 const HEAD: usize = 1;
 
@@ -90,6 +119,19 @@ enum Copied {
     Code(i64, usize),
 }
 
+/// The live end of a conversation, kept aside while the rows show an older
+/// part of it. The events that arrive still go there.
+struct Tail {
+    transcript: Transcript,
+    list: ListState,
+    texts: HashMap<i64, RowText>,
+    toggled_steps: HashSet<i64>,
+    shown_outputs: HashSet<(i64, usize)>,
+    step_lists: HashMap<i64, ScrollHandle>,
+    loading_older: bool,
+    older_error: Option<SharedString>,
+}
+
 struct OpenConversation {
     id: i64,
     title: Option<String>,
@@ -106,9 +148,48 @@ struct OpenConversation {
     new_messages: usize,
     loading_older: bool,
     older_error: Option<SharedString>,
+    flash: Option<(i64, Instant)>,
+    /// With a value, the rows show a part of the history that stops before
+    /// the live end, and this holds what the rows show otherwise.
+    tail: Option<Box<Tail>>,
+    /// The last event of the part on screen, when later ones are not loaded.
+    newer: Option<i64>,
+    loading_newer: bool,
+    newer_failed: bool,
 }
 
 impl OpenConversation {
+    /// Swaps what the rows show with the live end kept aside.
+    fn swap_tail(&mut self) {
+        let Some(tail) = self.tail.as_mut() else {
+            return;
+        };
+        std::mem::swap(&mut self.transcript, &mut tail.transcript);
+        std::mem::swap(&mut self.list, &mut tail.list);
+        std::mem::swap(&mut self.texts, &mut tail.texts);
+        std::mem::swap(&mut self.toggled_steps, &mut tail.toggled_steps);
+        std::mem::swap(&mut self.shown_outputs, &mut tail.shown_outputs);
+        std::mem::swap(&mut self.step_lists, &mut tail.step_lists);
+        std::mem::swap(&mut self.loading_older, &mut tail.loading_older);
+        std::mem::swap(&mut self.older_error, &mut tail.older_error);
+    }
+
+    /// Shows the live end again and drops the part of the history.
+    fn restore_tail(&mut self) {
+        self.swap_tail();
+        self.tail = None;
+        self.newer = None;
+        self.loading_newer = false;
+        self.newer_failed = false;
+    }
+
+    /// The events of the live end, whatever the rows show.
+    fn live(&self) -> &Transcript {
+        self.tail
+            .as_ref()
+            .map_or(&self.transcript, |tail| &tail.transcript)
+    }
+
     fn distance_from_end(&self) -> f32 {
         f32::from(
             self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y,
@@ -116,7 +197,9 @@ impl OpenConversation {
     }
 
     fn away_from_end(&self) -> bool {
-        !self.list.is_following_tail() && self.distance_from_end() > layout::STICK_THRESHOLD
+        self.tail.is_some()
+            || (!self.list.is_following_tail()
+                && self.distance_from_end() > layout::STICK_THRESHOLD)
     }
 
     fn messages(&self) -> usize {
@@ -141,6 +224,20 @@ struct Menu {
     position: Option<Point<Pixels>>,
     highlighted: Option<usize>,
     restore_focus: Option<FocusHandle>,
+}
+
+/// What a dialog asks before the client sends it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confirm {
+    DeleteHistory(i64),
+    FullAccess(i64),
+}
+
+/// A focus move decided where no window is at hand: the next frame makes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusRequest {
+    Composer,
+    CreationName,
 }
 
 struct ResizeSidebar;
@@ -192,6 +289,30 @@ pub struct Workspace {
     confirm_delete: Option<i64>,
     dialog_focus: FocusHandle,
     dialog_confirm_focus: FocusHandle,
+    confirm: Option<Confirm>,
+    confirm_focus: FocusHandle,
+    confirm_ok_focus: FocusHandle,
+    creation: Option<Creation>,
+    creation_name: Entity<Composer>,
+    creation_purpose: Entity<Composer>,
+    creation_model: Entity<Composer>,
+    panel: BotPanel,
+    panel_name: Entity<Composer>,
+    panel_title: Entity<Composer>,
+    panel_instructions: Entity<Composer>,
+    panel_model: Entity<Composer>,
+    /// The bot updates that wait for the daemon's answer, oldest first, each
+    /// with the bot and the field of the settings panel that sent it.
+    updates: VecDeque<Option<(i64, PanelField)>>,
+    settings: Option<Section>,
+    settings_focus: FocusHandle,
+    providers: Vec<ProviderStatus>,
+    providers_asked: bool,
+    daemon_info: Option<DaemonInfo>,
+    palette: Option<Palette>,
+    palette_query: Entity<Composer>,
+    reveal: Option<RevealTarget>,
+    focus_request: Option<FocusRequest>,
     side_panel: bool,
     hidden_open: bool,
     title_width: Rc<Cell<Pixels>>,
@@ -211,12 +332,56 @@ impl Workspace {
     ) -> Self {
         let composer = cx.new(|cx| Composer::new("Message the bot", InputStyle::message(), cx));
         let search = cx.new(|cx| Composer::new("Search", InputStyle::search(), cx));
-        let subscriptions = vec![
+        let field = |label, placeholder: &'static str, limit, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                Composer::new(placeholder, InputStyle::field(label), cx).with_max_length(limit)
+            })
+        };
+        let area = |label, placeholder: &'static str, rows: (f32, f32), cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                let mut input =
+                    Composer::new(placeholder, InputStyle::area(label, rows.0, rows.1), cx)
+                        .with_max_length(BOT_INSTRUCTIONS_LENGTH);
+                input.set_enter_submits(false);
+                input
+            })
+        };
+        let creation_name = field("Name", "Name your bot", BOT_NAME_LENGTH, cx);
+        let creation_purpose = area(
+            "Purpose",
+            "What should this bot do?",
+            (layout::PURPOSE_MIN_ROWS, layout::PURPOSE_MAX_ROWS),
+            cx,
+        );
+        let creation_model = field("Model", "Default model", BOT_MODEL_LENGTH, cx);
+        let panel_name = field("Bot name", "Name", BOT_NAME_LENGTH, cx);
+        let panel_title = field(
+            "Bot title",
+            "A short role, such as Researcher",
+            BOT_TITLE_LENGTH,
+            cx,
+        );
+        let panel_instructions = area(
+            "Bot instructions",
+            "What this bot does, and how",
+            (layout::INSTRUCTIONS_MIN_ROWS, layout::INSTRUCTIONS_MAX_ROWS),
+            cx,
+        );
+        let panel_model = field("Bot model", "Default model", BOT_MODEL_LENGTH, cx);
+        let palette_query = field(
+            "Search everything",
+            "Search bots, conversations, and messages",
+            SEARCH_QUERY_LENGTH,
+            cx,
+        );
+        let mut subscriptions = vec![
             cx.subscribe_in(
                 &composer,
                 window,
-                |this, _, event: &ComposerEvent, window, cx| match event {
-                    ComposerEvent::Submit => this.send_message(window, cx),
+                |this, _, event: &ComposerEvent, window, cx| {
+                    if matches!(event, ComposerEvent::Submit) {
+                        this.send_message(window, cx);
+                    }
                 },
             ),
             cx.observe(&search, |_, _, cx| cx.notify()),
@@ -224,9 +389,55 @@ impl Workspace {
             cx.observe_window_appearance(window, |this, _, cx| this.apply_theme(cx)),
             cx.on_app_quit(|this, cx| {
                 this.save_draft();
+                this.flush_panel(cx);
                 cx.background_executor().timer(duration::QUIT_FLUSH)
             }),
+            cx.subscribe_in(
+                &creation_name,
+                window,
+                |this, _, event: &ComposerEvent, window, cx| {
+                    if matches!(event, ComposerEvent::Submit) {
+                        this.create_bot(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &creation_model,
+                window,
+                |this, _, event: &ComposerEvent, window, cx| {
+                    if matches!(event, ComposerEvent::Submit) {
+                        this.create_bot(window, cx);
+                    }
+                },
+            ),
+            cx.observe(&creation_name, |this, _, cx| {
+                if let Some(creation) = this.creation.as_mut() {
+                    creation.name_error = None;
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                &palette_query,
+                window,
+                |this, _, event: &ComposerEvent, window, cx| match event {
+                    ComposerEvent::Submit => this.open_active_hit(window, cx),
+                    ComposerEvent::Step(forward) => this.palette_step(*forward, cx),
+                },
+            ),
+            cx.observe(&palette_query, |this, _, cx| this.palette_typed(cx)),
         ];
+        for (input, field) in [
+            (&panel_name, PanelField::Name),
+            (&panel_title, PanelField::Title),
+            (&panel_instructions, PanelField::Instructions),
+            (&panel_model, PanelField::Model),
+        ] {
+            subscriptions.push(cx.observe(input, move |this, _, cx| this.panel_edited(field, cx)));
+            let handle = input.focus_handle(cx);
+            subscriptions.push(cx.on_blur(&handle, window, move |this, window, cx| {
+                this.save_panel_field(field, Some(window), cx);
+            }));
+        }
         let events = cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this
@@ -277,6 +488,28 @@ impl Workspace {
             confirm_delete: None,
             dialog_focus: cx.focus_handle(),
             dialog_confirm_focus: cx.focus_handle(),
+            confirm: None,
+            confirm_focus: cx.focus_handle(),
+            confirm_ok_focus: cx.focus_handle(),
+            creation: None,
+            creation_name,
+            creation_purpose,
+            creation_model,
+            panel: BotPanel::default(),
+            panel_name,
+            panel_title,
+            panel_instructions,
+            panel_model,
+            updates: VecDeque::new(),
+            settings: None,
+            settings_focus: cx.focus_handle(),
+            providers: Vec::new(),
+            providers_asked: false,
+            daemon_info: None,
+            palette: None,
+            palette_query,
+            reveal: None,
+            focus_request: None,
             side_panel: false,
             hidden_open: false,
             title_width: Rc::new(Cell::new(Pixels::MAX)),
@@ -324,6 +557,8 @@ impl Workspace {
             self.menu = None;
             self.confirm_delete = None;
             self.confirm_full_access = None;
+            self.confirm = None;
+            self.palette = None;
             self.link_lost();
         }
         self.composer
@@ -340,6 +575,13 @@ impl Workspace {
                 if let Some(conversation_id) = self.selected {
                     self.connection
                         .send(ClientMessage::OpenConversation { conversation_id });
+                }
+                self.providers_asked = false;
+                if self.creation.is_some() || self.settings.is_some() || self.side_panel {
+                    self.ask_providers();
+                }
+                if self.settings.is_some() {
+                    self.connection.send(ClientMessage::GetDaemonInfo);
                 }
             }
             ConnectionEvent::Starting => self.set_link(Link::Starting, cx),
@@ -389,6 +631,7 @@ impl Workspace {
                     self.forget_selection();
                     self.select_first_bot();
                 }
+                self.creation_follows_bots();
             }
             ServerMessage::BotChanged(summary) => {
                 let id = summary.bot.id;
@@ -400,11 +643,56 @@ impl Workspace {
                     Some(known) => *known = summary,
                     None => self.bots.push(summary),
                 }
+                self.creation_yields(cx);
                 if self.selected_bot.is_none() {
                     self.select_bot(id);
                 }
             }
-            ServerMessage::BotCreated { bot_id } => self.select_bot(bot_id),
+            ServerMessage::BotCreated { bot_id } => {
+                if self
+                    .creation
+                    .as_ref()
+                    .is_some_and(|creation| creation.creating)
+                {
+                    self.creation = None;
+                    self.focus_request = Some(FocusRequest::Composer);
+                }
+                self.select_bot(bot_id);
+            }
+            ServerMessage::BotUpdated { .. } => {
+                if let Some(Some((bot_id, field))) = self.updates.pop_front() {
+                    self.panel_saved(bot_id, field);
+                }
+            }
+            ServerMessage::HistoryDeleted {
+                bot_id,
+                current_conversation_id,
+            } => {
+                if let Some(known) = self.bots.iter_mut().find(|known| known.bot.id == bot_id) {
+                    known.current_conversation_id = current_conversation_id;
+                }
+                if self.selected_bot == Some(bot_id) {
+                    // The conversation on screen is gone: there is nothing to close.
+                    self.selected = None;
+                    self.open = None;
+                    self.history = None;
+                    self.reveal = None;
+                    self.select(current_conversation_id);
+                }
+            }
+            ServerMessage::Providers(providers) => self.providers = providers,
+            ServerMessage::ProviderChanged(status) => {
+                match self
+                    .providers
+                    .iter_mut()
+                    .find(|known| known.id == status.id)
+                {
+                    Some(known) => *known = status,
+                    None => self.providers.push(status),
+                }
+            }
+            ServerMessage::DaemonInfo(info) => self.daemon_info = Some(info),
+            ServerMessage::SearchResults(results) => self.palette_results(results),
             ServerMessage::BotDeleted { bot_id } => {
                 self.deleting.remove(&bot_id);
                 self.pending.retain(|change| change.before.bot.id != bot_id);
@@ -416,6 +704,12 @@ impl Workspace {
                     self.forget_selection();
                     self.select_first_bot();
                 }
+                if self.confirm == Some(Confirm::DeleteHistory(bot_id))
+                    || self.confirm == Some(Confirm::FullAccess(bot_id))
+                {
+                    self.confirm = None;
+                }
+                self.creation_follows_bots();
             }
             ServerMessage::Conversations {
                 bot_id,
@@ -488,6 +782,11 @@ impl Workspace {
                     new_messages: 0,
                     loading_older: false,
                     older_error: None,
+                    flash: None,
+                    tail: None,
+                    newer: None,
+                    loading_newer: false,
+                    newer_failed: false,
                 });
                 self.selection.take();
                 self.confirm_full_access = None;
@@ -499,6 +798,7 @@ impl Workspace {
                 self.load_error = None;
                 self.conversation_shown();
                 self.forget_started_edit();
+                self.continue_reveal();
             }
             ServerMessage::QueueChanged {
                 conversation_id,
@@ -553,6 +853,7 @@ impl Workspace {
                     }
                     open.loading_older = false;
                     open.older_error = None;
+                    self.continue_reveal();
                 }
             }
             ServerMessage::OlderEventsFailed {
@@ -563,6 +864,92 @@ impl Workspace {
                     open.loading_older = false;
                     open.older_error = Some(message.into());
                     open.list.remeasure_items(0..HEAD);
+                    self.reveal = None;
+                }
+            }
+            ServerMessage::EventsWindow {
+                conversation_id,
+                events,
+                older,
+                newer,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    open.restore_tail();
+                    open.loading_older = false;
+                    open.older_error = None;
+                    open.list.remeasure_items(0..HEAD);
+                    open.list.set_follow_mode(FollowMode::Tail);
+                    let transcript = Transcript::from_events(events, older);
+                    let list = ListState::new(
+                        transcript.rows().len() + HEAD,
+                        ListAlignment::Top,
+                        layout::LIST_OVERDRAW,
+                    );
+                    open.tail = Some(Box::new(Tail {
+                        transcript,
+                        list,
+                        texts: HashMap::new(),
+                        toggled_steps: HashSet::new(),
+                        shown_outputs: HashSet::new(),
+                        step_lists: HashMap::new(),
+                        loading_older: false,
+                        older_error: None,
+                    }));
+                    open.swap_tail();
+                    open.newer = newer;
+                    self.selection.take();
+                    self.continue_reveal();
+                }
+            }
+            ServerMessage::NewerEvents {
+                conversation_id,
+                events,
+                newer,
+            } => {
+                let Some(open) = self.open.as_mut().filter(|open| {
+                    open.id == conversation_id && open.tail.is_some() && open.loading_newer
+                }) else {
+                    return;
+                };
+                open.loading_newer = false;
+                open.newer = newer;
+                // The page may complete the turn that the part on screen cut:
+                // the rows are built again, and the list keeps the ones that
+                // did not change.
+                let top = open.list.logical_scroll_top();
+                let older = open.transcript.older();
+                let mut previous = std::mem::take(&mut open.transcript);
+                let mut all = previous.take_events();
+                all.extend(events);
+                open.transcript = Transcript::from_events(all, older);
+                let rows = open.transcript.rows();
+                let same = previous
+                    .rows()
+                    .iter()
+                    .zip(rows)
+                    .take_while(|(before, after)| before == after)
+                    .count();
+                for row in &rows[same..] {
+                    open.texts.remove(&row.key);
+                }
+                open.list
+                    .splice(HEAD + same..HEAD + previous.rows().len(), rows.len() - same);
+                if top.item_ix >= HEAD + same {
+                    open.list.scroll_to(top);
+                }
+                if newer.is_none() {
+                    self.join_tail();
+                }
+            }
+            ServerMessage::NewerEventsFailed {
+                conversation_id,
+                message,
+            } => {
+                if let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) {
+                    open.loading_newer = false;
+                    open.newer_failed = true;
+                    self.notice =
+                        Some(format!("The later messages were not loaded: {message}").into());
                 }
             }
             ServerMessage::MessageAccepted { conversation_id } => {
@@ -609,9 +996,45 @@ impl Workspace {
                     open.turn_model = Some(model);
                 }
             }
-            ServerMessage::Error { message } | ServerMessage::InvalidField { message, .. } => {
-                self.fail(message);
+            ServerMessage::Error { message } => self.refused(None, message),
+            ServerMessage::InvalidField { field, message } => self.refused(Some(&field), message),
+        }
+    }
+
+    /// The daemon did not do what was asked. The refusal goes to the form
+    /// that waits for an answer, when one does.
+    fn refused(&mut self, field: Option<&str>, message: String) {
+        if let Some(creation) = self.creation.as_mut().filter(|creation| creation.creating) {
+            creation.creating = false;
+            if field == Some("name") {
+                creation.name_error = Some(message.into());
+                self.focus_request = Some(FocusRequest::CreationName);
+            } else {
+                creation.error = Some(message.into());
             }
+            return;
+        }
+        if field != Some("sidebar_width")
+            && let Some(Some((bot_id, field))) = self.updates.pop_front()
+        {
+            self.panel_refused(bot_id, field, message);
+            return;
+        }
+        self.fail(message);
+    }
+
+    /// Sends a change to a bot. The daemon answers each one, in order.
+    fn send_update(&mut self, bot_id: i64, patch: BotPatch, field: Option<PanelField>) {
+        self.updates.push_back(field.map(|field| (bot_id, field)));
+        self.connection
+            .send(ClientMessage::UpdateBot { bot_id, patch });
+    }
+
+    /// Asks for the state of the providers, once per connection.
+    fn ask_providers(&mut self) {
+        if self.live() && !self.providers_asked {
+            self.providers_asked = true;
+            self.connection.send(ClientMessage::ListProviders);
         }
     }
 
@@ -632,6 +1055,13 @@ impl Workspace {
     }
 
     fn link_lost(&mut self) {
+        self.updates.clear();
+        self.panel_link_lost();
+        self.reveal = None;
+        if let Some(creation) = self.creation.as_mut().filter(|creation| creation.creating) {
+            creation.creating = false;
+            creation.error = Some("The bot was not created: the daemon cannot be reached.".into());
+        }
         let open_id = self.open.as_ref().map(|open| open.id);
         let unsent: Vec<String> = std::mem::take(&mut self.unconfirmed)
             .into_iter()
@@ -734,7 +1164,24 @@ impl Workspace {
         self.select(current);
     }
 
+    /// An event of the open conversation arrived. While the rows show an
+    /// older part of the history, it goes to the live end kept aside.
     fn apply(&mut self, conversation_id: i64, event: Event, at_ms: i64) {
+        let hidden = self
+            .open
+            .as_mut()
+            .filter(|open| open.id == conversation_id)
+            .is_some_and(|open| {
+                open.swap_tail();
+                open.tail.is_some()
+            });
+        self.apply_to_end(conversation_id, event, at_ms, hidden);
+        if hidden && let Some(open) = self.open.as_mut() {
+            open.swap_tail();
+        }
+    }
+
+    fn apply_to_end(&mut self, conversation_id: i64, event: Event, at_ms: i64, hidden: bool) {
         let Some(open) = self.open.as_mut().filter(|open| open.id == conversation_id) else {
             return;
         };
@@ -762,8 +1209,12 @@ impl Workspace {
         if ends {
             self.confirm_full_access = None;
         }
-        let away = (!open.list.is_following_tail()).then(|| open.messages());
-        let change = open.transcript.apply(TimedEvent { at_ms, event });
+        let away = (hidden || !open.list.is_following_tail()).then(|| open.messages());
+        let change = open.transcript.apply(TimedEvent {
+            id: 0,
+            at_ms,
+            event,
+        });
         if change.first < change.before {
             open.list
                 .remeasure_items(change.first + HEAD..change.before + HEAD);
@@ -797,7 +1248,7 @@ impl Workspace {
             }
         }
         if let Some(before) = away {
-            if open.distance_from_end() <= layout::STICK_THRESHOLD {
+            if !hidden && open.distance_from_end() <= layout::STICK_THRESHOLD {
                 open.list.set_follow_mode(FollowMode::Tail);
                 if !open.at_end.replace(true) && self.history.is_none() {
                     self.connection.send(ClientMessage::MarkRead {
@@ -925,6 +1376,49 @@ impl Workspace {
         }
     }
 
+    /// Asks for the events that follow the part of the history on screen.
+    pub(super) fn load_newer(&mut self) {
+        let live = self.live();
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let until = open
+            .tail
+            .as_ref()
+            .and_then(|tail| tail.transcript.first_event_id());
+        if let (Some(after), Some(until)) = (open.newer, until)
+            && live
+            && !open.loading_newer
+            && !open.newer_failed
+        {
+            open.loading_newer = true;
+            self.connection.send(ClientMessage::LoadNewerEvents {
+                conversation_id: open.id,
+                after,
+                until,
+            });
+        }
+    }
+
+    /// The part of the history on screen reached the live end: both become
+    /// one, and the rows on screen stay where they are.
+    fn join_tail(&mut self) {
+        let Some(open) = self.open.as_mut().filter(|open| open.tail.is_some()) else {
+            return;
+        };
+        let top = open.list.logical_scroll_top();
+        let older = open.transcript.older();
+        let events = open.transcript.take_events();
+        open.restore_tail();
+        let added = open.transcript.prepend(events, older);
+        open.list.splice(HEAD..HEAD, added);
+        open.list.remeasure();
+        open.list.set_follow_mode(FollowMode::Normal);
+        open.list.scroll_to(top);
+        open.flash = None;
+        self.selection.take();
+    }
+
     fn follow_scroll(&mut self) {
         let Some(open) = self.open.as_mut() else {
             return;
@@ -943,6 +1437,12 @@ impl Workspace {
 
     fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         if let Some(open) = self.open.as_mut() {
+            if open.tail.is_some() {
+                open.restore_tail();
+                open.flash = None;
+                self.selection.take();
+                self.reveal = None;
+            }
             open.list.set_follow_mode(FollowMode::Tail);
             open.new_messages = 0;
             if !open.at_end.replace(true) && self.history.is_none() {
@@ -1048,7 +1548,7 @@ impl Workspace {
             && self
                 .open
                 .as_ref()
-                .is_some_and(|open| open.transcript.turn_active())
+                .is_some_and(|open| open.live().turn_active())
             && self.composer.read(cx).text().trim().is_empty()
     }
 
@@ -1128,6 +1628,19 @@ impl Workspace {
                 }
             }
         });
+        if open.tail.is_some() {
+            // A message sent from a part of the history shows at the live end.
+            open.restore_tail();
+            open.flash = None;
+            self.selection.take();
+            self.reveal = None;
+            if !open.at_end.replace(true) && self.history.is_none() {
+                self.connection.send(ClientMessage::MarkRead {
+                    conversation_id: open.id,
+                    following: true,
+                });
+            }
+        }
         open.list.set_follow_mode(FollowMode::Tail);
         open.new_messages = 0;
         self.notice = None;
@@ -1139,20 +1652,10 @@ impl Workspace {
     }
 
     fn open_bot(&mut self, bot_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.creation = None;
         self.select_bot(bot_id);
         self.focus_composer(window, cx);
         cx.notify();
-    }
-
-    fn new_bot(&mut self) {
-        if self.live() {
-            self.connection.send(ClientMessage::CreateBot {
-                draft: BotDraft {
-                    name: bots::next_name(&self.bots),
-                    ..BotDraft::default()
-                },
-            });
-        }
     }
 
     fn new_chat(&mut self) {
@@ -1261,13 +1764,14 @@ impl Workspace {
         };
         if open.answering.insert(approval_id) {
             open.list.remeasure();
-            self.connection.send(ClientMessage::UpdateBot {
+            self.send_update(
                 bot_id,
-                patch: BotPatch {
+                BotPatch {
                     permission_level: Some(PermissionLevel::FullAccess),
                     ..BotPatch::default()
                 },
-            });
+                None,
+            );
         }
     }
 
@@ -1276,7 +1780,7 @@ impl Workspace {
         let running = open
             .turn_model
             .as_ref()
-            .filter(|_| open.transcript.turn_active())?;
+            .filter(|_| open.live().turn_active())?;
         let next = &self.selected_bot()?.bot.model;
         (running != next).then(|| model_label(next))
     }
@@ -1439,32 +1943,36 @@ impl Workspace {
                 self.focus_composer(window, cx);
             }
             MenuAction::Edit(bot_id) => {
+                self.creation = None;
                 self.select_bot(bot_id);
                 self.side_panel = true;
+                self.ask_providers();
             }
             MenuAction::Duplicate(bot_id) => {
                 self.connection.send(ClientMessage::DuplicateBot { bot_id });
             }
             MenuAction::SetPinned(bot_id, pinned) => {
                 if self.change_bot(bot_id, |summary| summary.bot.pinned = pinned) {
-                    self.connection.send(ClientMessage::UpdateBot {
+                    self.send_update(
                         bot_id,
-                        patch: BotPatch {
+                        BotPatch {
                             pinned: Some(pinned),
                             ..BotPatch::default()
                         },
-                    });
+                        None,
+                    );
                 }
             }
             MenuAction::SetHidden(bot_id, hidden) => {
                 if self.change_bot(bot_id, |summary| summary.bot.hidden = hidden) {
-                    self.connection.send(ClientMessage::UpdateBot {
+                    self.send_update(
                         bot_id,
-                        patch: BotPatch {
+                        BotPatch {
                             hidden: Some(hidden),
                             ..BotPatch::default()
                         },
-                    });
+                        None,
+                    );
                 }
             }
             MenuAction::Delete(bot_id) => {
@@ -1473,10 +1981,7 @@ impl Workspace {
                     window.focus(&self.dialog_focus, cx);
                 }
             }
-            MenuAction::NewBot => {
-                self.new_bot();
-                self.focus_composer(window, cx);
-            }
+            MenuAction::NewBot => self.open_creation(window, cx),
             MenuAction::MarkAllRead => {
                 for bot_id in sidebar::unread_bots(&self.bots) {
                     self.mark_read(bot_id);
@@ -1528,7 +2033,32 @@ impl Workspace {
 
     fn toggle_side_panel(&mut self, cx: &mut Context<Self>) {
         self.side_panel = !self.side_panel;
+        if self.side_panel {
+            self.ask_providers();
+        }
         cx.notify();
+    }
+
+    fn cancel_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.take().is_some() {
+            self.focus_composer(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn confirmed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirm) = self.confirm.take() else {
+            return;
+        };
+        self.focus_composer(window, cx);
+        cx.notify();
+        if !self.live() {
+            return;
+        }
+        match confirm {
+            Confirm::DeleteHistory(bot_id) => self.delete_history(bot_id),
+            Confirm::FullAccess(bot_id) => self.save_level(bot_id, PermissionLevel::FullAccess),
+        }
     }
 }
 
@@ -1573,6 +2103,15 @@ impl Render for Workspace {
             self.composer
                 .update(cx, |composer, cx| composer.set_text(&text, window, cx));
         }
+        self.sync_panel(window, cx);
+        match self.focus_request.take() {
+            Some(FocusRequest::Composer) => self.focus_composer(window, cx),
+            Some(FocusRequest::CreationName) => {
+                window.focus(&self.creation_name.focus_handle(cx), cx);
+            }
+            None => {}
+        }
+        self.highlight_revealed(window);
         let enter_sends = self.preferences.send_shortcut == SendShortcut::Enter;
         self.composer
             .update(cx, |composer, _| composer.set_enter_submits(enter_sends));
@@ -1590,6 +2129,12 @@ impl Render for Workspace {
                 this.focus_step(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| {
+                this.toggle_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSettings, window, cx| {
+                this.toggle_settings(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &composer::Copy, _, cx| this.copy_selection(cx)))
             .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 if this.selection.take().is_some() {
@@ -1610,6 +2155,7 @@ impl Render for Workspace {
             .font(font::sans())
             .text_size(text::MD.size)
             .line_height(text::MD.leading);
+        let shell = self.screen() == Screen::Shell;
         let root = match self.screen() {
             Screen::Shell => self.render_shell(root, &theme, window, cx),
             screen => root.child(self.render_screen(&screen, &theme, window, cx)),
@@ -1618,6 +2164,13 @@ impl Render for Workspace {
             .children(self.render_floating_menu(&theme, cx))
             .children(self.render_delete_dialog(&theme, cx))
             .children(self.render_full_access_dialog(&theme, cx))
+            .children(self.render_confirm_dialog(&theme, cx))
+            .children(
+                shell
+                    .then(|| self.render_settings_dialog(&theme, cx))
+                    .flatten(),
+            )
+            .children(shell.then(|| self.render_palette(&theme, cx)).flatten())
             .children(self.render_toast(&theme, cx))
             .into_any_element();
         match &self.frames {
@@ -1631,6 +2184,18 @@ impl Workspace {
     fn focus_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             self.close_menu(window, cx);
+        } else if self.palette.is_some() {
+            window.focus(&self.palette_query.focus_handle(cx), cx);
+        } else if self.settings.is_some() {
+            // The dialog keeps the focus: a step that leaves it comes back in.
+            if forward {
+                window.focus_next(cx);
+            } else {
+                window.focus_prev(cx);
+            }
+            if !self.settings_focus.contains_focused(window, cx) {
+                window.focus(&self.settings_focus, cx);
+            }
         } else if !self.live() {
             if matches!(self.link, Link::Failed(_) | Link::Incompatible { .. }) {
                 window.focus(&self.retry_focus, cx);
@@ -1641,6 +2206,14 @@ impl Workspace {
                 &self.dialog_confirm_focus
             } else {
                 &self.dialog_focus
+            };
+            window.focus(next, cx);
+        } else if self.confirm.is_some() {
+            let cancel = self.confirm_focus.is_focused(window);
+            let next = if cancel {
+                &self.confirm_ok_focus
+            } else {
+                &self.confirm_focus
             };
             window.focus(next, cx);
         } else if self.confirm_full_access.is_some() {

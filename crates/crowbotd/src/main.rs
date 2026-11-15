@@ -99,7 +99,12 @@ async fn run(args: Args) -> Result<(), String> {
         eprintln!("[crowbotd] ended {interrupted} turn(s) that a previous daemon left running");
     }
     eprintln!("[crowbotd] listening on {endpoint}");
-    let daemon = Arc::new(Daemon::new(SharedStore::new(store), bots_dir, args.command));
+    let daemon = Arc::new(Daemon::new(
+        SharedStore::new(store),
+        db,
+        bots_dir,
+        args.command,
+    ));
     server::serve(daemon, listener).await;
     Ok(())
 }

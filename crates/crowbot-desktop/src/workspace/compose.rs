@@ -230,10 +230,10 @@ impl Workspace {
     ) -> Div {
         let focused = self.composer.focus_handle(cx).is_focused(window);
         let activity = self.open.as_ref().and_then(|open| {
-            if !open.transcript.turn_active() {
+            if !open.live().turn_active() {
                 return None;
             }
-            Some(if open.transcript.has_waiting_approval() {
+            Some(if open.live().has_waiting_approval() {
                 "The bot is waiting for your approval."
             } else {
                 "The bot is working…"

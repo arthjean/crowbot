@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event};
 use crate::preferences::{Preferences, PreferencesPatch};
+use crate::provider::{DaemonInfo, ProviderStatus};
+use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -100,6 +102,36 @@ pub enum ClientMessage {
     SetPreferences {
         patch: PreferencesPatch,
     },
+    DeleteHistory {
+        bot_id: i64,
+    },
+    RevealEvent {
+        conversation_id: i64,
+        before: i64,
+        event_id: i64,
+    },
+    /// Asks for the events after `after`, up to the event `until`, which the
+    /// client already holds.
+    LoadNewerEvents {
+        conversation_id: i64,
+        after: i64,
+        until: i64,
+    },
+    ListProviders,
+    CheckProvider {
+        provider: String,
+    },
+    SignIn {
+        provider: String,
+    },
+    CancelSignIn {
+        provider: String,
+    },
+    GetDaemonInfo,
+    Search {
+        request: u64,
+        query: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +176,24 @@ pub enum ServerMessage {
         conversation_id: i64,
         message: String,
     },
+    /// Answers `RevealEvent` when too many events lie between the event and
+    /// the ones the client holds: a part of the history around the event.
+    /// `newer` names its last event when later ones exist before the client's.
+    EventsWindow {
+        conversation_id: i64,
+        events: Vec<TimedEvent>,
+        older: Option<i64>,
+        newer: Option<i64>,
+    },
+    NewerEvents {
+        conversation_id: i64,
+        events: Vec<TimedEvent>,
+        newer: Option<i64>,
+    },
+    NewerEventsFailed {
+        conversation_id: i64,
+        message: String,
+    },
     MessageAccepted {
         conversation_id: i64,
     },
@@ -177,6 +227,17 @@ pub enum ServerMessage {
         conversation_id: i64,
         model: Option<String>,
     },
+    BotUpdated {
+        bot_id: i64,
+    },
+    HistoryDeleted {
+        bot_id: i64,
+        current_conversation_id: i64,
+    },
+    Providers(Vec<ProviderStatus>),
+    ProviderChanged(ProviderStatus),
+    DaemonInfo(DaemonInfo),
+    SearchResults(SearchResults),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +251,8 @@ pub struct ConversationSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimedEvent {
+    #[serde(default)]
+    pub id: i64,
     pub at_ms: i64,
     pub event: Event,
 }
@@ -277,6 +340,7 @@ mod tests {
         let sent = ServerMessage::OlderEvents {
             conversation_id: 3,
             events: vec![TimedEvent {
+                id: 40,
                 at_ms: 1_700_000_000_000,
                 event: Event::UserText("hi".to_owned()),
             }],
@@ -285,7 +349,7 @@ mod tests {
         let wire = serde_json::to_string(&sent).unwrap();
         assert_eq!(
             wire,
-            r#"{"type":"older_events","data":{"conversation_id":3,"events":[{"at_ms":1700000000000,"event":{"type":"user_text","data":"hi"}}],"older":41}}"#
+            r#"{"type":"older_events","data":{"conversation_id":3,"events":[{"id":40,"at_ms":1700000000000,"event":{"type":"user_text","data":"hi"}}],"older":41}}"#
         );
         assert_eq!(serde_json::from_str::<ServerMessage>(&wire).unwrap(), sent);
     }

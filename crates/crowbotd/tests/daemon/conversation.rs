@@ -24,7 +24,11 @@ async fn turn(client: &mut Client, conversation_id: i64, text: &str) -> Vec<Time
             && about == conversation_id
         {
             let ended = event.ends_turn();
-            events.push(TimedEvent { at_ms, event });
+            events.push(TimedEvent {
+                id: 0,
+                at_ms,
+                event,
+            });
             if ended {
                 return events;
             }
@@ -306,7 +310,7 @@ const OLD_EVENTS: [(&str, &str); 6] = [
     ),
 ];
 
-fn write_fourth_database(path: &Path) {
+pub fn write_fourth_database(path: &Path) {
     let connection = rusqlite::Connection::open(path).unwrap();
     connection.execute_batch(FOURTH_SCHEMA).unwrap();
     let folder = path.parent().unwrap().to_string_lossy().into_owned();
@@ -407,7 +411,7 @@ async fn a_version_4_database_migrates_and_its_older_events_still_load() {
 
     let database = rusqlite::Connection::open(daemon.database()).unwrap();
     let count = |sql: &str| -> i64 { database.query_row(sql, [], |row| row.get(0)).unwrap() };
-    assert_eq!(count("PRAGMA user_version"), 5);
+    assert_eq!(count("PRAGMA user_version"), 6);
     assert_eq!(count("SELECT COUNT(*) FROM events"), 6);
     assert_eq!(count("SELECT COUNT(*) FROM conversations"), 1);
     drop(database);

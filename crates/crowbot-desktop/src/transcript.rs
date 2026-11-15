@@ -169,6 +169,33 @@ impl Transcript {
         transcript
     }
 
+    /// A part of the history that stops before the live end of its
+    /// conversation: no turn runs in it.
+    pub fn from_events(events: Vec<TimedEvent>, older: Option<i64>) -> Self {
+        let mut transcript = Self {
+            older,
+            ..Self::default()
+        };
+        for event in events {
+            transcript.push(event, true);
+        }
+        transcript.settle(false);
+        transcript
+    }
+
+    /// Gives the loaded events away. The rows stay as they are.
+    pub fn take_events(&mut self) -> Vec<TimedEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// The id of the first loaded event, when the daemon stored it.
+    pub fn first_event_id(&self) -> Option<i64> {
+        self.events
+            .first()
+            .map(|event| event.id)
+            .filter(|id| *id > 0)
+    }
+
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
@@ -179,6 +206,32 @@ impl Transcript {
 
     pub fn older(&self) -> Option<i64> {
         self.older
+    }
+
+    /// Whether the stored event with this id is among the loaded ones.
+    pub fn holds_event(&self, id: i64) -> bool {
+        self.older.is_none_or(|before| id >= before)
+            && self
+                .events
+                .iter()
+                .any(|event| event.id > 0 && event.id <= id)
+    }
+
+    /// The row of the message that the stored event with this id is part of.
+    /// A text that was stored in several events shows as the first of them.
+    pub fn row_of_event(&self, id: i64) -> Option<usize> {
+        let index = self
+            .events
+            .iter()
+            .rposition(|event| event.id > 0 && event.id <= id)?;
+        let seq = self.first_seq + i64::try_from(index).ok()?;
+        self.rows.iter().rposition(|row| {
+            row.key.div_euclid(4) <= seq
+                && matches!(
+                    row.kind,
+                    RowKind::User { .. } | RowKind::Answer { .. } | RowKind::Thought { .. }
+                )
+        })
     }
 
     pub fn has_waiting_approval(&self) -> bool {
@@ -781,7 +834,11 @@ pub mod tests {
     pub const NOON: i64 = 1_762_862_400_000;
 
     pub fn at(at_ms: i64, event: Event) -> TimedEvent {
-        TimedEvent { at_ms, event }
+        TimedEvent {
+            id: 0,
+            at_ms,
+            event,
+        }
     }
 
     pub fn snapshot(

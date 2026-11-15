@@ -137,7 +137,9 @@ impl ClientState {
             ClientMessage::ListBots => daemon.list_bots().map(reply).map_err(failed),
             ClientMessage::CreateBot { draft } => created(daemon.create_bot(draft)),
             ClientMessage::DuplicateBot { bot_id } => created(daemon.duplicate_bot(bot_id)),
-            ClientMessage::UpdateBot { bot_id, patch } => daemon.update_bot(bot_id, patch),
+            ClientMessage::UpdateBot { bot_id, patch } => daemon
+                .update_bot(bot_id, patch)
+                .map(|()| reply(ServerMessage::BotUpdated { bot_id })),
             ClientMessage::DeleteBot { bot_id } => {
                 let (daemon, sink) = (daemon.clone(), sink.clone());
                 tokio::spawn(async move {
@@ -146,6 +148,33 @@ impl ClientState {
                     }
                 });
                 Ok(())
+            }
+            ClientMessage::DeleteHistory { bot_id } => {
+                let (daemon, sink) = (daemon.clone(), sink.clone());
+                tokio::spawn(async move {
+                    if let Err(message) = daemon.delete_history(bot_id).await {
+                        sink.send(ServerMessage::Error { message }).ok();
+                    }
+                });
+                Ok(())
+            }
+            ClientMessage::ListProviders => {
+                reply(daemon.list_providers());
+                Ok(())
+            }
+            ClientMessage::CheckProvider { provider } => {
+                daemon.check_provider(&provider).map_err(failed)
+            }
+            ClientMessage::SignIn { provider } => daemon.sign_in(&provider).map_err(failed),
+            ClientMessage::CancelSignIn { provider } => {
+                daemon.cancel_sign_in(&provider).map_err(failed)
+            }
+            ClientMessage::GetDaemonInfo => {
+                reply(daemon.info());
+                Ok(())
+            }
+            ClientMessage::Search { request, query } => {
+                daemon.search(request, &query).map(reply).map_err(failed)
             }
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
@@ -223,6 +252,42 @@ impl ClientState {
                         sink: sink.clone(),
                     }),
                     Err(message) => reply(ServerMessage::OlderEventsFailed {
+                        conversation_id,
+                        message,
+                    }),
+                }
+                Ok(())
+            }
+            ClientMessage::RevealEvent {
+                conversation_id,
+                before,
+                event_id,
+            } => {
+                match daemon.conversation(conversation_id) {
+                    Ok(handle) => handle.send(Command::Reveal {
+                        event_id,
+                        before,
+                        sink: sink.clone(),
+                    }),
+                    Err(message) => reply(ServerMessage::OlderEventsFailed {
+                        conversation_id,
+                        message,
+                    }),
+                }
+                Ok(())
+            }
+            ClientMessage::LoadNewerEvents {
+                conversation_id,
+                after,
+                until,
+            } => {
+                match daemon.conversation(conversation_id) {
+                    Ok(handle) => handle.send(Command::LoadNewer {
+                        after,
+                        until,
+                        sink: sink.clone(),
+                    }),
+                    Err(message) => reply(ServerMessage::NewerEventsFailed {
                         conversation_id,
                         message,
                     }),

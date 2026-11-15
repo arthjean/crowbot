@@ -41,19 +41,36 @@
 //! counter while it runs, so a test can tell whether the process is alive. When
 //! `FAKE_AGENT_SYSTEM_PROMPT` is set, the agent advertises that it takes a
 //! system prompt at session creation.
+//!
+//! When `FAKE_AGENT_AUTH` names a file, the agent reports a sign-in: it is
+//! signed in when the file holds `authenticated`, and signed out otherwise. It
+//! then offers one sign-in method of the `terminal` kind, which runs this
+//! program with `--sign-in`. That run reads how to behave from the file of the
+//! same name with the extension `mode`: `wait` never ends and starts a child
+//! that never ends either, `guest` signs in at once and leaves behind a child
+//! that goes on for a few seconds (as a sign-in leaves the browser it opened),
+//! `fail` exits with an error, a number waits that many milliseconds before it
+//! signs in, and no file signs in at once. A run that waits rewrites a growing
+//! counter in the files with the extensions `beat` (itself) and `child` (its
+//! child).
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 const HEARTBEAT: &str = "FAKE_AGENT_HEARTBEAT";
 const SYSTEM_PROMPT: &str = "FAKE_AGENT_SYSTEM_PROMPT";
+const AUTH: &str = "FAKE_AGENT_AUTH";
+const SIGNED_IN: &str = "authenticated";
 const MODELS: [&str; 2] = ["fast", "smart"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the process that a finished sign-in leaves behind goes on.
+const GUEST_LIFETIME: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const SAMPLE: &str = "## Release notes
@@ -451,10 +468,42 @@ impl Agent {
                             json!({ "resume": {}, "systemPrompt": {} })
                         } else {
                             json!({ "resume": {} })
+                        },
+                        "auth": if auth_file().is_some() {
+                            json!({ "status": {} })
+                        } else {
+                            json!({})
                         }
                     },
-                    "authMethods": []
+                    "authMethods": if auth_file().is_some()
+                        && params["clientCapabilities"]["auth"]["terminal"] == true
+                    {
+                        json!([{
+                            "id": "fake-login",
+                            "name": "Fake login",
+                            "type": "terminal",
+                            "args": ["--sign-in"]
+                        }])
+                    } else {
+                        json!([])
+                    }
                 }),
+            ),
+            "auth/status" if auth_file().is_some() => self.respond(
+                &id,
+                if auth_file().is_some_and(|file| signed_in(&file)) {
+                    json!({
+                        "state": SIGNED_IN,
+                        "accounts": [{
+                            "label": "Fake Plan",
+                            "active": true,
+                            "email": "person@example.com",
+                            "organization": "Example Org"
+                        }]
+                    })
+                } else {
+                    json!({ "state": "unauthenticated" })
+                },
             ),
             "session/new" => self.respond(
                 &id,
@@ -532,7 +581,68 @@ fn started_at() -> u128 {
         .map_or(0, |elapsed| elapsed.as_nanos())
 }
 
+fn auth_file() -> Option<PathBuf> {
+    std::env::var_os(AUTH).map(PathBuf::from)
+}
+
+fn signed_in(file: &Path) -> bool {
+    std::fs::read_to_string(file).is_ok_and(|state| state.trim() == SIGNED_IN)
+}
+
+/// Rewrites a growing counter in the file, for ever or for a given time.
+fn beat(file: &Path, lifetime: Option<Duration>) -> ! {
+    let started = Instant::now();
+    let mut beat = 0_u64;
+    while lifetime.is_none_or(|lifetime| started.elapsed() < lifetime) {
+        std::fs::write(file, beat.to_string()).ok();
+        beat = beat.wrapping_add(1);
+        std::thread::sleep(HEARTBEAT_INTERVAL);
+    }
+    std::process::exit(0)
+}
+
+fn start_child(argument: &str) {
+    let child = std::env::current_exe()
+        .and_then(|program| std::process::Command::new(program).arg(argument).spawn());
+    if child.is_err() {
+        std::process::exit(3);
+    }
+}
+
+/// The run that a client starts for the `terminal` sign-in method.
+fn sign_in(file: &Path) -> ! {
+    let mode = std::fs::read_to_string(file.with_extension("mode")).unwrap_or_default();
+    match mode.trim() {
+        "wait" => {
+            start_child("--sign-in-child");
+            beat(&file.with_extension("beat"), None)
+        }
+        "guest" => {
+            start_child("--sign-in-guest");
+            let written = std::fs::write(file, SIGNED_IN);
+            std::process::exit(i32::from(written.is_err()))
+        }
+        "fail" => std::process::exit(1),
+        delay => {
+            std::thread::sleep(Duration::from_millis(delay.parse().unwrap_or(0)));
+            let written = std::fs::write(file, SIGNED_IN);
+            std::process::exit(i32::from(written.is_err()))
+        }
+    }
+}
+
 fn main() {
+    if let Some(file) = auth_file() {
+        if std::env::args().any(|argument| argument == "--sign-in") {
+            sign_in(&file);
+        }
+        if std::env::args().any(|argument| argument == "--sign-in-child") {
+            beat(&file.with_extension("child"), None);
+        }
+        if std::env::args().any(|argument| argument == "--sign-in-guest") {
+            beat(&file.with_extension("child"), Some(GUEST_LIFETIME));
+        }
+    }
     if let Some(path) = std::env::var_os(HEARTBEAT) {
         std::thread::spawn(move || {
             let mut beat = 0_u64;

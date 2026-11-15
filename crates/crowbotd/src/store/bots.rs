@@ -229,6 +229,32 @@ impl Store {
         Ok(deleted > 0)
     }
 
+    /// Removes every conversation of a bot, with their events and their queues,
+    /// and gives the bot a new, empty one. `None` means the bot does not exist.
+    /// The new conversation is stored first, so it never takes the id of a
+    /// conversation that this call removes.
+    pub fn delete_history(&self, bot_id: i64) -> Result<Option<i64>, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let Some(current) = self.insert_conversation(bot_id)? else {
+            return Ok(None);
+        };
+        for owned in ["queue", "events"] {
+            transaction.execute(
+                &format!(
+                    "DELETE FROM {owned} WHERE conversation_id IN
+                        (SELECT id FROM conversations WHERE bot_id = ?1)"
+                ),
+                params![bot_id],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM conversations WHERE bot_id = ?1 AND id != ?2",
+            params![bot_id, current],
+        )?;
+        transaction.commit()?;
+        Ok(Some(current))
+    }
+
     pub fn conversation_ids(&self, bot_id: i64) -> Result<Vec<i64>, StoreError> {
         let mut statement = self
             .connection

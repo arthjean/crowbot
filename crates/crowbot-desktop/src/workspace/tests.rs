@@ -1,4 +1,5 @@
 mod conversation;
+mod setup;
 
 use crowbot_protocol::{
     Appearance, BotPatch, BotState, BotSummary, ClientMessage, ConversationSnapshot,
@@ -61,6 +62,7 @@ fn snapshot(id: i64, bot_id: i64, events: Vec<Event>) -> ConversationSnapshot {
         .into_iter()
         .enumerate()
         .map(|(index, event)| TimedEvent {
+            id: index as i64 + 1,
             at_ms: NOON + index as i64 * 1_000,
             event,
         });
@@ -162,23 +164,26 @@ fn the_loading_cover_stays_until_the_first_bot_list_arrives(cx: &mut TestAppCont
 
 #[gpui::test]
 fn the_empty_list_opens_bot_creation(cx: &mut TestAppContext) {
-    let (_workspace, mut daemon, cx) = open(cx);
+    let (workspace, mut daemon, cx) = open(cx);
     daemon.connect(Vec::new(), cx);
     daemon.sent();
 
+    assert!(shown(cx, "creation"));
     click(cx, "create-first-bot");
-    let sent = daemon.sent();
-    assert!(
-        matches!(&sent[..], [ClientMessage::CreateBot { draft }] if draft.name == "Bot 1"),
-        "{sent:?}"
-    );
+    assert_eq!(daemon.sent(), [], "no bot is made before the form is sent");
+    assert!(shown(cx, "creation"));
+    cx.simulate_input("Atlas");
+    workspace.read_with(cx, |this, cx| {
+        assert_eq!(this.creation_name.read(cx).text(), "Atlas");
+    });
 }
 
 #[gpui::test]
 fn no_open_bot_means_no_header_controls(cx: &mut TestAppContext) {
     let (_workspace, mut daemon, cx) = open(cx);
     daemon.connect(Vec::new(), cx);
-    assert!(shown(cx, "conversation-header"));
+    assert!(shown(cx, "creation-header"));
+    assert!(!shown(cx, "conversation-header"));
     for control in [
         "open-bot-settings",
         "current-model",
@@ -533,11 +538,9 @@ fn the_empty_area_menu_creates_a_bot_and_marks_all_read(cx: &mut TestAppContext)
 
     right_click(cx, empty);
     click(cx, "menu-item-0");
-    let sent = daemon.sent();
-    assert!(
-        matches!(&sent[..], [ClientMessage::CreateBot { .. }]),
-        "{sent:?}"
-    );
+    assert_eq!(daemon.sent(), [ClientMessage::ListProviders]);
+    assert!(shown(cx, "creation"));
+    assert!(shown(cx, "cancel-creation"));
 }
 
 #[gpui::test]

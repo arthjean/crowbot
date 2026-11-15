@@ -100,7 +100,7 @@ impl Workspace {
         let running = self.open.as_ref().and_then(|open| {
             open.turn_model
                 .as_ref()
-                .filter(|_| open.transcript.turn_active())
+                .filter(|_| open.live().turn_active())
         });
         let model = model_label(running.unwrap_or(&summary.bot.model));
         let history_open = self.history.is_some();

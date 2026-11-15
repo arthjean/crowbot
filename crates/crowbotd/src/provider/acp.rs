@@ -1,10 +1,13 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind,
+    AuthCapabilities, AuthMethod, AuthState, AuthStatusRequest, CancelNotification,
+    ClientCapabilities, ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind,
     PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue, SessionId,
@@ -15,27 +18,207 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, Error, ErrorCode};
 use crowbot_protocol::{
-    APPROVAL_TARGET_BYTES, Event, FailureCause, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolKind,
-    ToolStatus, TurnEnd, cut_text,
+    APPROVAL_TARGET_BYTES, Event, FailureCause, ProviderState, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES,
+    ToolKind, ToolStatus, TurnEnd, cut_text,
 };
 use serde_json::{Map, Value};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
 pub struct AgentProfile {
+    /// The name a person reads.
+    pub name: &'static str,
     pub command: String,
     pub session_meta: Option<Map<String, Value>>,
     pub session_mode: Option<String>,
+    /// Where a person gets the program that starts the agent, when it is missing.
+    pub runtime_url: Option<&'static str>,
 }
 
 impl AgentProfile {
     pub fn generic(command: String) -> Self {
         Self {
+            name: "Custom agent",
             command,
             session_meta: None,
             session_mode: None,
+            runtime_url: None,
         }
     }
+}
+
+/// How long an agent gets to start and tell its sign-in state. The first start
+/// of an adapter can download it.
+const PROBE_PATIENCE: Duration = Duration::from_secs(60);
+const PROBE_DETAIL_BYTES: usize = 300;
+
+/// The agent's own sign-in, as a command to run: the agent command followed by
+/// the arguments of its first sign-in method of the `terminal` kind.
+#[derive(Clone)]
+pub struct SignInCommand {
+    pub program: PathBuf,
+    pub arguments: Vec<String>,
+    pub environment: BTreeMap<String, String>,
+}
+
+/// What an agent tells about itself with no session.
+pub struct Probe {
+    pub state: ProviderState,
+    /// The label of the signed-in account, such as the name of a plan. The
+    /// rest of what the agent tells about the account is dropped here.
+    pub account: Option<String>,
+    pub detail: Option<String>,
+    pub sign_in: Option<SignInCommand>,
+}
+
+impl Probe {
+    fn without_answer(state: ProviderState, detail: impl Into<String>) -> Self {
+        Self {
+            state,
+            account: None,
+            detail: Some(short(detail.into())),
+            sign_in: None,
+        }
+    }
+}
+
+fn short(mut detail: String) -> String {
+    cut_text(&mut detail, PROBE_DETAIL_BYTES);
+    detail
+}
+
+/// Starts the agent for one short connection and reads whether it can run a
+/// turn: its program exists, it answers, and it reports a sign-in.
+pub async fn probe(command: &str) -> Probe {
+    let agent = match AcpAgent::from_str(command) {
+        Ok(agent) => agent,
+        Err(error) => return Probe::without_answer(ProviderState::Unknown, error.to_string()),
+    };
+    let config = agent.config().clone();
+    if !program_exists(config.command(), config.environment()) {
+        return Probe::without_answer(
+            ProviderState::RuntimeMissing,
+            format!(
+                "The program `{}` was not found on this computer.",
+                config.command().display()
+            ),
+        );
+    }
+    let asked = Client
+        .v1()
+        .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
+            let capabilities =
+                ClientCapabilities::new().auth(AuthCapabilities::new().terminal(true));
+            let initialized = connection
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
+                )
+                .block_task()
+                .await?;
+            let status = if initialized.agent_capabilities.auth.status.is_some() {
+                Some(
+                    connection
+                        .send_request(AuthStatusRequest::new())
+                        .block_task()
+                        .await,
+                )
+            } else {
+                None
+            };
+            Ok((initialized.auth_methods, status))
+        });
+    let (methods, status) = match tokio::time::timeout(PROBE_PATIENCE, asked).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
+            return Probe::without_answer(ProviderState::RuntimeMissing, failure_message(&error));
+        }
+        Err(_) => {
+            return Probe::without_answer(
+                ProviderState::Unknown,
+                "The agent did not answer in time.",
+            );
+        }
+    };
+    let sign_in = methods.into_iter().find_map(|method| match method {
+        AuthMethod::Terminal(terminal) => Some(SignInCommand {
+            program: config.command().to_owned(),
+            arguments: config
+                .arguments()
+                .iter()
+                .cloned()
+                .chain(terminal.args)
+                .collect(),
+            environment: config
+                .environment()
+                .clone()
+                .into_iter()
+                .chain(terminal.env)
+                .collect(),
+        }),
+        _ => None,
+    });
+    let (state, account, detail) = match status {
+        Some(Ok(status)) => {
+            let account = status
+                .accounts
+                .iter()
+                .find(|account| account.active == Some(true))
+                .or(status.accounts.first())
+                .map(|account| account.label.clone());
+            match status.state {
+                AuthState::Authenticated | AuthState::NotRequired => {
+                    (ProviderState::Ready, account, None)
+                }
+                AuthState::Unauthenticated => (ProviderState::SignedOut, None, None),
+                _ => (
+                    ProviderState::Unknown,
+                    None,
+                    Some("The agent could not read its own sign-in.".to_owned()),
+                ),
+            }
+        }
+        Some(Err(error)) => (
+            ProviderState::Unknown,
+            None,
+            Some(short(failure_message(&error))),
+        ),
+        None => (
+            ProviderState::Unknown,
+            None,
+            Some("The agent does not tell whether it is signed in.".to_owned()),
+        ),
+    };
+    Probe {
+        state,
+        account,
+        detail,
+        sign_in,
+    }
+}
+
+/// Whether the system would find the program: a path as it is written, a bare
+/// name in the folders of `PATH` and next to the daemon.
+fn program_exists(program: &Path, environment: &BTreeMap<String, String>) -> bool {
+    let named = |folder: &Path| {
+        let path = folder.join(program);
+        path.is_file()
+            || (cfg!(windows) && path.extension().is_none() && path.with_extension("exe").is_file())
+    };
+    if program.components().count() > 1 {
+        return named(Path::new(""));
+    }
+    let path = environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.into())
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|daemon| daemon.parent().map(Path::to_owned));
+    std::env::split_paths(&path)
+        .chain(beside)
+        .any(|folder| named(&folder))
 }
 
 pub struct SessionConfig {

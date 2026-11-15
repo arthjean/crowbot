@@ -4,15 +4,17 @@ use std::time::Instant;
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use crowbot_protocol::{ApprovalDecision, ApprovalReason, FailureCause};
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString, Stateful, Window, div,
-    prelude::*,
+    Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
+    Stateful, Window, div, prelude::*,
 };
 
 use super::{Copied, HEAD, OpenConversation, RowText, Workspace};
 use crate::assets::Icon;
 use crate::markdown::{self, Actions, Block, Document};
 use crate::reveal::Reveal;
-use crate::theme::{Theme, font, icon as icon_size, layout, opacity, radius, size, space, text};
+use crate::theme::{
+    Theme, duration, font, icon as icon_size, layout, opacity, radius, size, space, text,
+};
 use crate::transcript::{Approval, ApprovalState, Row, RowKind, Status, local_day};
 use crate::ui::{self, ButtonKind};
 
@@ -171,12 +173,45 @@ impl Workspace {
         let Some(index) = index.checked_sub(HEAD) else {
             return self.render_head(&theme, cx);
         };
+        // The last row of a part of the history comes on screen: the events
+        // that follow it are asked for.
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.newer.is_some() && index + 1 == open.transcript.rows().len())
+        {
+            self.load_newer();
+        }
         let now = (self.clock)();
         let blocks = self
             .open
             .as_mut()
             .and_then(|open| prepare(open, index, now, window));
-        self.render_message_row(index, blocks.unwrap_or_default(), &theme, cx)
+        let row = self.render_message_row(index, blocks.unwrap_or_default(), &theme, cx);
+        let flashed = self.open.as_mut().and_then(|open| {
+            let key = open.transcript.rows().get(index)?.key;
+            let (flashed, started) = open.flash?;
+            if now.duration_since(started) >= duration::FLASH {
+                open.flash = None;
+            }
+            (flashed == key && open.flash.is_some()).then_some(key)
+        });
+        match flashed {
+            Some(key) => {
+                let wash = Hsla::from(theme.accent_soft);
+                div()
+                    .debug_selector(|| "revealed-message".into())
+                    .w_full()
+                    .child(row)
+                    .with_animation(
+                        ("revealed", key.cast_unsigned()),
+                        Animation::new(duration::FLASH),
+                        move |row, elapsed| row.bg(wash.opacity(opacity::SHOWN - elapsed)),
+                    )
+                    .into_any_element()
+            }
+            None => row,
+        }
     }
 
     fn text_actions(&self, key: i64, cx: &mut Context<Self>) -> Actions {

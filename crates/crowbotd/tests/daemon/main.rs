@@ -9,6 +9,7 @@ mod conversation;
 mod endpoint;
 mod queue;
 mod recovery;
+mod settings;
 mod shell;
 mod stop;
 mod support;

@@ -58,7 +58,12 @@ fn fake_agent() -> &'static Path {
 #[derive(Clone, Copy)]
 enum Agent {
     /// The scripted agent, which may advertise that it takes a system prompt.
+    /// It reports a sign-in, read from the file `auth` of the test folder.
     Scripted { system_prompt: bool },
+    /// The scripted agent, which says nothing about a sign-in.
+    Silent,
+    /// An agent whose program does not exist.
+    Missing,
     /// The daemon's own Claude profile: the real adapter and the real model.
     Claude,
 }
@@ -73,13 +78,30 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
         .args(["--endpoint", endpoint.address()])
         .stdin(Stdio::null())
         .stdout(Stdio::null());
-    if let Agent::Scripted { system_prompt } = agent {
-        let mut env = serde_json::json!({ "FAKE_AGENT_HEARTBEAT": dir.join("heartbeat") });
-        if system_prompt {
-            env["FAKE_AGENT_SYSTEM_PROMPT"] = "1".into();
+    let scripted = |env: serde_json::Value| {
+        serde_json::json!({ "command": fake_agent(), "env": env }).to_string()
+    };
+    let heartbeat = dir.join("heartbeat");
+    match agent {
+        Agent::Scripted { system_prompt } => {
+            let mut env = serde_json::json!({
+                "FAKE_AGENT_HEARTBEAT": heartbeat,
+                "FAKE_AGENT_AUTH": dir.join("auth"),
+            });
+            if system_prompt {
+                env["FAKE_AGENT_SYSTEM_PROMPT"] = "1".into();
+            }
+            command.args(["--agent", &scripted(env)]);
         }
-        let agent = serde_json::json!({ "command": fake_agent(), "env": env });
-        command.args(["--agent", &agent.to_string()]);
+        Agent::Silent => {
+            let env = serde_json::json!({ "FAKE_AGENT_HEARTBEAT": heartbeat });
+            command.args(["--agent", &scripted(env)]);
+        }
+        Agent::Missing => {
+            let agent = serde_json::json!({ "command": dir.join("no-such-agent") });
+            command.args(["--agent", &agent.to_string()]);
+        }
+        Agent::Claude => {}
     }
     command
 }
@@ -115,6 +137,16 @@ impl Daemon {
         Self::start_with(Agent::Scripted {
             system_prompt: true,
         })
+    }
+
+    /// A daemon whose agent says nothing about a sign-in.
+    pub fn start_with_silent_agent() -> Self {
+        Self::start_with(Agent::Silent)
+    }
+
+    /// A daemon whose agent program does not exist.
+    pub fn start_with_missing_agent() -> Self {
+        Self::start_with(Agent::Missing)
     }
 
     /// A daemon whose bots run on Claude, with the user's own sign-in.
@@ -196,6 +228,12 @@ impl Daemon {
 
     pub async fn raw_connection(&self) -> (MessageReader, MessageWriter) {
         connect(&self.endpoint).await
+    }
+
+    /// The file that tells whether the scripted agent is signed in, and the
+    /// files of the same name with another extension.
+    pub fn auth_file(&self, extension: &str) -> PathBuf {
+        self.dir.join("auth").with_extension(extension)
     }
 
     /// The counter that the scripted agent rewrites while its process is alive.
