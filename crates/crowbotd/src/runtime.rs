@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::digest::hex;
@@ -81,6 +81,15 @@ impl RuntimeSpec {
         hash.update(self.program.as_bytes());
         hex(&hash.finalize())
     }
+}
+
+/// What an installed runtime holds, written once its files are in place: the
+/// fingerprint of its spec, and the SHA-256 of each of its files, by their
+/// path in its folder.
+#[derive(Debug, Serialize, Deserialize)]
+struct Marker {
+    fingerprint: String,
+    files: BTreeMap<String, String>,
 }
 
 /// What starts an installed runtime.
@@ -181,15 +190,39 @@ impl Runtimes {
         self.root.join(provider).join(&spec.version)
     }
 
-    /// The runtime of the provider, when it is installed.
+    /// The runtime of the provider, when it is installed. This reads its
+    /// marker only; `verify` reads its files.
     pub fn installed(&self, provider: &str) -> Option<Installed> {
         let spec = self.spec(provider)?;
         let folder = self.folder(provider, &spec);
-        let marker = std::fs::read_to_string(folder.join(INSTALLED)).ok()?;
-        if marker.trim() != spec.fingerprint() {
-            return None;
-        }
+        read_marker(&folder, &spec)?;
         launch(&folder, &spec).ok()
+    }
+
+    /// Checks that the files of the installed runtime are still the ones it
+    /// was installed with, none changed, removed, or added. A runtime that
+    /// fails the check is no longer installed: the next turn downloads it
+    /// again. It reads every file, so it runs on a blocking thread.
+    pub fn verify(&self, provider: &str) -> Result<(), String> {
+        let spec = self
+            .spec(provider)
+            .ok_or_else(|| "no runtime is pinned".to_owned())?;
+        let folder = self.folder(provider, &spec);
+        let marker = read_marker(&folder, &spec).ok_or_else(|| "it is not installed".to_owned())?;
+        let found = files_of(&folder)?;
+        let changed = marker
+            .files
+            .iter()
+            .find(|(path, sha256)| found.get(*path) != Some(*sha256))
+            .map(|(path, _)| path)
+            .or_else(|| found.keys().find(|path| !marker.files.contains_key(*path)));
+        match changed {
+            None => Ok(()),
+            Some(path) => {
+                std::fs::remove_file(folder.join(INSTALLED)).ok();
+                Err(format!("{path} changed after the install"))
+            }
+        }
     }
 
     /// Installs the runtime of the provider when it is not there yet. Two
@@ -250,7 +283,21 @@ async fn install(
     }
     progress(total, total);
     launch(staging, spec).map_err(|message| RuntimeError::Unpack { message })?;
-    tokio::fs::write(staging.join(INSTALLED), spec.fingerprint())
+    let listed = staging.to_owned();
+    let files = tokio::task::spawn_blocking(move || files_of(&listed))
+        .await
+        .map_err(|error| RuntimeError::Unpack {
+            message: error.to_string(),
+        })?
+        .map_err(|message| RuntimeError::Unpack { message })?;
+    let marker = Marker {
+        fingerprint: spec.fingerprint(),
+        files,
+    };
+    let marker = serde_json::to_vec(&marker).map_err(|error| RuntimeError::Unpack {
+        message: error.to_string(),
+    })?;
+    tokio::fs::write(staging.join(INSTALLED), marker)
         .await
         .map_err(failed)?;
     tokio::fs::remove_dir_all(folder).await.ok();
@@ -426,6 +473,53 @@ fn launch(folder: &Path, spec: &RuntimeSpec) -> Result<Installed, String> {
             .map(|(name, value)| Ok((name.clone(), expand(value)?)))
             .collect::<Result<_, String>>()?,
     })
+}
+
+/// The marker of an installed runtime, when it was written for this spec.
+fn read_marker(folder: &Path, spec: &RuntimeSpec) -> Option<Marker> {
+    let text = std::fs::read(folder.join(INSTALLED)).ok()?;
+    let marker: Marker = serde_json::from_slice(&text).ok()?;
+    (marker.fingerprint == spec.fingerprint()).then_some(marker)
+}
+
+/// The SHA-256 of each file of a runtime folder, by its path there with `/`
+/// between its parts. A link counts by where it points; the marker does not
+/// count.
+fn files_of(folder: &Path) -> Result<BTreeMap<String, String>, String> {
+    let failed =
+        |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
+    let mut files = BTreeMap::new();
+    let mut folders = vec![(folder.to_owned(), String::new())];
+    while let Some((current, prefix)) = folders.pop() {
+        let entries = std::fs::read_dir(&current).map_err(|error| failed(&current, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| failed(&current, error))?;
+            let path = entry.path();
+            let name = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            let kind = entry.file_type().map_err(|error| failed(&path, error))?;
+            if kind.is_dir() {
+                folders.push((path, format!("{name}/")));
+            } else if kind.is_symlink() {
+                let target = std::fs::read_link(&path).map_err(|error| failed(&path, error))?;
+                files.insert(name, format!("link {}", target.display()));
+            } else if name != INSTALLED {
+                let mut file = std::fs::File::open(&path).map_err(|error| failed(&path, error))?;
+                let mut hash = Sha256::new();
+                let mut buffer = vec![0_u8; 1 << 16];
+                loop {
+                    let read = file
+                        .read(&mut buffer)
+                        .map_err(|error| failed(&path, error))?;
+                    if read == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..read]);
+                }
+                files.insert(name, hex(&hash.finalize()));
+            }
+        }
+    }
+    Ok(files)
 }
 
 /// Replaces each `*` part of a path by the one folder found there.

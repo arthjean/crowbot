@@ -59,6 +59,9 @@ enum SignInEnd {
 /// Where the program of a provider's agent comes from.
 enum Source {
     Ready(Launch),
+    /// The runtime the daemon installed, whose files are checked before each
+    /// start (`ProviderHub::verified`).
+    Installed(Launch),
     /// The daemon installs the runtime, and has not done so yet.
     NotInstalled(RuntimeSpec),
     /// No runtime is pinned for this computer, and the user set no executable.
@@ -179,7 +182,7 @@ impl Daemon {
             ));
         }
         if let Some(installed) = self.runtimes.installed(id) {
-            return Ok(Source::Ready(launch_of(installed).with(profile)));
+            return Ok(Source::Installed(launch_of(installed).with(profile)));
         }
         Ok(match self.runtimes.spec(id) {
             Some(spec) => Source::NotInstalled(spec),
@@ -201,16 +204,22 @@ impl Daemon {
         let source = self
             .launch_source(id, &profile, &setting)
             .map_err(SessionFailure::plain)?;
-        let launch = match source {
-            Source::Ready(launch) => launch,
-            Source::NotInstalled(_) => {
+        let ready = match source {
+            Source::Ready(launch) => Some(launch),
+            Source::Installed(launch) => self.verified(id).await.ok().map(|()| launch),
+            Source::NotInstalled(_) => None,
+            Source::Unsupported => return Err(SessionFailure::plain(unsupported(profile.name))),
+        };
+        let launch = match ready {
+            Some(launch) => launch,
+            // A runtime that failed its check is downloaded again.
+            None => {
                 let installed = self
                     .install(id, profile.name)
                     .await
                     .map_err(SessionFailure::plain)?;
                 launch_of(installed).with(&profile)
             }
-            Source::Unsupported => return Err(SessionFailure::plain(unsupported(profile.name))),
         };
         profile.prepare().map_err(|error| {
             SessionFailure::plain(format!(
@@ -219,6 +228,23 @@ impl Daemon {
             ))
         })?;
         Ok((profile, launch, setting.signed_in))
+    }
+
+    /// Checks the files of the installed runtime of a provider before it
+    /// runs. A runtime that fails the check is no longer installed, and a
+    /// turn downloads it again.
+    async fn verified(self: &Arc<Self>, id: &'static str) -> Result<(), String> {
+        let daemon = self.clone();
+        let checked = tokio::task::spawn_blocking(move || daemon.runtimes.verify(id))
+            .await
+            .map_err(|error| error.to_string())?;
+        checked.map_err(|detail| {
+            let name = self.provider_name(id);
+            eprintln!("[crowbotd] the {name} runtime failed its check: {detail}");
+            format!(
+                "The {name} runtime changed after its install ({detail}), so it did not run. Crow Bot downloads it again when a bot needs it."
+            )
+        })
     }
 
     /// Downloads the runtime of a provider, and tells every client how far
@@ -264,7 +290,9 @@ impl Daemon {
         let profile = self.agent_profile(id)?;
         let setting = self.provider_setting(id)?;
         match self.launch_source(id, &profile, &setting)? {
-            Source::Ready(_) => return self.check_provider(id),
+            // A check reads the files of an installed runtime; one that fails
+            // it can then be installed again.
+            Source::Ready(_) | Source::Installed(_) => return self.check_provider(id),
             Source::Unsupported => return Err(unsupported(profile.name)),
             Source::NotInstalled(_) => {}
         }
@@ -369,7 +397,11 @@ impl Daemon {
             let launch = match source {
                 Source::Ready(launch) => {
                     entry.status.checking = true;
-                    Some(launch)
+                    Some((launch, false))
+                }
+                Source::Installed(launch) => {
+                    entry.status.checking = true;
+                    Some((launch, true))
                 }
                 Source::NotInstalled(spec) => {
                     entry.rest(
@@ -391,11 +423,16 @@ impl Daemon {
             state.broadcast(&ServerMessage::ProviderChanged(status));
             launch
         };
-        let Some(launch) = launch else {
+        let Some((launch, installed)) = launch else {
             return Ok(());
         };
         let daemon = self.clone();
         tokio::spawn(async move {
+            if installed && let Err(message) = daemon.verified(id).await {
+                let probe = Probe::without_answer(ProviderState::NotInstalled, message);
+                daemon.record_probe(id, &profile, setting.signed_in, probe);
+                return;
+            }
             let probe = match profile.prepare() {
                 Ok(()) => acp::probe(&profile, &launch, setting.signed_in).await,
                 Err(error) => Probe::without_answer(
@@ -522,12 +559,20 @@ impl Daemon {
             SignInStart::Agent => {
                 let profile = self.agent_profile(id)?;
                 let setting = self.provider_setting(id)?;
-                let Source::Ready(launch) = self.launch_source(id, &profile, &setting)? else {
-                    return Err(format!("The {name} runtime is not installed."));
+                let (launch, installed) = match self.launch_source(id, &profile, &setting)? {
+                    Source::Ready(launch) => (launch, false),
+                    Source::Installed(launch) => (launch, true),
+                    Source::NotInstalled(_) | Source::Unsupported => {
+                        return Err(format!("The {name} runtime is not installed."));
+                    }
                 };
                 let named = self.clone();
                 let on_page = move |page: String| named.sign_in_page(id, page);
                 tokio::spawn(async move {
+                    if installed && daemon.verified(id).await.is_err() {
+                        daemon.sign_in_ended(id, &SignInEnd::Finished(false));
+                        return;
+                    }
                     let signing_in =
                         acp::authenticate(&launch, &option.id, profile.sign_in_page, on_page);
                     // Dropping the call closes the agent, and its sign-in.
@@ -666,6 +711,10 @@ impl Daemon {
         let setting = self.provider_setting(id)?;
         let launch = match self.launch_source(id, &profile, &setting)? {
             Source::Ready(launch) => launch,
+            Source::Installed(launch) => {
+                self.verified(id).await?;
+                launch
+            }
             Source::NotInstalled(_) => {
                 return Err(format!("The {name} runtime is not installed yet."));
             }

@@ -290,6 +290,47 @@ async fn a_download_that_does_not_match_its_hash_is_removed_and_nothing_of_it_ru
 }
 
 #[tokio::test]
+async fn a_runtime_changed_after_its_install_is_downloaded_again_before_it_runs() {
+    let publisher = Publisher::start(Duration::ZERO);
+    let mut daemon = daemon(&publisher);
+    let mut client = daemon.client().await;
+    let conversation = claude_bot(&mut client).await;
+    assert_eq!(
+        turn(&mut client, conversation, "say caw").await.reply,
+        "caw"
+    );
+    assert_eq!(publisher.requests(), 1);
+    drop(client);
+    // The daemon ends with its agent, which holds its program open.
+    daemon.kill();
+
+    // What a bot that may write files could do to the runtime: change the
+    // program, and add a file that a program loads from its own folder.
+    let program = installed(&daemon).join(program());
+    std::fs::write(&program, "not the pinned agent").unwrap();
+    std::fs::write(installed(&daemon).join("version.dll"), "planted").unwrap();
+    daemon.spawn();
+    let mut client = daemon.client().await;
+    client.open(conversation).await;
+
+    let next = turn(&mut client, conversation, "say again").await;
+    assert_eq!(
+        next.end,
+        Event::TurnEnded(TurnEnd::Completed),
+        "{:?}",
+        next.end
+    );
+    assert_eq!(next.reply, "again");
+    assert!(!next.downloads.is_empty(), "the changed runtime ran");
+    assert_eq!(publisher.requests(), 2);
+    assert_eq!(
+        sha256(&std::fs::read(&program).unwrap()),
+        sha256(&runtime())
+    );
+    assert!(!installed(&daemon).join("version.dll").exists());
+}
+
+#[tokio::test]
 async fn a_download_larger_than_its_pinned_size_stops_and_nothing_of_it_runs() {
     let publisher = Publisher::start(Duration::ZERO);
     let runtime = runtime();
