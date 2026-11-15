@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
-use crowbot_protocol::{ApprovalDecision, ApprovalReason, FailureCause};
+use crowbot_protocol::{ApprovalDecision, ApprovalReason, FailureCause, ProviderState};
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
     Stateful, Window, div, prelude::*,
@@ -15,7 +15,7 @@ use crate::reveal::Reveal;
 use crate::theme::{
     Theme, duration, font, icon as icon_size, layout, opacity, radius, size, space, text,
 };
-use crate::transcript::{Approval, ApprovalState, Row, RowKind, Status, local_day};
+use crate::transcript::{Approval, ApprovalState, Notice, Row, RowKind, Status, local_day};
 use crate::ui::{self, ButtonKind};
 
 const MESSAGE_GROUP: &str = "message";
@@ -128,9 +128,7 @@ pub(super) fn status_text(status: &Status) -> (&'static str, String) {
             match cause {
                 Some(FailureCause::SignInRequired) => (
                     "Sign-in needed",
-                    format!(
-                        "Sign in to {name}: run its command line tool in a terminal, sign in, then send your message again."
-                    ),
+                    format!("Sign in to {name}, then send your message again."),
                 ),
                 Some(FailureCause::UsageLimit) => (
                     "Usage limit reached",
@@ -140,6 +138,25 @@ pub(super) fn status_text(status: &Status) -> (&'static str, String) {
                 ),
                 _ => ("Error", message.clone()),
             }
+        }
+    }
+}
+
+/// What a notice of the daemon says, with the names of the providers.
+pub(super) fn notice_text(notice: &Notice) -> String {
+    match notice {
+        Notice::ModelUnavailable { model, provider } => {
+            let name = match provider.as_deref() {
+                None | Some("custom") => "The agent",
+                known => provider_name(known),
+            };
+            format!(
+                "{name} no longer offers the model {model}. The bot now runs on the default model."
+            )
+        }
+        Notice::ProviderChanged { from, to } => {
+            let (from, to) = (provider_name(Some(from)), provider_name(Some(to)));
+            format!("The bot moved from {from} to {to}. {to} received what was said before.")
         }
     }
 }
@@ -328,6 +345,23 @@ impl Workspace {
                     .child(label);
                 return column(key, layout::ROW_GAP, last, day);
             }
+            RowKind::Notice(notice) => {
+                let text = SharedString::from(notice_text(notice));
+                let note = div()
+                    .id("notice")
+                    .debug_selector(move || format!("notice-{key}"))
+                    .role(Role::Status)
+                    .aria_label(text.clone())
+                    .w_full()
+                    .px(space::S6)
+                    .py(space::S1)
+                    .text_center()
+                    .text_size(text::SM.size)
+                    .line_height(text::SM.leading)
+                    .text_color(theme.text_muted)
+                    .child(text);
+                return column(key, layout::ROW_GAP, last, note);
+            }
             RowKind::User { .. } => {
                 let bubble = self
                     .message_text(key, &blocks, theme.text, theme, cx)
@@ -398,7 +432,10 @@ impl Workspace {
                 .into_any_element(),
             RowKind::Steps { .. } => self.render_steps(open, row, theme, cx),
             RowKind::Approval(approval) => self.render_approval(open, key, approval, theme, cx),
-            RowKind::Status(status) => render_status(key, status, theme),
+            RowKind::Status(status) => {
+                let controls = self.status_controls(status, last, theme, cx);
+                render_status(key, status, controls, theme)
+            }
         };
         let bot = self.selected_bot().map(|summary| &summary.bot);
         let avatar = bot.filter(|_| starts).map(|bot| {
@@ -622,7 +659,39 @@ impl Workspace {
     }
 }
 
-fn render_status(key: i64, status: &Status, theme: &Theme) -> AnyElement {
+impl Workspace {
+    /// The sign-in of the provider, under the last turn that failed for the
+    /// lack of one, until the provider is signed in.
+    fn status_controls(
+        &self,
+        status: &Status,
+        last: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Status::Failed {
+            cause: Some(FailureCause::SignInRequired),
+            provider: Some(provider),
+            ..
+        } = status
+        else {
+            return Vec::new();
+        };
+        match self.providers.iter().find(|known| known.id == *provider) {
+            Some(known) if last && known.state != ProviderState::Ready => {
+                self.provider_controls(known, "turn", theme, cx)
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn render_status(
+    key: i64,
+    status: &Status,
+    controls: Vec<AnyElement>,
+    theme: &Theme,
+) -> AnyElement {
     let (label, detail) = status_text(status);
     let failed = matches!(status, Status::Failed { .. });
     let provider_message = match status {
@@ -682,6 +751,16 @@ fn render_status(key: i64, status: &Status, theme: &Theme) -> AnyElement {
                 .text_color(theme.text_secondary)
                 .child(message)
         }))
+        .children((!controls.is_empty()).then(|| {
+            div()
+                .debug_selector(move || format!("status-controls-{key}"))
+                .pt(space::S1)
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(space::S2)
+                .children(controls)
+        }))
         .into_any_element()
 }
 
@@ -717,6 +796,20 @@ mod tests {
         let (label, detail) = status_text(&failed(Some(FailureCause::UsageLimit), "codex"));
         assert_eq!(label, "Usage limit reached");
         assert!(detail.contains("ChatGPT"), "{detail}");
+        assert_eq!(
+            notice_text(&Notice::ProviderChanged {
+                from: "claude".to_owned(),
+                to: "codex".to_owned(),
+            }),
+            "The bot moved from Claude to ChatGPT. ChatGPT received what was said before."
+        );
+        assert_eq!(
+            notice_text(&Notice::ModelUnavailable {
+                model: "opus".to_owned(),
+                provider: Some("claude".to_owned()),
+            }),
+            "Claude no longer offers the model opus. The bot now runs on the default model."
+        );
         assert_eq!(
             status_text(&failed(None, "claude")),
             ("Error", "401".to_owned())

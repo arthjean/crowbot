@@ -272,11 +272,14 @@ fn a_provider_that_cannot_run_is_stated_above_create_with_the_control_that_fixes
     cx: &mut TestAppContext,
 ) {
     let (_workspace, mut daemon, cx) = open(cx);
+    // Tall enough for the whole form: the notice, the model, and Create.
+    cx.simulate_resize(size(px(1000.), px(1600.)));
     daemon.connect(Vec::new(), cx);
     daemon.sent();
     assert!(!shown(cx, "creation-provider-notice"));
     let sign_in = || ClientMessage::SignIn {
         provider: "claude".to_owned(),
+        method: None,
     };
 
     daemon.tell(
@@ -285,6 +288,13 @@ fn a_provider_that_cannot_run_is_stated_above_create_with_the_control_that_fixes
     );
     assert!(shown(cx, "creation-provider-notice"));
     assert!(bounds(cx, "creation-provider-notice").bottom() <= bounds(cx, "create-bot").top());
+    // The form asks the provider of the new bot for its models.
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::ListModels {
+            provider: "claude".to_owned()
+        }]
+    );
     click(cx, "creation-sign-in");
     assert_eq!(daemon.sent(), [sign_in()]);
 
@@ -317,21 +327,28 @@ fn a_provider_that_cannot_run_is_stated_above_create_with_the_control_that_fixes
     assert!(shown(cx, "creation-get-runtime"));
     assert!(!shown(cx, "creation-sign-in"));
     click(cx, "creation-check");
+    // A provider that changed state is asked for its models again.
     assert_eq!(
         daemon.sent(),
-        [ClientMessage::CheckProvider {
-            provider: "claude".to_owned()
-        }]
+        [
+            ClientMessage::ListModels {
+                provider: "claude".to_owned()
+            },
+            ClientMessage::CheckProvider {
+                provider: "claude".to_owned()
+            }
+        ]
     );
 
     // Create stays available.
     click(cx, "creation-name");
     cx.simulate_input("Atlas");
     click(cx, "create-bot");
-    assert!(matches!(
-        &daemon.sent()[..],
-        [ClientMessage::CreateBot { .. }]
-    ));
+    let created = daemon.sent();
+    assert!(
+        matches!(&created[..], [ClientMessage::CreateBot { .. }]),
+        "{created:?}"
+    );
     daemon.tell(
         ServerMessage::InvalidField {
             field: "name".to_owned(),
@@ -994,7 +1011,8 @@ fn each_provider_shows_its_state_and_the_control_that_fixes_it(cx: &mut TestAppC
     assert_eq!(
         daemon.sent(),
         [ClientMessage::SignIn {
-            provider: "claude".to_owned()
+            provider: "claude".to_owned(),
+            method: None,
         }]
     );
 

@@ -411,7 +411,7 @@ async fn a_version_4_database_migrates_and_its_older_events_still_load() {
 
     let database = rusqlite::Connection::open(daemon.database()).unwrap();
     let count = |sql: &str| -> i64 { database.query_row(sql, [], |row| row.get(0)).unwrap() };
-    assert_eq!(count("PRAGMA user_version"), 6);
+    assert_eq!(count("PRAGMA user_version"), 7);
     assert_eq!(count("SELECT COUNT(*) FROM events"), 6);
     assert_eq!(count("SELECT COUNT(*) FROM conversations"), 1);
     drop(database);

@@ -198,6 +198,7 @@ mod tests {
                 },
                 provider: "claude".to_owned(),
                 model: None,
+                effort: None,
                 permission_level: PermissionLevel::AskFirst,
                 workspace: "/work".to_owned(),
             })

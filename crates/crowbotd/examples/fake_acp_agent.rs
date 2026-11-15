@@ -30,12 +30,40 @@
 //! - `session`: report the session id and whether the session was resumed.
 //! - `config`: report the system prompt, the text sent before the prompt, the
 //!   model, and the working folder of the session.
+//! - `settings`: report the model, the reasoning level, and the mode of the
+//!   session.
+//! - `started`: report the arguments of the process, the `CODEX_`, `GROK_`,
+//!   and `INITIAL_AGENT_MODE` variables it was started with, and the `_meta`
+//!   of the session.
+//! - `write <path>`: write `written` to the file. A session that asks first
+//!   requests permission, and writes only when the request is allowed.
+//! - `leave <mode> <path>`: move the session to that mode on its own and say
+//!   so, then, unless a cancel arrives within two seconds, write `written` to
+//!   the file without asking, as an agent in a mode that does not ask.
 //!
 //! The command is the last part of a prompt: the parts before it are reported
 //! by `config` as the preface.
 //!
 //! The agent offers the models `fast` and `smart` through a session config
 //! option, and starts each process on `fast`.
+//!
+//! The process stands for a provider when the daemon's profile of that
+//! provider started it. With `CODEX_HOME` it is Codex-like: it offers the
+//! models `gpt-fast` and `gpt-smart`, three reasoning levels, and session
+//! modes, and it asks before a write only in the mode `read-only`. It is
+//! signed in when its home holds the file `signed-in`, pushes that state
+//! after `initialize`, and offers sign-ins that it runs itself on
+//! `authenticate`. With `GROK_HOME` it is Grok-like: no session mode, a
+//! sign-in named `grok.com` that must be accepted before each session and
+//! that ends only after the client asked `_x.ai/auth/get_url` for the page
+//! where the person signs in, and it
+//! asks before a write only when it was started with `--permission-mode
+//! default` and the `config.toml` of its home holds an `ask` rule for `Write`.
+//! A session opened with the `_meta` of the Claude profile offers the modes
+//! of Claude, and asks before a write in the mode `default`. A sign-in the
+//! agent runs reads how to behave from the file `sign-in-mode` of its home.
+//! `FAKE_AGENT_NO_ASK_MODE` leaves out the mode in which the agent asks, and
+//! `FAKE_AGENT_NO_MODELS` makes it report no model.
 //!
 //! When `FAKE_AGENT_HEARTBEAT` names a file, the agent rewrites it with a growing
 //! counter while it runs, so a test can tell whether the process is alive. When
@@ -66,7 +94,11 @@ use serde_json::{Value, json};
 const HEARTBEAT: &str = "FAKE_AGENT_HEARTBEAT";
 const SYSTEM_PROMPT: &str = "FAKE_AGENT_SYSTEM_PROMPT";
 const AUTH: &str = "FAKE_AGENT_AUTH";
+const NO_ASK_MODE: &str = "FAKE_AGENT_NO_ASK_MODE";
+const NO_MODELS: &str = "FAKE_AGENT_NO_MODELS";
 const SIGNED_IN: &str = "authenticated";
+/// The page a Grok-like agent names for its sign-in.
+const GROK_SIGN_IN_PAGE: &str = "https://accounts.example/oauth2/device?user_code=FAKE-1234";
 const MODELS: [&str; 2] = ["fast", "smart"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
 /// How long the process that a finished sign-in leaves behind goes on.
@@ -108,8 +140,101 @@ fn main() {
 
 Done.";
 
+/// Which provider the process stands for, read from what the daemon's
+/// profile of that provider sets at each start.
+#[derive(Clone, Default, PartialEq, Eq)]
+enum Flavor {
+    #[default]
+    Plain,
+    /// Started with `CODEX_HOME`: session modes, a pushed sign-in state, and
+    /// sign-ins that the agent runs itself.
+    Codex(PathBuf),
+    /// Started with `GROK_HOME`: no session mode, a sign-in to name before
+    /// each session, and permission rules read from its home.
+    Grok(PathBuf),
+}
+
+impl Flavor {
+    fn read() -> Self {
+        if let Some(home) = std::env::var_os("CODEX_HOME") {
+            Self::Codex(PathBuf::from(home))
+        } else if let Some(home) = std::env::var_os("GROK_HOME") {
+            Self::Grok(PathBuf::from(home))
+        } else {
+            Self::Plain
+        }
+    }
+
+    fn home(&self) -> Option<&Path> {
+        match self {
+            Self::Plain => None,
+            Self::Codex(home) | Self::Grok(home) => Some(home),
+        }
+    }
+
+    fn models(&self) -> [&'static str; 2] {
+        match self {
+            Self::Plain => MODELS,
+            Self::Codex(_) => ["gpt-fast", "gpt-smart"],
+            Self::Grok(_) => ["grok-fast", "grok-smart"],
+        }
+    }
+
+    /// The reasoning levels, with the one a session starts on first.
+    fn efforts(&self) -> &'static [&'static str] {
+        match self {
+            Self::Plain => &[],
+            Self::Codex(_) => &["medium", "low", "high"],
+            Self::Grok(_) => &["high", "low"],
+        }
+    }
+
+    fn signed_in_file(&self) -> Option<PathBuf> {
+        self.home().map(|home| home.join("signed-in"))
+    }
+
+    fn signed_in(&self) -> bool {
+        self.signed_in_file().is_none_or(|file| file.is_file())
+    }
+
+    /// Runs the sign-in the agent offers. The file `sign-in-mode` of the home
+    /// tells how it goes: `fail` ends with an error, `wait` never ends, and
+    /// no file signs in at once. `false` means the sign-in failed.
+    fn sign_in(&self, method: &str) -> bool {
+        let Some(home) = self.home() else {
+            return true;
+        };
+        let mode = std::fs::read_to_string(home.join("sign-in-mode")).unwrap_or_default();
+        match mode.trim() {
+            "fail" => false,
+            "wait" => loop {
+                std::thread::sleep(Duration::from_secs(1));
+            },
+            _ => std::fs::write(home.join("signed-in"), method).is_ok(),
+        }
+    }
+}
+
+/// The session modes of the Codex flavor and of a session that a Claude
+/// profile opened. `FAKE_AGENT_NO_ASK_MODE` leaves out the mode in which the
+/// agent asks before each change.
+fn offered_modes(flavor: &Flavor, claude: bool) -> Vec<&'static str> {
+    let modes: &[&str] = match flavor {
+        Flavor::Codex(_) => &["read-only", "agent", "agent-full-access"],
+        Flavor::Plain if claude => &["default", "acceptEdits", "bypassPermissions"],
+        _ => &[],
+    };
+    let skipped = usize::from(std::env::var_os(NO_ASK_MODE).is_some());
+    modes.iter().copied().skip(skipped).collect()
+}
+
 #[derive(Default)]
 struct Agent {
+    flavor: Flavor,
+    /// The sign-in was accepted in this process.
+    authenticated: AtomicBool,
+    /// The client asked for the address of the sign-in page.
+    url_asked: AtomicBool,
     output: Mutex<()>,
     cancelled: AtomicBool,
     deaf: AtomicBool,
@@ -124,6 +249,11 @@ struct Agent {
 struct Session {
     system_prompt: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+    /// The session was opened with the `_meta` of the Claude profile.
+    claude: bool,
+    meta: Value,
     cwd: String,
 }
 
@@ -272,24 +402,90 @@ impl Agent {
     }
 
     /// Keeps what the client set for the session, and answers with the
-    /// session's config options.
+    /// session's config options and modes.
     fn open_session(&self, params: &Value) -> Value {
         let mut session = self.session();
         session.cwd = params["cwd"].as_str().unwrap_or_default().to_owned();
         let system_prompt = texts(&params["systemPrompt"]["content"]);
         session.system_prompt = (!system_prompt.is_empty()).then(|| system_prompt.join("\n"));
-        Self::config_options(&session)
+        session.meta = params["_meta"].clone();
+        session.claude = session.meta["claudeCode"].is_object();
+        let modes = offered_modes(&self.flavor, session.claude);
+        if session.mode.is_none() {
+            session.mode = match &self.flavor {
+                Flavor::Codex(_) => Some(
+                    std::env::var("INITIAL_AGENT_MODE")
+                        .ok()
+                        .filter(|mode| modes.contains(&mode.as_str()))
+                        .unwrap_or_else(|| "agent".to_owned()),
+                ),
+                Flavor::Plain if session.claude => Some("default".to_owned()),
+                _ => None,
+            };
+        }
+        let mut opened = json!({ "configOptions": self.config_options(&session) });
+        if let Some(mode) = &session.mode {
+            opened["modes"] = json!({
+                "currentModeId": mode,
+                "availableModes": modes
+                    .iter()
+                    .map(|mode| json!({ "id": mode, "name": mode }))
+                    .collect::<Vec<_>>(),
+            });
+        }
+        opened
     }
 
-    fn config_options(session: &Session) -> Value {
-        json!([{
+    fn config_options(&self, session: &Session) -> Value {
+        if std::env::var_os(NO_MODELS).is_some() {
+            return json!([]);
+        }
+        let models = self.flavor.models();
+        let mut options = vec![json!({
             "id": "model",
             "name": "Model",
             "category": "model",
             "type": "select",
-            "currentValue": session.model.as_deref().unwrap_or(MODELS[0]),
-            "options": MODELS.map(|model| json!({ "value": model, "name": model })),
-        }])
+            "currentValue": session.model.as_deref().unwrap_or(models[0]),
+            "options": models.map(|model| json!({ "value": model, "name": model })),
+        })];
+        let efforts = self.flavor.efforts();
+        if let Some(first) = efforts.first() {
+            options.push(json!({
+                "id": "reasoning_effort",
+                "name": "Reasoning effort",
+                "category": "thought_level",
+                "type": "select",
+                "currentValue": session.effort.as_deref().unwrap_or(first),
+                "options": efforts
+                    .iter()
+                    .map(|effort| json!({ "value": effort, "name": effort }))
+                    .collect::<Vec<_>>(),
+            }));
+        }
+        Value::Array(options)
+    }
+
+    /// Whether the session asks before it changes a file. Each provider has
+    /// its own way to be put in that state, and the daemon's profile of the
+    /// provider is what does it.
+    fn asks_first(&self) -> bool {
+        let session = self.session();
+        match &self.flavor {
+            Flavor::Codex(_) => session.mode.as_deref() == Some("read-only"),
+            Flavor::Grok(home) => {
+                let arguments: Vec<String> = std::env::args().collect();
+                let default_mode = arguments
+                    .windows(2)
+                    .any(|pair| pair[0] == "--permission-mode" && pair[1] == "default");
+                let rules = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+                let asks = rules
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("ask") && line.contains("\"Write\""));
+                default_mode && asks
+            }
+            Flavor::Plain => !session.claude || session.mode.as_deref() == Some("default"),
+        }
     }
 
     fn prompt(&self, id: &Value, params: &Value) {
@@ -439,6 +635,85 @@ impl Agent {
                     self.resumed.load(Ordering::SeqCst)
                 ),
             ),
+            "settings" => {
+                let report = {
+                    let config = self.session();
+                    format!(
+                        "model={} effort={} mode={}",
+                        config.model.as_deref().unwrap_or(self.flavor.models()[0]),
+                        config
+                            .effort
+                            .as_deref()
+                            .or(self.flavor.efforts().first().copied())
+                            .unwrap_or("none"),
+                        config.mode.as_deref().unwrap_or("none")
+                    )
+                };
+                self.say(session, &report);
+            }
+            "started" => {
+                let arguments: Vec<String> = std::env::args().skip(1).collect();
+                let mut variables: Vec<String> = std::env::vars()
+                    .filter(|(name, _)| {
+                        name.starts_with("CODEX_")
+                            || name.starts_with("GROK_")
+                            || name == "INITIAL_AGENT_MODE"
+                    })
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect();
+                variables.sort();
+                let meta = self.session().meta.clone();
+                self.say(
+                    session,
+                    &format!(
+                        "args=[{}] vars=[{}] meta={meta}",
+                        arguments.join(" "),
+                        variables.join(" ")
+                    ),
+                );
+            }
+            "leave" => {
+                let (mode, path) = rest.split_once(' ').unwrap_or((rest, ""));
+                self.session().mode = Some(mode.to_owned());
+                self.send(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session,
+                        "update": {
+                            "sessionUpdate": "current_mode_update",
+                            "currentModeId": mode
+                        }
+                    }
+                }));
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while std::time::Instant::now() < deadline && !self.cancelled.load(Ordering::SeqCst)
+                {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                if !self.cancelled.load(Ordering::SeqCst) {
+                    std::fs::write(path, "written").ok();
+                    self.say(session, "write=written");
+                }
+            }
+            "write" => {
+                let allowed = !self.asks_first() || {
+                    let tool_call = json!({
+                        "title": format!("Write {rest}"),
+                        "kind": "edit",
+                        "locations": [{ "path": rest }]
+                    });
+                    self.ask(session, tool_call, true) == "allow"
+                };
+                let outcome = if !allowed {
+                    "declined"
+                } else if std::fs::write(rest, "written").is_ok() {
+                    "written"
+                } else {
+                    "failed"
+                };
+                self.say(session, &format!("write={outcome}"));
+            }
             "config" => {
                 let report = {
                     let config = self.session();
@@ -446,7 +721,7 @@ impl Agent {
                         "system=[{}] preface=[{}] model={} cwd={}",
                         config.system_prompt.as_deref().unwrap_or_default(),
                         parts.join("|"),
-                        config.model.as_deref().unwrap_or(MODELS[0]),
+                        config.model.as_deref().unwrap_or(self.flavor.models()[0]),
                         config.cwd
                     )
                 };
@@ -457,38 +732,153 @@ impl Agent {
         self.end(id);
     }
 
-    fn request(self: &Arc<Self>, id: Value, method: &str, params: Value) {
-        match method {
-            "initialize" => self.respond(
-                &id,
+    fn error(&self, id: &Value, code: i64, message: &str, data: Value) {
+        let mut error = json!({ "code": code, "message": message });
+        if !data.is_null() {
+            error["data"] = data;
+        }
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "error": error }));
+    }
+
+    /// What the agent tells about itself: its capabilities and its sign-ins.
+    fn initialized(&self, params: &Value) -> Value {
+        let resume_only = json!({ "resume": {} });
+        let with_system_prompt = json!({ "resume": {}, "systemPrompt": {} });
+        let agent_sign_in = |id: &str, name: &str| json!({ "id": id, "name": name, "description": format!("{name} in the browser") });
+        let (capabilities, methods) = match &self.flavor {
+            Flavor::Codex(_) => (
                 json!({
-                    "protocolVersion": params["protocolVersion"],
-                    "agentCapabilities": {
-                        "sessionCapabilities": if std::env::var_os(SYSTEM_PROMPT).is_some() {
-                            json!({ "resume": {}, "systemPrompt": {} })
-                        } else {
-                            json!({ "resume": {} })
-                        },
-                        "auth": if auth_file().is_some() {
-                            json!({ "status": {} })
-                        } else {
-                            json!({})
-                        }
-                    },
-                    "authMethods": if auth_file().is_some()
-                        && params["clientCapabilities"]["auth"]["terminal"] == true
+                    "sessionCapabilities": with_system_prompt,
+                    "auth": {},
+                    "_meta": { "authStatus": true }
+                }),
+                json!([
                     {
-                        json!([{
-                            "id": "fake-login",
-                            "name": "Fake login",
-                            "type": "terminal",
-                            "args": ["--sign-in"]
-                        }])
+                        "id": "api-key",
+                        "name": "API key",
+                        "_meta": { "api-key": { "provider": "openai" } }
+                    },
+                    agent_sign_in("chat-gpt", "Sign in with ChatGPT"),
+                    agent_sign_in("device-code", "Sign in with a device code"),
+                ]),
+            ),
+            Flavor::Grok(_) => (
+                json!({ "sessionCapabilities": resume_only, "auth": {} }),
+                json!([agent_sign_in("grok.com", "Sign in with Grok")]),
+            ),
+            Flavor::Plain => (
+                json!({
+                    "sessionCapabilities": if std::env::var_os(SYSTEM_PROMPT).is_some() {
+                        with_system_prompt
                     } else {
-                        json!([])
+                        resume_only
+                    },
+                    "auth": if auth_file().is_some() {
+                        json!({ "status": {} })
+                    } else {
+                        json!({})
                     }
                 }),
+                if auth_file().is_some() && params["clientCapabilities"]["auth"]["terminal"] == true
+                {
+                    json!([{
+                        "id": "fake-login",
+                        "name": "Fake login",
+                        "type": "terminal",
+                        "args": ["--sign-in"]
+                    }])
+                } else {
+                    json!([])
+                },
             ),
+        };
+        json!({
+            "protocolVersion": params["protocolVersion"],
+            "agentCapabilities": capabilities,
+            "authMethods": methods
+        })
+    }
+
+    /// Why the agent opens no session, when it is signed out.
+    fn refuses_session(&self) -> Option<Value> {
+        match &self.flavor {
+            Flavor::Codex(_) if !self.flavor.signed_in() => Some(Value::Null),
+            Flavor::Grok(_) if !self.authenticated.load(Ordering::SeqCst) => {
+                Some(json!("no auth method id provided"))
+            }
+            _ => None,
+        }
+    }
+
+    fn request(self: &Arc<Self>, id: Value, method: &str, params: Value) {
+        match method {
+            "initialize" => {
+                self.respond(&id, self.initialized(&params));
+                if matches!(self.flavor, Flavor::Codex(_)) {
+                    let status = if self.flavor.signed_in() {
+                        json!({
+                            "kind": "account",
+                            "label": "Fake Plus",
+                            "account": { "email": "person@example.com", "plan": "plus" }
+                        })
+                    } else {
+                        json!({ "kind": "none", "label": "Not logged in" })
+                    };
+                    self.send(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "_auth/status_update",
+                        "params": { "authStatus": status }
+                    }));
+                }
+            }
+            "authenticate" => {
+                let method = params["methodId"].as_str().unwrap_or_default().to_owned();
+                let agent = self.clone();
+                // A sign-in can last: the agent keeps reading meanwhile.
+                std::thread::spawn(move || {
+                    let known = match &agent.flavor {
+                        Flavor::Codex(_) => ["chat-gpt", "device-code"].contains(&method.as_str()),
+                        Flavor::Grok(_) => method == "grok.com",
+                        Flavor::Plain => false,
+                    };
+                    if !known {
+                        return agent.error(&id, -32602, "unknown sign-in method", Value::Null);
+                    }
+                    // As Grok does, a sign-in ends only once the client asked for
+                    // the page where the person signs in.
+                    if matches!(agent.flavor, Flavor::Grok(_)) && !agent.flavor.signed_in() {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+                        while !agent.url_asked.load(Ordering::SeqCst) {
+                            if std::time::Instant::now() > deadline {
+                                return agent.error(
+                                    &id,
+                                    -32000,
+                                    "Authentication required",
+                                    Value::Null,
+                                );
+                            }
+                            std::thread::sleep(POLL_INTERVAL);
+                        }
+                    }
+                    if agent.flavor.signed_in() || agent.flavor.sign_in(&method) {
+                        agent.authenticated.store(true, Ordering::SeqCst);
+                        agent.respond(&id, json!({}));
+                    } else {
+                        agent.error(&id, -32000, "Authentication required", Value::Null);
+                    }
+                });
+            }
+            "_x.ai/auth/get_url" if matches!(self.flavor, Flavor::Grok(_)) => {
+                self.url_asked.store(true, Ordering::SeqCst);
+                self.respond(
+                    &id,
+                    json!({
+                        "auth_url": GROK_SIGN_IN_PAGE,
+                        "external_provider": false,
+                        "mode": "device"
+                    }),
+                );
+            }
             "auth/status" if auth_file().is_some() => self.respond(
                 &id,
                 if auth_file().is_some_and(|file| signed_in(&file)) {
@@ -505,46 +895,69 @@ impl Agent {
                     json!({ "state": "unauthenticated" })
                 },
             ),
-            "session/new" => self.respond(
-                &id,
-                json!({
-                    "sessionId": format!("fake-session-{}-{}", std::process::id(), started_at()),
-                    "configOptions": self.open_session(&params),
-                }),
-            ),
-            "session/resume" => {
-                self.resumed.store(true, Ordering::SeqCst);
-                self.respond(&id, json!({ "configOptions": self.open_session(&params) }));
+            "session/new" | "session/resume" => {
+                if let Some(data) = self.refuses_session() {
+                    return self.error(&id, -32000, "Authentication required", data);
+                }
+                let mut opened = self.open_session(&params);
+                if method == "session/resume" {
+                    self.resumed.store(true, Ordering::SeqCst);
+                } else {
+                    opened["sessionId"] =
+                        format!("fake-session-{}-{}", std::process::id(), started_at()).into();
+                }
+                self.respond(&id, opened);
+            }
+            "session/set_mode" => {
+                let mode = params["modeId"].as_str().unwrap_or_default();
+                let mut session = self.session();
+                if offered_modes(&self.flavor, session.claude).contains(&mode) {
+                    session.mode = Some(mode.to_owned());
+                    drop(session);
+                    self.respond(&id, json!({}));
+                } else {
+                    drop(session);
+                    self.error(&id, -32602, &format!("unknown mode {mode}"), Value::Null);
+                }
             }
             "session/set_config_option" => {
                 let value = params["value"].as_str().unwrap_or_default();
-                if params["configId"] == "model" && MODELS.contains(&value) {
-                    let mut session = self.session();
-                    session.model = Some(value.to_owned());
-                    self.respond(
-                        &id,
-                        json!({ "configOptions": Self::config_options(&session) }),
-                    );
+                let option = params["configId"].as_str().unwrap_or_default();
+                let mut session = self.session();
+                let set = match option {
+                    "model" if self.flavor.models().contains(&value) => {
+                        session.model = Some(value.to_owned());
+                        true
+                    }
+                    "reasoning_effort" if self.flavor.efforts().contains(&value) => {
+                        session.effort = Some(value.to_owned());
+                        true
+                    }
+                    _ => false,
+                };
+                let options = self.config_options(&session);
+                drop(session);
+                if set {
+                    self.respond(&id, json!({ "configOptions": options }));
                 } else {
-                    self.send(&json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": {
-                            "code": -32602,
-                            "message": format!("Invalid value for config option model: {value}")
-                        }
-                    }));
+                    self.error(
+                        &id,
+                        -32602,
+                        &format!("Invalid value for config option {option}: {value}"),
+                        Value::Null,
+                    );
                 }
             }
             "session/prompt" => {
                 let agent = self.clone();
                 std::thread::spawn(move || agent.prompt(&id, &params));
             }
-            _ => self.send(&json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("unknown method {method}") }
-            })),
+            _ => self.error(
+                &id,
+                -32601,
+                &format!("unknown method {method}"),
+                Value::Null,
+            ),
         }
     }
 
@@ -653,7 +1066,10 @@ fn main() {
             }
         });
     }
-    let agent = Arc::new(Agent::default());
+    let agent = Arc::new(Agent {
+        flavor: Flavor::read(),
+        ..Agent::default()
+    });
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         if let Ok(message) = serde_json::from_str(&line) {

@@ -86,6 +86,7 @@ fn kind(row: &Row) -> &'static str {
         RowKind::Thought { .. } => "thought",
         RowKind::Approval(_) => "approval",
         RowKind::Status(_) => "status",
+        RowKind::Notice(_) => "notice",
     }
 }
 

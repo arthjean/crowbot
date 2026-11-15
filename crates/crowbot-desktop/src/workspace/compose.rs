@@ -1,7 +1,7 @@
 use crowbot_protocol::ClientMessage;
 use gpui::{AnyElement, Context, Div, Focusable, Role, SharedString, Window, div, prelude::*};
 
-use super::Workspace;
+use super::{Workspace, forms};
 use crate::assets::Icon;
 use crate::theme::{Theme, icon as icon_size, layout, radius, size, space, text};
 use crate::ui::{self, ButtonKind};
@@ -233,12 +233,29 @@ impl Workspace {
             if !open.live().turn_active() {
                 return None;
             }
+            // A runtime that downloads before the turn starts is told here.
+            let download = self.selected_bot().and_then(|summary| {
+                let status = self
+                    .providers
+                    .iter()
+                    .find(|status| status.id == summary.bot.provider)?;
+                Some(forms::download_text(&status.name, status.install?))
+            });
             Some(if open.live().has_waiting_approval() {
-                "The bot is waiting for your approval."
+                (
+                    SharedString::from("The bot is waiting for your approval."),
+                    "activity",
+                )
+            } else if let Some(download) = download {
+                (download, "activity-download")
             } else {
-                "The bot is working…"
+                (SharedString::from("The bot is working…"), "activity")
             })
         });
+        let (activity, activity_selector) = match activity {
+            Some((text, selector)) => (Some(text), selector),
+            None => (None, "activity"),
+        };
         div()
             .w_full()
             .max_w(layout::COLUMN_WIDTH)
@@ -253,6 +270,7 @@ impl Workspace {
             .child(
                 div()
                     .id("activity")
+                    .debug_selector(move || activity_selector.into())
                     .role(Role::Status)
                     .h(layout::STATUS_ROW)
                     .flex()
@@ -260,7 +278,7 @@ impl Workspace {
                     .gap(space::S2)
                     .text_color(theme.text_muted)
                     .children(if self.editing.is_some() {
-                        Some("Editing a queued message.")
+                        Some(SharedString::from("Editing a queued message."))
                     } else {
                         activity
                     })

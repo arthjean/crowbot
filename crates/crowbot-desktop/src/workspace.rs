@@ -22,8 +22,8 @@ use std::time::Instant;
 use crowbot_protocol::{
     ApprovalDecision, BOT_INSTRUCTIONS_LENGTH, BOT_MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH,
     BotPatch, BotState, BotSummary, ClientMessage, ConversationSummary, DaemonInfo, Event,
-    MESSAGE_LENGTH, PermissionLevel, Preferences, ProviderStatus, QueueState, SEARCH_QUERY_LENGTH,
-    SendShortcut, ServerMessage, TimedEvent,
+    FailureCause, MESSAGE_LENGTH, PermissionLevel, Preferences, ProviderModels, ProviderStatus,
+    QueueState, SEARCH_QUERY_LENGTH, SendShortcut, ServerMessage, TimedEvent,
 };
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, KeyBinding,
@@ -35,7 +35,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use self::bot_panel::{BotPanel, PanelField};
 use self::creation::Creation;
 use self::palette::{Palette, RevealTarget};
-use self::settings::Section;
+use self::settings::{EXECUTABLE_LENGTH, ExecutableEdit, Section};
 use crate::bots;
 use crate::composer::{self, Composer, ComposerEvent, InputStyle};
 use crate::connection::{Connection, ConnectionEvent};
@@ -46,7 +46,7 @@ use crate::menu::{self, MenuAction, MenuEntry};
 use crate::reveal::Reveal;
 use crate::sidebar;
 use crate::theme::{Theme, duration, font, layout, text};
-use crate::transcript::{RowKind, Transcript};
+use crate::transcript::{RowKind, Status, Transcript};
 
 actions!(
     workspace,
@@ -308,6 +308,15 @@ pub struct Workspace {
     settings_focus: FocusHandle,
     providers: Vec<ProviderStatus>,
     providers_asked: bool,
+    /// What each provider offers, as the daemon last told it.
+    models: HashMap<String, ProviderModels>,
+    /// The providers asked for their models since the connection opened.
+    models_asked: HashSet<String>,
+    /// The providers whose sign-in this window started, until it opened the
+    /// page where the person finishes it.
+    sign_in_pages: HashSet<String>,
+    provider_executable: Entity<Composer>,
+    executable_edit: Option<ExecutableEdit>,
     daemon_info: Option<DaemonInfo>,
     palette: Option<Palette>,
     palette_query: Entity<Composer>,
@@ -354,6 +363,12 @@ impl Workspace {
             cx,
         );
         let creation_model = field("Model", "Default model", BOT_MODEL_LENGTH, cx);
+        let provider_executable = field(
+            "Executable path",
+            "Full path of the executable",
+            EXECUTABLE_LENGTH,
+            cx,
+        );
         let panel_name = field("Bot name", "Name", BOT_NAME_LENGTH, cx);
         let panel_title = field(
             "Bot title",
@@ -407,6 +422,15 @@ impl Workspace {
                 |this, _, event: &ComposerEvent, window, cx| {
                     if matches!(event, ComposerEvent::Submit) {
                         this.create_bot(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &provider_executable,
+                window,
+                |this, _, event: &ComposerEvent, _, cx| {
+                    if matches!(event, ComposerEvent::Submit) {
+                        this.save_executable(cx);
                     }
                 },
             ),
@@ -505,6 +529,11 @@ impl Workspace {
             settings_focus: cx.focus_handle(),
             providers: Vec::new(),
             providers_asked: false,
+            models: HashMap::new(),
+            models_asked: HashSet::new(),
+            sign_in_pages: HashSet::new(),
+            provider_executable,
+            executable_edit: None,
             daemon_info: None,
             palette: None,
             palette_query,
@@ -577,6 +606,7 @@ impl Workspace {
                         .send(ClientMessage::OpenConversation { conversation_id });
                 }
                 self.providers_asked = false;
+                self.models_asked.clear();
                 if self.creation.is_some() || self.settings.is_some() || self.side_panel {
                     self.ask_providers();
                 }
@@ -682,14 +712,36 @@ impl Workspace {
             }
             ServerMessage::Providers(providers) => self.providers = providers,
             ServerMessage::ProviderChanged(status) => {
-                match self
+                self.executable_applied(&status);
+                // The window that started a sign-in opens its page once; the
+                // others show a button for it.
+                if let Some(page) = &status.sign_in_url
+                    && self.sign_in_pages.remove(&status.id)
+                {
+                    self.open_link(page, cx);
+                }
+                if !status.signing_in {
+                    self.sign_in_pages.remove(&status.id);
+                }
+                let known = self
                     .providers
                     .iter_mut()
-                    .find(|known| known.id == status.id)
-                {
+                    .find(|known| known.id == status.id);
+                // A provider that changed state or program may list other
+                // models: it is asked again when a picker shows them.
+                let same = known.as_ref().is_some_and(|known| {
+                    known.state == status.state && known.executable == status.executable
+                });
+                if !same {
+                    self.models_asked.remove(&status.id);
+                }
+                match known {
                     Some(known) => *known = status,
                     None => self.providers.push(status),
                 }
+            }
+            ServerMessage::ProviderModels(models) => {
+                self.models.insert(models.provider.clone(), models);
             }
             ServerMessage::DaemonInfo(info) => self.daemon_info = Some(info),
             ServerMessage::SearchResults(results) => self.palette_results(results),
@@ -1004,6 +1056,16 @@ impl Workspace {
     /// The daemon did not do what was asked. The refusal goes to the form
     /// that waits for an answer, when one does.
     fn refused(&mut self, field: Option<&str>, message: String) {
+        if field == Some("executable") {
+            match self.executable_edit.as_mut() {
+                Some(edit) => {
+                    edit.saving = false;
+                    edit.error = Some(message.into());
+                }
+                None => self.fail(message),
+            }
+            return;
+        }
         if let Some(creation) = self.creation.as_mut().filter(|creation| creation.creating) {
             creation.creating = false;
             if field == Some("name") {
@@ -1035,6 +1097,41 @@ impl Workspace {
         if self.live() && !self.providers_asked {
             self.providers_asked = true;
             self.connection.send(ClientMessage::ListProviders);
+        }
+    }
+
+    /// Asks a provider for its models, once per connection and per state of
+    /// the provider.
+    fn ask_models(&mut self, provider: &str) {
+        if self.live() && !provider.is_empty() && self.models_asked.insert(provider.to_owned()) {
+            self.connection.send(ClientMessage::ListModels {
+                provider: provider.to_owned(),
+            });
+        }
+    }
+
+    /// Asks for what the pickers on screen show, and for the state of the
+    /// provider of a turn that failed for the lack of a sign-in.
+    fn sync_models(&mut self) {
+        if self.creation.is_some() {
+            let provider = self.creation_provider();
+            self.ask_models(&provider);
+        } else if self.side_panel
+            && let Some(provider) = self.selected_bot().map(|bot| bot.bot.provider.clone())
+        {
+            self.ask_models(&provider);
+        }
+        let sign_in_needed = self.open.as_ref().is_some_and(|open| {
+            matches!(
+                open.transcript.rows().last().map(|row| &row.kind),
+                Some(RowKind::Status(Status::Failed {
+                    cause: Some(FailureCause::SignInRequired),
+                    ..
+                }))
+            )
+        });
+        if sign_in_needed {
+            self.ask_providers();
         }
     }
 
@@ -2104,6 +2201,7 @@ impl Render for Workspace {
                 .update(cx, |composer, cx| composer.set_text(&text, window, cx));
         }
         self.sync_panel(window, cx);
+        self.sync_models();
         match self.focus_request.take() {
             Some(FocusRequest::Composer) => self.focus_composer(window, cx),
             Some(FocusRequest::CreationName) => {
@@ -2167,7 +2265,7 @@ impl Render for Workspace {
             .children(self.render_confirm_dialog(&theme, cx))
             .children(
                 shell
-                    .then(|| self.render_settings_dialog(&theme, cx))
+                    .then(|| self.render_settings_dialog(&theme, window, cx))
                     .flatten(),
             )
             .children(shell.then(|| self.render_palette(&theme, cx)).flatten())

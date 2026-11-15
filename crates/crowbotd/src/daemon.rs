@@ -19,8 +19,7 @@ use crowbot_protocol::{
 use tokio::sync::oneshot;
 
 use crate::conversation::{self, Command, ConversationHandle, Sink};
-use crate::provider::acp::AgentProfile;
-use crate::provider::claude;
+use crate::runtime::Runtimes;
 use crate::store::{BotRow, NewBot, SharedStore, StoreError};
 
 /// The provider of a bot that runs the agent command given to the daemon.
@@ -111,7 +110,11 @@ pub struct Daemon {
     store: SharedStore,
     database: PathBuf,
     bots_dir: PathBuf,
+    /// Where the daemon keeps what it installs and what providers store.
+    data_dir: PathBuf,
+    /// The agent command given to the daemon, which every bot then runs.
     command: Option<String>,
+    runtimes: Runtimes,
     state: Mutex<State>,
     next_connection: AtomicU64,
 }
@@ -121,13 +124,17 @@ impl Daemon {
         store: SharedStore,
         database: PathBuf,
         bots_dir: PathBuf,
+        data_dir: PathBuf,
         command: Option<String>,
+        runtimes: Runtimes,
     ) -> Self {
         Self {
             store,
             database,
             bots_dir,
+            data_dir,
             command,
+            runtimes,
             state: Mutex::new(State::default()),
             next_connection: AtomicU64::new(1),
         }
@@ -188,27 +195,13 @@ impl Daemon {
         Ok(handle)
     }
 
-    pub fn agent_profile(&self, provider: &str) -> Result<AgentProfile, String> {
-        match (provider, &self.command) {
-            (claude::PROVIDER, _) => Ok(claude::profile()),
-            (CUSTOM_PROVIDER, Some(command)) => Ok(AgentProfile::generic(command.clone())),
-            (CUSTOM_PROVIDER, None) => Err(
-                "this bot runs a custom agent, and the daemon was started without --agent"
-                    .to_owned(),
-            ),
-            (provider, _) => Err(format!("unknown provider: {provider}")),
-        }
-    }
-
     fn checked_provider(&self, provider: Option<String>) -> Result<String, Refusal> {
-        let default = if self.command.is_some() {
-            CUSTOM_PROVIDER
-        } else {
-            claude::PROVIDER
+        let offered = self.provider_ids();
+        let Some(provider) = provider else {
+            return Ok(offered[0].to_owned());
         };
-        let provider = provider.unwrap_or_else(|| default.to_owned());
-        match self.agent_profile(&provider) {
-            Ok(_) => Ok(provider),
+        match self.known_provider(&provider) {
+            Ok(id) => Ok(id.to_owned()),
             Err(message) => Err(invalid("provider", message)),
         }
     }
@@ -315,7 +308,8 @@ impl Daemon {
             instructions: checked_text("instructions", &draft.instructions, INSTRUCTIONS_LENGTH)?,
             avatar,
             provider: self.checked_provider(draft.provider)?,
-            model: checked_model(draft.model)?,
+            model: checked_choice("model", draft.model)?,
+            effort: checked_choice("effort", draft.effort)?,
             permission_level: draft.permission_level.unwrap_or_default(),
             workspace: String::new(),
             name,
@@ -346,6 +340,7 @@ impl Daemon {
             avatar: source.avatar,
             provider: source.provider,
             model: source.model,
+            effort: source.effort,
             permission_level: source.permission_level,
             workspace: String::new(),
         };
@@ -412,7 +407,11 @@ impl Daemon {
     }
 
     pub fn update_bot(&self, bot_id: i64, patch: BotPatch) -> Result<(), Refusal> {
-        let patch = checked_patch(patch)?;
+        let mut patch = checked_patch(patch)?;
+        patch.provider = patch
+            .provider
+            .map(|provider| self.checked_provider(Some(provider)))
+            .transpose()?;
         let (before, after) = self.store.with(|store| {
             let before = store.bot(bot_id)?;
             Ok::<_, StoreError>((before, store.update_bot(bot_id, &patch)?))
@@ -648,18 +647,18 @@ fn checked_avatar(avatar: Avatar) -> Result<Avatar, Refusal> {
     })
 }
 
-/// A model with no text is the provider's default.
-fn checked_model(model: Option<String>) -> Result<Option<String>, Refusal> {
-    let Some(model) = model.map(|model| model.trim().to_owned()) else {
+/// A model or a reasoning level with no text is the provider's default.
+fn checked_choice(field: &'static str, choice: Option<String>) -> Result<Option<String>, Refusal> {
+    let Some(choice) = choice.map(|choice| choice.trim().to_owned()) else {
         return Ok(None);
     };
-    if model.chars().count() > MODEL_LENGTH {
+    if choice.chars().count() > MODEL_LENGTH {
         return Err(invalid(
-            "model",
-            format!("A model name can hold {MODEL_LENGTH} characters at most."),
+            field,
+            format!("This field can hold {MODEL_LENGTH} characters at most."),
         ));
     }
-    Ok((!model.is_empty()).then_some(model))
+    Ok((!choice.is_empty()).then_some(choice))
 }
 
 fn checked_workspace(workspace: &str) -> Result<String, Refusal> {
@@ -691,7 +690,15 @@ fn checked_patch(patch: BotPatch) -> Result<BotPatch, Refusal> {
             .map(|instructions| checked_text("instructions", &instructions, INSTRUCTIONS_LENGTH))
             .transpose()?,
         avatar: patch.avatar.map(checked_avatar).transpose()?,
-        model: patch.model.map(checked_model).transpose()?,
+        model: patch
+            .model
+            .map(|model| checked_choice("model", model))
+            .transpose()?,
+        effort: patch
+            .effort
+            .map(|effort| checked_choice("effort", effort))
+            .transpose()?,
+        provider: patch.provider,
         workspace: patch
             .workspace
             .as_deref()

@@ -6,7 +6,6 @@ use gpui::{
 
 use super::forms::{self, AvatarOwner, GLYPHS};
 use super::{FocusRequest, Workspace};
-use crate::assets::Icon;
 use crate::theme::{Theme, control, icon as icon_size, layout, radius, size, space, text};
 use crate::ui::{self, ButtonKind};
 
@@ -62,6 +61,10 @@ pub(super) struct Creation {
     /// `None` is the first letter of the name.
     pub glyph: Option<usize>,
     pub template: Option<usize>,
+    /// `None` is the first provider of the daemon.
+    pub provider: Option<String>,
+    /// `None` is the default reasoning level of the provider.
+    pub effort: Option<String>,
     pub name_error: Option<SharedString>,
     pub error: Option<SharedString>,
     pub creating: bool,
@@ -188,29 +191,72 @@ impl Workspace {
         }
         creation.name_error = None;
         creation.creating = true;
+        let (provider, effort) = (creation.provider.clone(), creation.effort.clone());
         self.connection.send(ClientMessage::CreateBot {
             draft: BotDraft {
                 name,
                 instructions,
                 avatar: Some(avatar),
+                provider,
                 model: (!model.is_empty()).then_some(model),
+                effort,
                 ..BotDraft::default()
             },
         });
         cx.notify();
     }
 
-    /// The models that bots already run on: until a provider lists its
-    /// models, these are the ones the form can offer.
-    pub(super) fn known_models(&self) -> Vec<String> {
-        let mut models: Vec<String> = self
-            .bots
-            .iter()
-            .filter_map(|summary| summary.bot.model.clone())
-            .collect();
-        models.sort();
-        models.dedup();
-        models
+    /// The provider the new bot runs on: the one picked, or the first one
+    /// the daemon offers.
+    pub(super) fn creation_provider(&self) -> String {
+        self.creation
+            .as_ref()
+            .and_then(|creation| creation.provider.clone())
+            .or_else(|| self.providers.first().map(|status| status.id.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Another provider has other models and other reasoning levels: the
+    /// ones chosen so far go back to the defaults.
+    fn pick_creation_provider(
+        &mut self,
+        provider: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.creation_provider();
+        let Some(creation) = self.creation.as_mut() else {
+            return;
+        };
+        if creation.creating || provider.as_deref() == Some(current.as_str()) {
+            return;
+        }
+        creation.provider = provider;
+        creation.effort = None;
+        self.creation_model
+            .update(cx, |input, cx| input.clear(window, cx));
+    }
+
+    fn pick_creation_model(
+        &mut self,
+        model: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let model = model.unwrap_or_default();
+        self.creation_model
+            .update(cx, |input, cx| input.set_text(&model, window, cx));
+    }
+
+    fn pick_creation_effort(
+        &mut self,
+        effort: Option<String>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        if let Some(creation) = self.creation.as_mut() {
+            creation.effort = effort;
+        }
     }
 
     fn preview_bot(&self, cx: &Context<Self>) -> Bot {
@@ -222,6 +268,7 @@ impl Workspace {
             avatar: self.creation_avatar(cx),
             provider: String::new(),
             model: None,
+            effort: None,
             permission_level: PermissionLevel::AskFirst,
             workspace: String::new(),
             pinned: false,
@@ -278,51 +325,6 @@ impl Workspace {
                         ),
                 )
             }))
-    }
-
-    fn render_provider_notice(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = self.providers.first()?;
-        let problem = forms::provider_problem(status)?;
-        Some(
-            div()
-                .id("creation-provider-notice")
-                .debug_selector(|| "creation-provider-notice".into())
-                .role(Role::Status)
-                .aria_label(problem.clone())
-                .p(space::S3)
-                .flex()
-                .flex_col()
-                .gap(space::S2)
-                .rounded(radius::MD)
-                .bg(theme.warning_soft)
-                .child(
-                    div()
-                        .flex()
-                        .gap(space::S2)
-                        .child(
-                            div()
-                                .flex_none()
-                                .h(text::MD.leading)
-                                .flex()
-                                .items_center()
-                                .child(ui::icon(
-                                    Icon::TriangleAlert,
-                                    icon_size::SM,
-                                    theme.warning_text,
-                                )),
-                        )
-                        .child(div().flex_1().min_w_0().child(problem)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(space::S2)
-                        .children(self.provider_controls(status, "creation", theme, cx)),
-                )
-                .into_any_element(),
-        )
     }
 
     fn render_templates(
@@ -444,6 +446,7 @@ impl Workspace {
             }
         }
         let (creating, template) = (creation.creating, creation.template);
+        let effort = creation.effort.clone();
         let (name_error, error) = (creation.name_error.clone(), creation.error.clone());
         let first = self.bots.is_empty();
         let preview = self.preview_bot(cx);
@@ -477,8 +480,8 @@ impl Workspace {
             .items_start(),
             theme,
         );
-        let models = self.known_models();
-        let (hover, focus) = (theme.control_hover, theme.border_focus);
+        let provider = self.creation_provider();
+        let typed = self.creation_model.read(cx).text().trim().to_owned();
         let model = forms::field(
             "Model",
             self.input_box(
@@ -491,41 +494,52 @@ impl Workspace {
             ),
             theme,
         )
-        .children((!models.is_empty()).then(|| {
-            div()
-                .pl(layout::FIELD_LABEL_INDENT)
-                .flex()
-                .flex_wrap()
-                .gap(space::S1)
-                .children(models.into_iter().enumerate().map(|(index, model)| {
-                    let chosen = model.clone();
-                    div()
-                        .id(("model-option", index))
-                        .debug_selector(move || format!("model-option-{index}"))
-                        .focusable()
-                        .tab_stop(true)
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(format!("Use the model {model}")))
-                        .h(layout::BADGE_HEIGHT)
-                        .px(space::S2)
-                        .flex()
-                        .items_center()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .text_size(text::SM.size)
-                        .line_height(text::SM.leading)
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(hover))
-                        .focus_visible(move |style| style.border_color(focus))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.creation_model.update(cx, |input, cx| {
-                                input.set_text(&chosen, window, cx);
-                            });
-                        }))
-                        .child(SharedString::from(model))
-                }))
-        }));
+        .child(self.choice_chips(
+            "creation-model-choice",
+            "Model",
+            self.model_choices(&provider, (!typed.is_empty()).then_some(typed.as_str())),
+            Self::pick_creation_model,
+            theme,
+            cx,
+        ))
+        .children(
+            self.models_note(&provider)
+                .map(|reason| forms::note("creation-models-note", reason, theme.text_muted)),
+        );
+        let levels = self.effort_choices(&provider, effort.as_deref());
+        let reasoning = (!levels.is_empty()).then(|| {
+            forms::field(
+                "Reasoning",
+                self.choice_chips(
+                    "creation-effort",
+                    "Reasoning level",
+                    levels,
+                    Self::pick_creation_effort,
+                    theme,
+                    cx,
+                ),
+                theme,
+            )
+        });
+        let provider_field = (self.providers.len() > 1).then(|| {
+            forms::field(
+                "Provider",
+                self.choice_chips(
+                    "creation-provider",
+                    "Provider",
+                    self.provider_choices(&provider),
+                    Self::pick_creation_provider,
+                    theme,
+                    cx,
+                ),
+                theme,
+            )
+        });
+        let notice = self
+            .providers
+            .iter()
+            .find(|status| status.id == provider)
+            .and_then(|status| self.render_provider_notice(status, "creation", theme, cx));
 
         let create = if creating {
             div()
@@ -632,8 +646,10 @@ impl Workspace {
             )
             .child(name)
             .child(purpose)
+            .children(provider_field)
             .child(model)
-            .children(self.render_provider_notice(theme, cx))
+            .children(reasoning)
+            .children(notice)
             .children(error.map(|reason| {
                 div()
                     .debug_selector(|| "creation-error".into())

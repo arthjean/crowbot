@@ -1,0 +1,641 @@
+//! More providers and managed runtimes: the pickers of the provider, the
+//! model, and the reasoning level, the sign-ins of a provider, the runtime
+//! the daemon installs, and what a conversation tells about them.
+
+use crowbot_protocol::{
+    Bot, BotDraft, FailureCause, ModelChoice, ModelsState, ProviderModels, ProviderState,
+    ProviderStatus, RuntimeInstall, SignInMethod, TurnEnd,
+};
+
+use gpui::{ScrollDelta, ScrollEvent};
+
+use super::*;
+use crate::transcript::RowKind;
+
+fn status(id: &str, name: &str, state: ProviderState) -> ProviderStatus {
+    ProviderStatus {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        state,
+        ..ProviderStatus::default()
+    }
+}
+
+fn both_ready() -> Vec<ProviderStatus> {
+    vec![
+        status("claude", "Claude", ProviderState::Ready),
+        status("codex", "ChatGPT", ProviderState::Ready),
+    ]
+}
+
+fn offered(ids: &[&str]) -> Vec<ModelChoice> {
+    ids.iter()
+        .map(|id| ModelChoice {
+            id: (*id).to_owned(),
+            name: id.to_uppercase(),
+            description: None,
+        })
+        .collect()
+}
+
+fn listed(provider: &str, models: &[&str], efforts: &[&str]) -> ProviderModels {
+    ProviderModels {
+        provider: provider.to_owned(),
+        state: ModelsState::Listed,
+        models: offered(models),
+        default_model: models.first().map(|model| (*model).to_owned()),
+        efforts: offered(efforts),
+        default_effort: efforts.first().map(|effort| (*effort).to_owned()),
+        detail: None,
+    }
+}
+
+fn list_models(provider: &str) -> ClientMessage {
+    ClientMessage::ListModels {
+        provider: provider.to_owned(),
+    }
+}
+
+fn patches(sent: &[ClientMessage]) -> Vec<BotPatch> {
+    sent.iter()
+        .filter_map(|message| match message {
+            ClientMessage::UpdateBot { patch, .. } => Some(patch.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A window with the settings panel of the first bot, which runs on Claude.
+fn panel(cx: &mut TestAppContext) -> (Entity<Workspace>, Daemon, &mut VisualTestContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1600.)));
+    cx.update(|window, _| window.activate_window());
+    daemon.connect(two_bots(), cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(10, 1, Vec::new())),
+        cx,
+    );
+    click(cx, "open-bot-settings");
+    // The panel asks the provider of the bot for its models.
+    assert!(daemon.sent().contains(&list_models("claude")));
+    (workspace, daemon, cx)
+}
+
+fn notice_keys(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<&'static str> {
+    workspace.read_with(cx, |this, _| {
+        this.open
+            .as_ref()
+            .unwrap()
+            .transcript
+            .rows()
+            .iter()
+            .filter(|row| matches!(row.kind, RowKind::Notice(_)))
+            .map(|row| &*Box::leak(format!("notice-{}", row.key).into_boxed_str()))
+            .collect()
+    })
+}
+
+// US-031: models and reasoning effort.
+
+#[gpui::test]
+fn the_panel_lists_what_the_provider_offers_and_marks_the_current_choices(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = panel(cx);
+    daemon.tell(ServerMessage::Providers(both_ready()), cx);
+    daemon.tell(
+        ServerMessage::ProviderModels(listed("claude", &["fast", "smart"], &["low", "high"])),
+        cx,
+    );
+    for choice in [
+        "panel-provider-choice-0-chosen",
+        "panel-provider-choice-1",
+        "panel-model-choice-0-chosen",
+        "panel-model-choice-1",
+        "panel-model-choice-2",
+        "panel-effort-0-chosen",
+        "panel-effort-1",
+        "panel-effort-2",
+    ] {
+        assert!(shown(cx, choice), "{choice}");
+    }
+    daemon.sent();
+
+    click(cx, "panel-model-choice-2");
+    assert_eq!(
+        patches(&daemon.sent()),
+        [BotPatch {
+            model: Some(Some("smart".to_owned())),
+            ..BotPatch::default()
+        }]
+    );
+    let smart = summary(1, "Atlas", BotState::Idle);
+    daemon.tell(
+        ServerMessage::BotChanged(BotSummary {
+            bot: Bot {
+                model: Some("smart".to_owned()),
+                ..smart.bot.clone()
+            },
+            ..smart
+        }),
+        cx,
+    );
+    assert!(shown(cx, "panel-model-choice-2-chosen"));
+    assert!(shown(cx, "panel-model-choice-0"));
+
+    click(cx, "panel-effort-2");
+    assert_eq!(
+        patches(&daemon.sent()),
+        [BotPatch {
+            effort: Some(Some("high".to_owned())),
+            ..BotPatch::default()
+        }]
+    );
+    assert!(shown(cx, "panel-effort-2-chosen"));
+    click(cx, "panel-effort-0");
+    assert_eq!(
+        patches(&daemon.sent()),
+        [BotPatch {
+            effort: Some(None),
+            ..BotPatch::default()
+        }]
+    );
+
+    // Another provider: the bot moves, and that provider is asked for its models.
+    click(cx, "panel-provider-choice-1");
+    let sent = daemon.sent();
+    assert_eq!(
+        patches(&sent),
+        [BotPatch {
+            provider: Some("codex".to_owned()),
+            ..BotPatch::default()
+        }]
+    );
+    assert!(sent.contains(&list_models("codex")), "{sent:?}");
+    assert!(shown(cx, "panel-provider-choice-1-chosen"));
+}
+
+#[gpui::test]
+fn a_provider_with_no_model_list_shows_its_default_and_says_so(cx: &mut TestAppContext) {
+    let (_workspace, daemon, cx) = panel(cx);
+    daemon.tell(
+        ServerMessage::ProviderModels(ProviderModels {
+            provider: "claude".to_owned(),
+            state: ModelsState::Loading,
+            ..ProviderModels::default()
+        }),
+        cx,
+    );
+    assert!(shown(cx, "panel-models-note"));
+
+    daemon.tell(
+        ServerMessage::ProviderModels(ProviderModels {
+            provider: "claude".to_owned(),
+            state: ModelsState::Unavailable,
+            default_model: Some("sonnet".to_owned()),
+            detail: Some("Claude does not list its models.".to_owned()),
+            ..ProviderModels::default()
+        }),
+        cx,
+    );
+    assert!(shown(cx, "panel-models-note"));
+    assert!(shown(cx, "panel-model-choice-0-chosen"));
+    assert!(!shown(cx, "panel-model-choice-1"));
+    assert!(!shown(cx, "panel-effort"));
+    // The model can still be typed.
+    assert!(shown(cx, "panel-model"));
+
+    daemon.tell(
+        ServerMessage::ProviderModels(listed("claude", &["fast"], &[])),
+        cx,
+    );
+    assert!(!shown(cx, "panel-models-note"));
+    assert!(shown(cx, "panel-model-choice-1"));
+}
+
+// US-030: the sign-ins of a provider, and US-033: the provider of a new bot.
+
+#[gpui::test]
+fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1600.)));
+    daemon.connect(Vec::new(), cx);
+    let signed_out = ProviderStatus {
+        can_sign_in: true,
+        sign_in_methods: vec![
+            SignInMethod {
+                id: "chat-gpt".to_owned(),
+                name: "Sign in with ChatGPT".to_owned(),
+                description: None,
+            },
+            SignInMethod {
+                id: "device-code".to_owned(),
+                name: "Sign in with a device code".to_owned(),
+                description: None,
+            },
+        ],
+        ..status("codex", "ChatGPT", ProviderState::SignedOut)
+    };
+    daemon.tell(
+        ServerMessage::Providers(vec![
+            status("claude", "Claude", ProviderState::Ready),
+            signed_out,
+        ]),
+        cx,
+    );
+    assert!(daemon.sent().contains(&list_models("claude")));
+    assert!(shown(cx, "creation-provider-0-chosen"));
+    assert!(shown(cx, "creation-provider-1"));
+    assert!(!shown(cx, "creation-provider-notice"));
+    daemon.tell(
+        ServerMessage::ProviderModels(listed("claude", &["fast", "smart"], &[])),
+        cx,
+    );
+    assert!(shown(cx, "creation-model-choice-2"));
+    assert!(!shown(cx, "creation-effort"));
+
+    // The other provider is signed out: its sign-ins are listed by name.
+    click(cx, "creation-provider-1");
+    assert_eq!(daemon.sent(), [list_models("codex")]);
+    assert!(shown(cx, "creation-provider-1-chosen"));
+    assert!(shown(cx, "creation-provider-notice"));
+    assert!(shown(cx, "creation-sign-in-chat-gpt"));
+    click(cx, "creation-sign-in-device-code");
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::SignIn {
+            provider: "codex".to_owned(),
+            method: Some("device-code".to_owned()),
+        }]
+    );
+
+    daemon.tell(
+        ServerMessage::ProviderChanged(status("codex", "ChatGPT", ProviderState::Ready)),
+        cx,
+    );
+    assert!(!shown(cx, "creation-provider-notice"));
+    // A provider that changed state is asked for its models again.
+    assert_eq!(daemon.sent(), [list_models("codex")]);
+    daemon.tell(
+        ServerMessage::ProviderModels(listed(
+            "codex",
+            &["gpt-fast", "gpt-smart"],
+            &["medium", "low", "high"],
+        )),
+        cx,
+    );
+    click(cx, "creation-model-choice-2");
+    assert_eq!(
+        workspace.read_with(cx, |this, cx| this
+            .creation_model
+            .read(cx)
+            .text()
+            .to_owned()),
+        "gpt-smart"
+    );
+    assert!(shown(cx, "creation-model-choice-2-chosen"));
+    click(cx, "creation-effort-3");
+    assert!(shown(cx, "creation-effort-3-chosen"));
+
+    click(cx, "creation-name");
+    cx.simulate_input("Atlas");
+    click(cx, "create-bot");
+    let created = daemon.sent();
+    let Some(ClientMessage::CreateBot { draft }) = created.last() else {
+        panic!("no bot was created: {created:?}");
+    };
+    assert_eq!(
+        (
+            draft.provider.as_deref(),
+            draft.model.as_deref(),
+            draft.effort.as_deref()
+        ),
+        (Some("codex"), Some("gpt-smart"), Some("high"))
+    );
+    assert_eq!(
+        draft.name,
+        BotDraft {
+            name: "Atlas".to_owned(),
+            ..BotDraft::default()
+        }
+        .name
+    );
+}
+
+// US-032: managed agent runtimes.
+
+#[gpui::test]
+fn a_provider_shows_its_runtime_its_download_and_takes_an_executable_of_the_user(
+    cx: &mut TestAppContext,
+) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "open-settings");
+    click(cx, "settings-providers");
+    let claude = |state| ProviderStatus {
+        runtime: Some("claude-agent-acp 0.107.0".to_owned()),
+        ..status("claude", "Claude", state)
+    };
+    let set = |path: Option<&str>| ClientMessage::SetProviderExecutable {
+        provider: "claude".to_owned(),
+        path: path.map(str::to_owned),
+    };
+    daemon.tell(
+        ServerMessage::Providers(vec![claude(ProviderState::NotInstalled)]),
+        cx,
+    );
+    daemon.sent();
+    assert!(shown(cx, "provider-0-runtime"));
+    assert!(!shown(cx, "provider-0-download"));
+    click(cx, "provider-0-install");
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::InstallRuntime {
+            provider: "claude".to_owned()
+        }]
+    );
+
+    daemon.tell(
+        ServerMessage::ProviderChanged(ProviderStatus {
+            install: Some(RuntimeInstall {
+                received: 50 << 20,
+                total: 228 << 20,
+            }),
+            ..claude(ProviderState::NotInstalled)
+        }),
+        cx,
+    );
+    assert!(shown(cx, "provider-0-download"));
+    assert!(!shown(cx, "provider-0-install"));
+    daemon.tell(
+        ServerMessage::ProviderChanged(claude(ProviderState::Ready)),
+        cx,
+    );
+    assert!(!shown(cx, "provider-0-download"));
+    assert!(!shown(cx, "provider-0-install"));
+
+    // The user's own executable, in place of the runtime.
+    assert!(!shown(cx, "provider-0-installed-runtime"));
+    click(cx, "provider-0-own-executable");
+    click(cx, "provider-executable");
+    cx.simulate_input("C:/tools/agent.exe");
+    click(cx, "save-executable");
+    assert_eq!(daemon.sent(), [set(Some("C:/tools/agent.exe"))]);
+    daemon.tell(
+        ServerMessage::InvalidField {
+            field: "executable".to_owned(),
+            message: "The file C:/tools/agent.exe does not exist.".to_owned(),
+        },
+        cx,
+    );
+    assert!(shown(cx, "provider-executable-error"));
+    assert!(shown(cx, "provider-executable"));
+
+    click(cx, "save-executable");
+    assert_eq!(daemon.sent(), [set(Some("C:/tools/agent.exe"))]);
+    daemon.tell(
+        ServerMessage::ProviderChanged(ProviderStatus {
+            executable: Some("C:/tools/agent.exe".to_owned()),
+            ..claude(ProviderState::Ready)
+        }),
+        cx,
+    );
+    assert!(!shown(cx, "provider-executable"));
+    click(cx, "provider-0-installed-runtime");
+    assert_eq!(daemon.sent(), [set(None)]);
+}
+
+#[gpui::test]
+fn the_conversation_tells_a_download_a_provider_change_and_a_model_that_is_gone(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::UserText("hi".to_owned()),
+                Event::ProviderChanged {
+                    from: "claude".to_owned(),
+                    to: "codex".to_owned(),
+                },
+                Event::ModelUnavailable {
+                    model: "opus".to_owned(),
+                    provider: Some("codex".to_owned()),
+                },
+                Event::MessageText("ok".to_owned()),
+                Event::TurnEnded(TurnEnd::Completed),
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 2);
+    for notice in notices {
+        assert!(shown(cx, notice), "{notice}");
+    }
+
+    // A turn that waits for its runtime tells how far the download is.
+    daemon.tell(
+        ServerMessage::ConversationEvent {
+            conversation_id: 10,
+            event: Event::UserText("again".to_owned()),
+            at_ms: NOON + 10_000,
+        },
+        cx,
+    );
+    assert!(shown(cx, "activity"));
+    daemon.tell(
+        ServerMessage::ProviderChanged(ProviderStatus {
+            install: Some(RuntimeInstall {
+                received: 1 << 20,
+                total: 8 << 20,
+            }),
+            ..status("claude", "Claude", ProviderState::NotInstalled)
+        }),
+        cx,
+    );
+    assert!(shown(cx, "activity-download"));
+    daemon.tell(
+        ServerMessage::ProviderChanged(status("claude", "Claude", ProviderState::Ready)),
+        cx,
+    );
+    assert!(!shown(cx, "activity-download"));
+    assert!(shown(cx, "activity"));
+}
+
+fn daemon_connected(daemon: &Daemon, cx: &mut VisualTestContext) {
+    daemon.link(ConnectionEvent::Connected, cx);
+    daemon.tell(ServerMessage::Preferences(Preferences::default()), cx);
+    daemon.tell(ServerMessage::Bots(two_bots()), cx);
+}
+
+#[gpui::test]
+fn a_turn_that_failed_for_a_sign_in_offers_the_sign_in_of_its_provider(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "bot-1");
+    daemon.sent();
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::UserText("hi".to_owned()),
+                Event::TurnFailed {
+                    message: "Authentication required".to_owned(),
+                    cause: Some(FailureCause::SignInRequired),
+                    provider: Some("claude".to_owned()),
+                },
+            ],
+        )),
+        cx,
+    );
+    // The state of the provider is asked for, to offer its sign-in.
+    assert!(daemon.sent().contains(&ClientMessage::ListProviders));
+    assert!(!shown(cx, "turn-sign-in"));
+    daemon.tell(
+        ServerMessage::Providers(vec![ProviderStatus {
+            can_sign_in: true,
+            ..status("claude", "Claude", ProviderState::SignedOut)
+        }]),
+        cx,
+    );
+    click(cx, "turn-sign-in");
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::SignIn {
+            provider: "claude".to_owned(),
+            method: None,
+        }]
+    );
+    daemon.tell(
+        ServerMessage::ProviderChanged(status("claude", "Claude", ProviderState::Ready)),
+        cx,
+    );
+    assert!(!shown(cx, "turn-sign-in"));
+}
+
+#[gpui::test]
+fn the_providers_scroll_until_the_last_one_is_reachable(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "open-settings");
+    click(cx, "settings-providers");
+    let runtime = |id: &str, name: &str, label: &str| ProviderStatus {
+        runtime: Some(label.to_owned()),
+        detail: Some(format!(
+            "Crow Bot downloads {label} when a bot first needs it."
+        )),
+        ..status(id, name, ProviderState::NotInstalled)
+    };
+    daemon.tell(
+        ServerMessage::Providers(vec![
+            runtime("claude", "Claude", "claude-agent-acp 0.107.0 (218 MB)"),
+            runtime(
+                "codex",
+                "ChatGPT",
+                "codex-acp 2.6.0-codex-0.166.0-bun-1.4.4 (225 MB)",
+            ),
+            runtime("grok", "Grok", "grok 1.0.77 (69 MB)"),
+        ]),
+        cx,
+    );
+    daemon.sent();
+    let dialog = bounds(cx, "settings-dialog");
+    let install = bounds(cx, "provider-2-install");
+    assert!(
+        install.bottom() > dialog.bottom(),
+        "the last provider fits without a scroll: {install:?} in {dialog:?}"
+    );
+    cx.simulate_event(ScrollEvent {
+        position: dialog.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+        ..ScrollEvent::default()
+    });
+    cx.run_until_parked();
+    let install = bounds(cx, "provider-2-install");
+    assert!(
+        install.bottom() <= dialog.bottom() && install.top() >= dialog.top(),
+        "the install button of Grok stays out of reach: {install:?} in {dialog:?}"
+    );
+    click(cx, "provider-2-install");
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::InstallRuntime {
+            provider: "grok".to_owned()
+        }]
+    );
+}
+
+#[gpui::test]
+fn the_window_that_starts_a_sign_in_opens_the_page_the_provider_names(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "open-settings");
+    click(cx, "settings-providers");
+    let signed_out = ProviderStatus {
+        can_sign_in: true,
+        ..status("grok", "Grok", ProviderState::SignedOut)
+    };
+    let page = "https://accounts.example/oauth2/device?user_code=FAKE-1234";
+    let named = ProviderStatus {
+        signing_in: true,
+        sign_in_url: Some(page.to_owned()),
+        ..signed_out.clone()
+    };
+    daemon.tell(ServerMessage::Providers(vec![signed_out.clone()]), cx);
+
+    // A sign-in that another window started shows the page, and opens nothing.
+    daemon.tell(ServerMessage::ProviderChanged(named.clone()), cx);
+    assert!(shown(cx, "provider-0-sign-in-page"));
+    // The row shows the code that the page asks to check.
+    assert!(shown(cx, "provider-0-sign-in-code"));
+    assert_eq!(cx.opened_url(), None);
+    daemon.tell(ServerMessage::ProviderChanged(signed_out.clone()), cx);
+    assert!(!shown(cx, "provider-0-sign-in-page"));
+
+    // The window that starts it opens the page once, when the provider names it.
+    daemon.sent();
+    click(cx, "provider-0-sign-in");
+    assert_eq!(
+        daemon.sent(),
+        [ClientMessage::SignIn {
+            provider: "grok".to_owned(),
+            method: None,
+        }]
+    );
+    daemon.tell(
+        ServerMessage::ProviderChanged(ProviderStatus {
+            signing_in: true,
+            ..signed_out.clone()
+        }),
+        cx,
+    );
+    assert_eq!(cx.opened_url(), None);
+    daemon.tell(ServerMessage::ProviderChanged(named.clone()), cx);
+    assert_eq!(cx.opened_url().as_deref(), Some(page));
+    click(cx, "provider-0-sign-in-page");
+    assert_eq!(cx.opened_url().as_deref(), Some(page));
+}
+
+#[test]
+fn a_sign_in_code_is_read_from_the_page_and_nothing_else() {
+    use super::super::forms::sign_in_code;
+    assert_eq!(
+        sign_in_code("https://accounts.x.ai/oauth2/device?user_code=FJK4-52Q5").as_deref(),
+        Some("FJK4-52Q5")
+    );
+    assert_eq!(
+        sign_in_code("https://a.example/device?x=1&user_code=ab-12").as_deref(),
+        Some("AB-12")
+    );
+    assert_eq!(sign_in_code("https://a.example/device"), None);
+    assert_eq!(sign_in_code("https://a.example/device?user_code="), None);
+    assert_eq!(
+        sign_in_code("https://a.example/?user_code=%3Cscript%3E"),
+        None
+    );
+}

@@ -4,18 +4,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
-    ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, MESSAGE_LENGTH, PermissionLevel, QueueState, ServerMessage,
+    ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
+    FailureCause, Interruption, MESSAGE_LENGTH, PermissionLevel, QueueState, ServerMessage,
+    TurnEnd,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use crate::daemon::Daemon;
+use crate::handoff::{self, HANDOFF_CHARACTERS};
 use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
-use crate::store::{BotRow, Conversation, EventsPage, Recorder, SharedStore, StoreError};
+use crate::store::{
+    BotRow, Conversation, EventsPage, Recorder, SharedStore, StoreError, session_fingerprint,
+};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -156,11 +160,31 @@ struct Session {
     generation: u64,
     /// The revision of the bot's session settings this session was started with.
     revision: i64,
-    model: Option<String>,
-    provider: String,
-    folder: String,
+    /// The bot as it was when the session started. Its model is the one the
+    /// session runs on.
+    bot: Bot,
+    /// The provider that ran the conversation before, when it is another
+    /// one. Taken when the session starts, to record the change once.
+    moved_from: Option<String>,
     commands: UnboundedSender<SessionCommand>,
     task: AbortHandle,
+}
+
+/// Waits until the turn is stopped. A stop that comes before the provider
+/// session exists ends the turn here: no agent runs yet to end it.
+async fn stopped(commands: &mut UnboundedReceiver<SessionCommand>) {
+    loop {
+        match commands.recv().await {
+            Some(SessionCommand::Cancel { approvals }) => {
+                for approval in approvals {
+                    approval.send(ApprovalAnswer::Cancel).ok();
+                }
+                return;
+            }
+            Some(SessionCommand::Prompt { .. }) => {}
+            None => std::future::pending().await,
+        }
+    }
 }
 
 struct PendingApproval {
@@ -511,7 +535,7 @@ impl Actor {
                 .session
                 .as_ref()
                 .filter(|_| self.turn_active)
-                .map(|session| session.model.clone()),
+                .map(|session| session.bot.model.clone()),
         })
     }
 
@@ -589,7 +613,11 @@ impl Actor {
     fn deliver(&mut self, text: String) {
         match self.try_deliver(text) {
             Ok(()) => {
-                if let Some(model) = self.session.as_ref().map(|session| session.model.clone()) {
+                if let Some(model) = self
+                    .session
+                    .as_ref()
+                    .map(|session| session.bot.model.clone())
+                {
                     self.broadcast(ServerMessage::TurnModel {
                         conversation_id: self.id,
                         model,
@@ -607,7 +635,7 @@ impl Actor {
                 Ok::<_, StoreError>((store.conversation(self.id)?, store.bot(self.bot_id)?))
             })
             .map_err(|error| TurnFailure::before_session(error.to_string()))?;
-        let conversation = conversation.ok_or_else(|| {
+        conversation.ok_or_else(|| {
             TurnFailure::before_session(format!("conversation {} does not exist", self.id))
         })?;
         let bot = bot.ok_or_else(|| {
@@ -621,14 +649,9 @@ impl Actor {
             )));
         }
         let provider = bot.bot.provider.clone();
-        let not_delivered = || {
-            TurnFailure::of_provider(
-                &provider,
-                "the agent stopped before it received the message",
-            )
-        };
-        // New instructions, a new model, or a new folder take a new provider
-        // session: the one that runs keeps the old ones.
+        // Another provider, new instructions, a new model, a new reasoning
+        // level, or a new folder take a new provider session: the one that
+        // runs keeps the old ones.
         if self
             .session
             .as_ref()
@@ -637,49 +660,76 @@ impl Actor {
             self.close_session();
         }
         let text = match &self.session {
-            Some(session) => match session.commands.send(SessionCommand::Prompt(text)) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::SendError(SessionCommand::Prompt(unsent))) => unsent,
-                Err(_) => return Err(not_delivered()),
-            },
+            Some(session) => {
+                let prompt = SessionCommand::Prompt {
+                    text,
+                    handoff: None,
+                };
+                match session.commands.send(prompt) {
+                    Ok(()) => return Ok(()),
+                    Err(mpsc::error::SendError(SessionCommand::Prompt { text, .. })) => text,
+                    Err(_) => {
+                        return Err(TurnFailure::of_provider(
+                            &provider,
+                            "the agent stopped before it received the message",
+                        ));
+                    }
+                }
+            }
             None => text,
         };
         let session = self
-            .start_session(conversation, bot)
+            .start_session(bot, text)
             .map_err(|message| TurnFailure::of_provider(&provider, message))?;
-        session
-            .commands
-            .send(SessionCommand::Prompt(text))
-            .map_err(|_| not_delivered())?;
         self.session = Some(session);
         Ok(())
     }
 
-    fn start_session(
-        &mut self,
-        conversation: Conversation,
-        bot: BotRow,
-    ) -> Result<Session, String> {
+    /// Starts the provider session that runs the message. The session is the
+    /// one the provider holds for this conversation when it was started with
+    /// the settings the bot has now, and a new one otherwise. When another
+    /// provider ran the conversation last, the message comes after what the
+    /// session has not seen of it.
+    fn start_session(&mut self, bot: BotRow, text: String) -> Result<Session, String> {
         let revision = bot.session_revision;
-        let model = bot.bot.model.clone();
-        let provider = bot.bot.provider.clone();
-        let folder = bot.bot.workspace.clone();
-        let config = SessionConfig {
-            agent: self.daemon.agent_profile(&bot.bot.provider)?,
-            cwd: PathBuf::from(bot.bot.workspace),
-            // The provider session is resumed only when it was started with
-            // the settings the bot has now.
-            resume: conversation
-                .provider_session_id
-                .filter(|_| conversation.session_revision == Some(revision)),
-            instructions: bot.bot.instructions,
-            model: bot.bot.model,
+        let bot = bot.bot;
+        let provider = bot.provider.clone();
+        let fingerprint = session_fingerprint(&bot);
+        self.recorder.save().map_err(|error| error.to_string())?;
+        let (held, last) = self
+            .store
+            .with(|store| {
+                Ok::<_, StoreError>((
+                    store.provider_session(self.id, &provider)?,
+                    store.last_provider_session(self.id)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let resumed = held.filter(|session| session.fingerprint == fingerprint);
+        let moved_from = last
+            .map(|session| session.provider)
+            .filter(|last| *last != provider);
+        let handoff = match &moved_from {
+            Some(from) => {
+                let seen = resumed.as_ref().map_or(0, |session| session.last_event_id);
+                let events = self
+                    .store
+                    .with(|store| store.handoff_events(self.id, seen, HANDOFF_CHARACTERS))
+                    .map_err(|error| error.to_string())?;
+                handoff::build(&events, &self.daemon.provider_name(from))
+            }
+            None => None,
         };
+        let first = vec![SessionCommand::Prompt { text, handoff }];
+        let resume = resumed.map(|session| session.session_id);
+        let settings = bot.clone();
+
         self.generation += 1;
         let generation = self.generation;
-        let (commands, command_receiver) = mpsc::unbounded_channel();
+        let (commands, mut command_receiver) = mpsc::unbounded_channel();
         let (events, mut event_receiver) = mpsc::unbounded_channel();
         let inputs = self.inputs.clone();
+        let daemon = self.daemon.clone();
         let task = tokio::spawn(async move {
             let forwarding = inputs.clone();
             let forward = async move {
@@ -689,8 +739,31 @@ impl Actor {
                     }
                 }
             };
-            let (result, ()) =
-                tokio::join!(acp::run_session(config, command_receiver, events), forward);
+            let session = async move {
+                // A runtime that is not installed downloads here: the turn
+                // waits for it, and a stop ends the wait.
+                let (agent, launch, signed_in) = tokio::select! {
+                    launch = daemon.session_launch(&settings.provider) => launch?,
+                    () = stopped(&mut command_receiver) => {
+                        events
+                            .send(AgentEvent::Event(Event::TurnEnded(TurnEnd::Cancelled)))
+                            .ok();
+                        return Ok(());
+                    }
+                };
+                let config = SessionConfig {
+                    agent,
+                    launch,
+                    cwd: PathBuf::from(settings.workspace),
+                    resume,
+                    instructions: settings.instructions,
+                    model: settings.model,
+                    effort: settings.effort,
+                    signed_in,
+                };
+                acp::run_session(config, first, command_receiver, events).await
+            };
+            let (result, ()) = tokio::join!(session, forward);
             inputs
                 .send(Input::SessionClosed { generation, result })
                 .ok();
@@ -698,9 +771,8 @@ impl Actor {
         Ok(Session {
             generation,
             revision,
-            model,
-            provider,
-            folder,
+            bot,
+            moved_from,
             commands,
             task: task.abort_handle(),
         })
@@ -719,13 +791,55 @@ impl Actor {
             AgentEvent::Started {
                 provider_session_id,
             } => {
-                let Some(revision) = self.session.as_ref().map(|session| session.revision) else {
+                let Some(session) = self.session.as_mut() else {
                     return;
                 };
-                let saved = self.store.with(|store| {
-                    store.set_provider_session(self.id, &provider_session_id, revision)
+                let provider = session.bot.provider.clone();
+                let fingerprint = session_fingerprint(&session.bot);
+                if let Some(from) = session.moved_from.take() {
+                    self.emit(Event::ProviderChanged {
+                        from,
+                        to: provider.clone(),
+                    });
+                }
+                let saved = self.recorder.save().and_then(|()| {
+                    self.store.with(|store| {
+                        store.set_provider_session(
+                            self.id,
+                            &provider,
+                            &provider_session_id,
+                            &fingerprint,
+                        )
+                    })
                 });
                 self.report_store(saved);
+            }
+            AgentEvent::Offer(offer) => {
+                if let Some(session) = &self.session {
+                    self.daemon.record_offer(&session.bot.provider, offer);
+                }
+            }
+            AgentEvent::ModelUnavailable { model } => {
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                // The session runs on the provider's default model, and so
+                // does the bot from now on.
+                session.bot.model = None;
+                let provider = session.bot.provider.clone();
+                self.emit(Event::ModelUnavailable {
+                    model: model.clone(),
+                    provider: Some(provider),
+                });
+                let cleared = self
+                    .store
+                    .with(|store| store.clear_bot_model(self.bot_id, &model));
+                self.report_store(cleared);
+                self.daemon.publish_bot(self.bot_id);
+                self.broadcast(ServerMessage::TurnModel {
+                    conversation_id: self.id,
+                    model: None,
+                });
             }
             AgentEvent::Event(event) => {
                 if event.ends_turn() {
@@ -775,7 +889,10 @@ impl Actor {
                     cut,
                     reply,
                 });
-                let folder = self.session.as_ref().map(|session| session.folder.clone());
+                let folder = self
+                    .session
+                    .as_ref()
+                    .map(|session| session.bot.workspace.clone());
                 self.emit(Event::ApprovalRequested {
                     id,
                     tool_call_id,
@@ -885,7 +1002,7 @@ impl Actor {
         if !self.is_current(generation) {
             return;
         }
-        let provider = self.session.take().map(|session| session.provider);
+        let provider = self.session.take().map(|session| session.bot.provider);
         if self.turn_active {
             let failure = match result {
                 Err(failure) => TurnFailure {
@@ -927,6 +1044,17 @@ impl Actor {
         self.stop_due = None;
         let closed = self.recorder.close();
         self.report_store(closed);
+        // The session that ran the turn knows the conversation up to here.
+        if let Some(provider) = self
+            .session
+            .as_ref()
+            .map(|session| session.bot.provider.clone())
+        {
+            let known = self
+                .store
+                .with(|store| store.touch_provider_session(self.id, &provider));
+            self.report_store(known);
+        }
 
         let send_now = std::mem::take(&mut self.next_after_stop);
         if self.closing.is_some() {

@@ -1,4 +1,5 @@
 mod conversation;
+mod providers;
 mod setup;
 
 use crowbot_protocol::{

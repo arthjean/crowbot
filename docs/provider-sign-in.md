@@ -1,6 +1,6 @@
 # Provider sign-in: how the daemon reads the state and starts a sign-in
 
-> Status: finding of US-025 | Observed on 2026-11-14, Windows 11, Bun 1.4.4
+> Status: finding of US-025, amended by US-030 and US-032 on 2026-11-15 (see "What changed since") | Observed on 2026-11-14, Windows 11, Bun 1.4.4
 
 This note answers one question: how can `crowbotd` tell whether a provider is ready, signed out, or missing its runtime, and how can it start the provider's own sign-in without touching a credential. Every line marked "observed" comes from a run on the author's computer. What was not run is listed at the end.
 
@@ -105,12 +105,21 @@ For each provider profile, in this order:
 
 `unknown` never blocks a bot: the turn is the final check, and a turn that fails for a missing sign-in already carries `FailureCause::SignInRequired`.
 
+## What changed since
+
+US-030 and US-032 changed the method above. The observations above stay as they were made.
+
+- **No launcher on `PATH`.** The daemon no longer starts an adapter through `bunx`. It runs the runtime it installed (`crates/crowbotd/src/runtime.rs`), or the executable the user set for the provider. A runtime that is not installed gives the state **not installed**, with a control that downloads it; **runtime missing** is left for a program that does not start or a platform with no pinned runtime.
+- **Codex and Grok run in a home of the daemon** (`<data>/providers/<id>/home`, set through `CODEX_HOME` and `GROK_HOME`). The user's own sign-in to those tools is not seen: the user signs in once from Crow Bot, through the `authenticate` request. The daemon stores one flag per provider (`provider_settings.signed_in`), never a credential.
+- **Grok opens no browser over ACP** (observed with Grok 1.0.77 on 2026-11-15). During `authenticate`, it picks a transport (`device` by default, from its remote config; `loopback` when the request carries `_meta.use_oauth`) and waits. It names the page where the person signs in only when the client asks `_x.ai/auth/get_url`, which answers `{"auth_url", "mode"}`; in `device` mode the address already holds the code to confirm. The Grok profile names that request (`sign_in_page`): while the sign-in runs, the daemon asks it, puts the address in the provider's status (`sign_in_url`, never stored), and the window that started the sign-in opens it. Every window shows "Open the page" for it.
+- **How the state is read**, in this order (`probe` in `provider/acp.rs`): the request `auth/status` when the agent advertises it (Claude); else the pushed status update when the agent announces `authStatus` in the `_meta` of its capabilities (Codex); else, for an agent that wants its sign-in named before each session (Grok, method `grok.com`), **signed out** until a sign-in started from Crow Bot ended well, then one `authenticate` request with that method, which the agent accepts or refuses.
+- **Several sign-in methods** are listed to the client by name, and the client starts the one picked. The Codex method `api-key` is not listed: it would need the daemon to hold a key.
+
 ## Not run
 
 - A Claude sign-in carried to its end. It needs a person in the browser. The start, the browser opening, and the wait were observed; the exit status 0 after approval is what the ACP schema states for `terminal` methods.
 - The sign-in on a computer with no browser. The link printed for that case expects a code pasted into a terminal, which a hidden process does not have. It belongs to the servers PRD.
 - The push of `auth/status_update` at the start of each prompt, described in the adapter's source (`dist/auth-status.js`).
 - A state where the adapter answers `unknown`.
-- Codex: the `authenticate` request with `chatgpt`, and the package `@agentclientprotocol/codex-acp`.
-- Grok: `authenticate`, `grok login`, and a signed-out state.
+- Codex and Grok: a sign-in carried to its end in the home of the daemon, and a real turn after it. Both need a person in the browser. The flow is tested with the scripted agent (`crates/crowbotd/tests/daemon/providers.rs`).
 - macOS and Linux.

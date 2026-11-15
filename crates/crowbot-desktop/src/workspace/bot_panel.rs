@@ -265,6 +265,71 @@ impl Workspace {
         }
     }
 
+    /// Moves the bot to another provider. The daemon gives it back the model
+    /// and the reasoning level it had with that provider.
+    fn pick_panel_provider(
+        &mut self,
+        provider: Option<String>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        let (Some(bot_id), Some(provider)) = (self.panel.bot_id, provider) else {
+            return;
+        };
+        let current = self.bot(bot_id).map(|summary| summary.bot.provider.clone());
+        if !self.live() || current.as_deref() == Some(provider.as_str()) {
+            return;
+        }
+        let shown = provider.clone();
+        if self.change_bot(bot_id, |summary| {
+            summary.bot.provider = shown;
+            summary.bot.model = None;
+            summary.bot.effort = None;
+        }) {
+            self.send_update(
+                bot_id,
+                BotPatch {
+                    provider: Some(provider),
+                    ..BotPatch::default()
+                },
+                None,
+            );
+        }
+    }
+
+    fn pick_panel_model(
+        &mut self,
+        model: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let model = model.unwrap_or_default();
+        self.panel_model
+            .update(cx, |input, cx| input.set_text(&model, window, cx));
+        self.save_panel_field(PanelField::Model, None, cx);
+    }
+
+    fn pick_panel_effort(&mut self, effort: Option<String>, _: &mut Window, _: &mut Context<Self>) {
+        let Some(bot_id) = self.panel.bot_id else {
+            return;
+        };
+        let current = self.bot(bot_id).map(|summary| summary.bot.effort.clone());
+        if !self.live() || current.as_ref() == Some(&effort) {
+            return;
+        }
+        let shown = effort.clone();
+        if self.change_bot(bot_id, |summary| summary.bot.effort = shown) {
+            self.send_update(
+                bot_id,
+                BotPatch {
+                    effort: Some(effort),
+                    ..BotPatch::default()
+                },
+                None,
+            );
+        }
+    }
+
     pub(super) fn save_avatar(&mut self, bot_id: i64, avatar: Avatar) {
         if !self.live() {
             return;
@@ -573,6 +638,7 @@ impl Workspace {
                     ))
             }));
 
+        let levels = self.effort_choices(&bot.provider, bot.effort.as_deref());
         let brain = div()
             .flex()
             .flex_col()
@@ -603,7 +669,46 @@ impl Workspace {
                         })),
                 ),
             )
-            .child(self.render_panel_field(PanelField::Model, theme, window, cx));
+            .children((self.providers.len() > 1).then(|| {
+                self.choice_chips(
+                    "panel-provider-choice",
+                    "Provider",
+                    self.provider_choices(&bot.provider),
+                    Self::pick_panel_provider,
+                    theme,
+                    cx,
+                )
+            }))
+            .children(
+                provider.and_then(|status| self.render_provider_notice(status, "panel", theme, cx)),
+            )
+            .child(self.render_panel_field(PanelField::Model, theme, window, cx))
+            .child(self.choice_chips(
+                "panel-model-choice",
+                "Model",
+                self.model_choices(&bot.provider, bot.model.as_deref()),
+                Self::pick_panel_model,
+                theme,
+                cx,
+            ))
+            .children(
+                self.models_note(&bot.provider)
+                    .map(|reason| forms::note("panel-models-note", reason, theme.text_muted)),
+            )
+            .children((!levels.is_empty()).then(|| {
+                forms::field(
+                    "Reasoning",
+                    self.choice_chips(
+                        "panel-effort",
+                        "Reasoning level",
+                        levels,
+                        Self::pick_panel_effort,
+                        theme,
+                        cx,
+                    ),
+                    theme,
+                )
+            }));
 
         let permissions = div()
             .flex()

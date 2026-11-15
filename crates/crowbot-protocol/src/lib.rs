@@ -25,7 +25,10 @@ pub use message::{
 pub use preferences::{
     Appearance, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, SendShortcut,
 };
-pub use provider::{DaemonInfo, ProviderState, ProviderStatus};
+pub use provider::{
+    DaemonInfo, ModelChoice, ModelsState, ProviderModels, ProviderState, ProviderStatus,
+    RuntimeInstall, SignInMethod,
+};
 pub use search::{
     ConversationHit, MessageAuthor, MessageHit, SEARCH_MESSAGE_TERM_LENGTH, SEARCH_QUERY_LENGTH,
     SearchResults,

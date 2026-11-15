@@ -165,7 +165,18 @@ impl ClientState {
             ClientMessage::CheckProvider { provider } => {
                 daemon.check_provider(&provider).map_err(failed)
             }
-            ClientMessage::SignIn { provider } => daemon.sign_in(&provider).map_err(failed),
+            ClientMessage::SignIn { provider, method } => {
+                daemon.sign_in(&provider, method.as_deref()).map_err(failed)
+            }
+            ClientMessage::InstallRuntime { provider } => {
+                daemon.install_runtime(&provider).map_err(failed)
+            }
+            ClientMessage::SetProviderExecutable { provider, path } => {
+                daemon.set_provider_executable(&provider, path)
+            }
+            ClientMessage::ListModels { provider } => {
+                daemon.list_models(&provider).map(reply).map_err(failed)
+            }
             ClientMessage::CancelSignIn { provider } => {
                 daemon.cancel_sign_in(&provider).map_err(failed)
             }

@@ -60,6 +60,19 @@ pub enum Status {
     },
 }
 
+/// A change the daemon made by itself, told where it happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    ModelUnavailable {
+        model: String,
+        provider: Option<String>,
+    },
+    ProviderChanged {
+        from: String,
+        to: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approval {
     pub id: Option<String>,
@@ -92,6 +105,7 @@ pub enum RowKind {
     },
     Approval(Approval),
     Status(Status),
+    Notice(Notice),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +124,7 @@ pub enum Author {
 impl Row {
     pub fn author(&self) -> Option<Author> {
         match self.kind {
-            RowKind::Day => None,
+            RowKind::Day | RowKind::Notice(_) => None,
             RowKind::User { .. } => Some(Author::User),
             _ => Some(Author::Bot),
         }
@@ -610,7 +624,24 @@ impl Transcript {
                     provider,
                 }),
             ),
+            Event::ModelUnavailable { model, provider } => {
+                self.notice(seq, at_ms, Notice::ModelUnavailable { model, provider })
+            }
+            Event::ProviderChanged { from, to } => {
+                self.notice(seq, at_ms, Notice::ProviderChanged { from, to })
+            }
         }
+    }
+
+    fn notice(&mut self, seq: i64, at_ms: i64, notice: Notice) -> usize {
+        let end = self.rows.len();
+        self.day_row(seq, at_ms);
+        self.rows.push(Row {
+            key: key(seq, Slot::Main),
+            at_ms,
+            kind: RowKind::Notice(notice),
+        });
+        end
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -928,6 +959,7 @@ pub mod tests {
                 RowKind::Thought { .. } => "thought",
                 RowKind::Approval(_) => "approval",
                 RowKind::Status(_) => "status",
+                RowKind::Notice(_) => "notice",
             })
             .collect()
     }

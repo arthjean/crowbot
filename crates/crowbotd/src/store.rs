@@ -1,8 +1,10 @@
 mod bots;
 mod preferences;
 mod search;
+mod sessions;
 
 pub use bots::{BotRow, NewBot};
+pub use sessions::{ProviderSetting, session_fingerprint};
 
 use std::fmt;
 use std::path::Path;
@@ -15,7 +17,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -127,6 +129,33 @@ INSERT INTO event_text (rowid, body)
     WHERE kind IN ('user_text', 'message_text') AND json_valid(payload);
 ";
 
+/// A conversation holds one provider session for each provider that ran it.
+/// The columns `provider_session_id` and `session_revision` of a conversation
+/// stay as they were: the daemon no longer reads them.
+const SCHEMA_V7: &str = "
+ALTER TABLE bots ADD COLUMN effort TEXT;
+CREATE TABLE provider_sessions (
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_id, provider)
+);
+CREATE TABLE provider_settings (
+    provider TEXT PRIMARY KEY,
+    executable TEXT,
+    signed_in INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE bot_models (
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    provider TEXT NOT NULL,
+    model TEXT,
+    effort TEXT,
+    PRIMARY KEY (bot_id, provider)
+);
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -201,10 +230,6 @@ pub struct Conversation {
     pub id: i64,
     pub bot_id: i64,
     pub title: Option<String>,
-    pub provider_session_id: Option<String>,
-    /// The revision of the bot's session settings that the provider session
-    /// was started with. The session is resumed only while the bot still has it.
-    pub session_revision: Option<i64>,
 }
 
 pub struct EventsPage {
@@ -271,6 +296,10 @@ impl Store {
         }
         if version < 6 {
             transaction.execute_batch(SCHEMA_V6)?;
+        }
+        if version < 7 {
+            transaction.execute_batch(SCHEMA_V7)?;
+            self.adopt_sessions()?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -356,16 +385,13 @@ impl Store {
         let conversation = self
             .connection
             .query_row(
-                "SELECT id, bot_id, title, provider_session_id, session_revision
-                 FROM conversations WHERE id = ?1",
+                "SELECT id, bot_id, title FROM conversations WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Conversation {
                         id: row.get(0)?,
                         bot_id: row.get(1)?,
                         title: row.get(2)?,
-                        provider_session_id: row.get(3)?,
-                        session_revision: row.get(4)?,
                     })
                 },
             )
@@ -412,19 +438,6 @@ impl Store {
             params![conversation_id, title],
         )?;
         Ok(titled > 0)
-    }
-
-    pub fn set_provider_session(
-        &self,
-        conversation_id: i64,
-        provider_session_id: &str,
-        session_revision: i64,
-    ) -> Result<(), StoreError> {
-        self.connection.execute(
-            "UPDATE conversations SET provider_session_id = ?2, session_revision = ?3 WHERE id = ?1",
-            params![conversation_id, provider_session_id, session_revision],
-        )?;
-        Ok(())
     }
 
     pub fn append(&self, conversation_id: i64, event: &Event) -> Result<i64, StoreError> {
@@ -754,6 +767,8 @@ fn kind(event: &Event) -> &'static str {
         Event::TurnEnded(_) => "turn_ended",
         Event::TurnFailed { .. } => "turn_failed",
         Event::TurnInterrupted { .. } => "turn_interrupted",
+        Event::ModelUnavailable { .. } => "model_unavailable",
+        Event::ProviderChanged { .. } => "provider_changed",
     }
 }
 
@@ -920,6 +935,7 @@ mod tests {
                 },
                 provider: "claude".to_owned(),
                 model: None,
+                effort: None,
                 permission_level: crowbot_protocol::PermissionLevel::AskFirst,
                 workspace: "/work".to_owned(),
             })
@@ -1036,21 +1052,6 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![first, second]);
         assert!(!ids.contains(&elsewhere));
-    }
-
-    #[test]
-    fn a_provider_session_is_stored_with_the_revision_it_started_with() {
-        let store = store();
-        let id = conversation(&store);
-        let fresh = store.conversation(id).unwrap().unwrap();
-        assert_eq!(
-            (fresh.provider_session_id, fresh.session_revision),
-            (None, None)
-        );
-        store.set_provider_session(id, "session-1", 4).unwrap();
-        let started = store.conversation(id).unwrap().unwrap();
-        assert_eq!(started.provider_session_id.as_deref(), Some("session-1"));
-        assert_eq!(started.session_revision, Some(4));
     }
 
     #[test]
@@ -1183,10 +1184,9 @@ mod tests {
         let store = Store::from_connection(version_1_database()).unwrap();
         assert_eq!(version(&store), SCHEMA_VERSION);
         let conversation = store.conversation(1).unwrap().unwrap();
-        assert_eq!(
-            conversation.provider_session_id.as_deref(),
-            Some("session-1")
-        );
+        let session = store.provider_session(1, "claude").unwrap().unwrap();
+        assert_eq!(session.session_id, "session-1");
+        assert_eq!(session.last_event_id, 1);
         assert_eq!(conversation.title.as_deref(), Some("kept"));
         assert_eq!(
             store.events(1).unwrap(),

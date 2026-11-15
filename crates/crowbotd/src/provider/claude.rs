@@ -4,20 +4,20 @@ use crate::provider::acp::AgentProfile;
 
 pub const PROVIDER: &str = "claude";
 
-const COMMAND: &str = "bunx @agentclientprotocol/claude-agent-acp@0.107.0";
+/// The mode in which the agent asks before each gated tool call.
 const SESSION_MODE: &str = "default";
-const RUNTIME_URL: &str = "https://bun.sh";
 
 pub fn profile() -> AgentProfile {
     AgentProfile {
         name: "Claude",
-        command: COMMAND.to_owned(),
-        runtime_url: Some(RUNTIME_URL),
         session_meta: Some(session_meta()),
-        session_mode: Some(SESSION_MODE.to_owned()),
+        session_mode: Some(SESSION_MODE),
+        ..AgentProfile::generic()
     }
 }
 
+/// The session reads none of the user's own settings: no allowed command and
+/// no bypass mode of the user reaches a bot.
 fn session_meta() -> Map<String, Value> {
     let mut meta = Map::new();
     meta.insert(

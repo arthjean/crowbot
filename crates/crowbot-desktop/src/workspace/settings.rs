@@ -2,8 +2,8 @@ use crowbot_protocol::{
     Appearance, ClientMessage, PROTOCOL_VERSION, PreferencesPatch, ProviderStatus, SendShortcut,
 };
 use gpui::{
-    AnyElement, Context, Div, FontWeight, KeyDownEvent, Role, SharedString, Stateful, Window, div,
-    prelude::*,
+    AnyElement, Context, Div, Focusable, FontWeight, KeyDownEvent, Role, SharedString, Stateful,
+    Window, div, prelude::*,
 };
 
 use super::{Link, Workspace, forms};
@@ -11,7 +11,18 @@ use crate::assets::Icon;
 use crate::theme::{
     Theme, control, font, icon as icon_size, layout, opacity, radius, size, space, text,
 };
-use crate::ui;
+use crate::ui::{self, ButtonKind};
+
+/// The longest path of an executable the field takes.
+pub(super) const EXECUTABLE_LENGTH: usize = 1024;
+
+/// The field that takes the path of the user's own executable for a provider.
+pub(super) struct ExecutableEdit {
+    pub provider: String,
+    pub error: Option<SharedString>,
+    /// The path was sent, and the daemon has not answered yet.
+    pub saving: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Section {
@@ -115,6 +126,9 @@ impl Workspace {
 
     pub(super) fn provider_request(&mut self, request: ClientMessage) {
         if self.live() {
+            if let ClientMessage::SignIn { provider, .. } = &request {
+                self.sign_in_pages.insert(provider.clone());
+            }
             self.connection.send(request);
         }
     }
@@ -254,11 +268,209 @@ impl Workspace {
             )
     }
 
+    /// Opens the field that takes the path of the user's own executable for
+    /// a provider.
+    fn edit_executable(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.live() {
+            return;
+        }
+        let current = self
+            .providers
+            .iter()
+            .find(|status| status.id == provider)
+            .and_then(|status| status.executable.clone())
+            .unwrap_or_default();
+        self.provider_executable
+            .update(cx, |input, cx| input.set_text(&current, window, cx));
+        self.executable_edit = Some(ExecutableEdit {
+            provider: provider.to_owned(),
+            error: None,
+            saving: false,
+        });
+        window.focus(&self.provider_executable.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    pub(super) fn save_executable(&mut self, cx: &mut Context<Self>) {
+        let path = self.provider_executable.read(cx).text().trim().to_owned();
+        let live = self.live();
+        let Some(edit) = self.executable_edit.as_mut() else {
+            return;
+        };
+        if edit.saving || !live {
+            return;
+        }
+        if path.is_empty() {
+            edit.error = Some("Give the full path of the executable.".into());
+            cx.notify();
+            return;
+        }
+        edit.saving = true;
+        edit.error = None;
+        let provider = edit.provider.clone();
+        self.connection.send(ClientMessage::SetProviderExecutable {
+            provider,
+            path: Some(path),
+        });
+        cx.notify();
+    }
+
+    /// The daemon now starts the executable that was sent: the field closes.
+    pub(super) fn executable_applied(&mut self, status: &ProviderStatus) {
+        if self.executable_edit.as_ref().is_some_and(|edit| {
+            edit.saving && edit.provider == status.id && status.executable.is_some()
+        }) {
+            self.executable_edit = None;
+        }
+    }
+
+    fn clear_executable(&mut self, provider: &str, cx: &mut Context<Self>) {
+        self.provider_request(ClientMessage::SetProviderExecutable {
+            provider: provider.to_owned(),
+            path: None,
+        });
+        cx.notify();
+    }
+
+    /// Where the program of a provider comes from: the runtime the daemon
+    /// installs, or the executable the user set in its place.
+    fn render_runtime(
+        &self,
+        status: &ProviderStatus,
+        prefix: &'static str,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let source: SharedString = match (&status.executable, &status.runtime) {
+            (Some(path), _) => format!("Runs your own executable: {path}").into(),
+            (None, Some(runtime)) => format!("Runtime: {runtime}, managed by Crow Bot.").into(),
+            (None, None) => return None,
+        };
+        let editing = self
+            .executable_edit
+            .as_ref()
+            .filter(|edit| edit.provider == status.id);
+        let dimmed = |button: Stateful<Div>| {
+            if self.live() {
+                button
+            } else {
+                button.opacity(opacity::DISABLED)
+            }
+        };
+        let row = div()
+            .debug_selector(move || format!("{prefix}-runtime"))
+            .flex()
+            .flex_col()
+            .gap(space::S2)
+            .child(
+                div()
+                    .text_size(text::SM.size)
+                    .line_height(text::SM.leading)
+                    .text_color(theme.text_muted)
+                    .child(source),
+            );
+        let Some(edit) = editing else {
+            let (own, cleared) = (status.id.clone(), status.id.clone());
+            return Some(
+                row.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(space::S2)
+                        .child(
+                            dimmed(ui::button(
+                                (prefix, 20_usize),
+                                if status.executable.is_some() {
+                                    "Change the executable"
+                                } else {
+                                    "Use my own executable"
+                                },
+                                ButtonKind::Ghost,
+                                theme,
+                            ))
+                            .debug_selector(move || format!("{prefix}-own-executable"))
+                            .aria_label(SharedString::from(if status.executable.is_some() {
+                                format!("Change the executable of {}", status.name)
+                            } else {
+                                format!("Use my own executable for {}", status.name)
+                            }))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| this.edit_executable(&own, window, cx),
+                            )),
+                        )
+                        .children(status.executable.is_some().then(|| {
+                            dimmed(ui::button(
+                                (prefix, 21_usize),
+                                "Use the Crow Bot runtime",
+                                ButtonKind::Ghost,
+                                theme,
+                            ))
+                            .debug_selector(move || format!("{prefix}-installed-runtime"))
+                            .aria_label(SharedString::from(format!(
+                                "Use the Crow Bot runtime for {}",
+                                status.name
+                            )))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.clear_executable(&cleared, cx);
+                                },
+                            ))
+                        })),
+                ),
+            );
+        };
+        let (error, saving) = (edit.error.clone(), edit.saving);
+        Some(
+            row.child(self.input_box(
+                "provider-executable",
+                &self.provider_executable,
+                error.is_some(),
+                theme,
+                window,
+                cx,
+            ))
+            .children(
+                error.map(|reason| {
+                    forms::note("provider-executable-error", reason, theme.danger_text)
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::S2)
+                    .child(
+                        dimmed(ui::button(
+                            "save-executable",
+                            if saving { "Saving…" } else { "Save" },
+                            if saving {
+                                ButtonKind::Disabled
+                            } else {
+                                ButtonKind::Primary
+                            },
+                            theme,
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| this.save_executable(cx))),
+                    )
+                    .child(
+                        ui::button("cancel-executable", "Cancel", ButtonKind::Ghost, theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.executable_edit = None;
+                                cx.notify();
+                            })),
+                    ),
+            ),
+        )
+    }
+
     fn render_provider(
         &self,
         index: usize,
         status: &ProviderStatus,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
         const PREFIXES: [&str; 4] = ["provider-0", "provider-1", "provider-2", "provider-3"];
@@ -318,9 +530,10 @@ impl Workspace {
                     .gap(space::S2)
                     .children(self.provider_controls(status, prefix, theme, cx)),
             )
+            .children(self.render_runtime(status, prefix, theme, window, cx))
     }
 
-    fn render_providers(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn render_providers(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         let card = forms::card(theme).rounded(radius::LG);
         if self.providers.is_empty() {
             return card.child(
@@ -350,7 +563,7 @@ impl Workspace {
                 .enumerate()
                 .flat_map(|(index, status)| {
                     let row = self
-                        .render_provider(index, status, theme, cx)
+                        .render_provider(index, status, theme, window, cx)
                         .into_any_element();
                     let line = (index + 1 < count).then(|| {
                         div()
@@ -443,6 +656,7 @@ impl Workspace {
     pub(super) fn render_settings_dialog(
         &self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let section = self.settings?;
@@ -538,7 +752,7 @@ impl Workspace {
         });
         let body = match section {
             Section::General => self.render_general(theme, cx),
-            Section::Providers => self.render_providers(theme, cx),
+            Section::Providers => self.render_providers(theme, window, cx),
             Section::About => self.render_about(theme),
         };
         let content = div()
@@ -580,8 +794,10 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(space::S3)
-                    .children(notice)
-                    .child(body),
+                    // What scrolls keeps its own height: a card that shrank to
+                    // the body would hide its last rows instead of scrolling.
+                    .children(notice.map(|notice| notice.flex_none()))
+                    .child(body.flex_none()),
             );
         let dialog = div()
             .id("settings-dialog")

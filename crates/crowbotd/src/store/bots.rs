@@ -8,7 +8,7 @@ use super::{Store, StoreError, now_ms, title_of};
 const BOT_COLUMNS: &str =
     "id, name, title, instructions, avatar_color, avatar_glyph, provider, model,
     permission_level, workspace, pinned, hidden, created_at_ms, current_conversation_id,
-    session_revision";
+    session_revision, effort";
 
 /// The bot that takes the conversations stored before bots existed.
 const ADOPTER_NAME: &str = "Crow";
@@ -17,8 +17,9 @@ const ADOPTER_COLOR: &str = "#3b82f6";
 pub struct BotRow {
     pub bot: Bot,
     pub current_conversation_id: i64,
-    /// Grows each time the instructions, the model, or the folder change. A
-    /// provider session started with an older revision is not resumed.
+    /// Grows each time the provider, the instructions, the model, the
+    /// reasoning level, or the folder change. A provider session that runs
+    /// with an older revision is closed before the next turn.
     pub session_revision: i64,
 }
 
@@ -29,6 +30,7 @@ pub struct NewBot {
     pub avatar: Avatar,
     pub provider: String,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub permission_level: PermissionLevel,
     pub workspace: String,
 }
@@ -88,6 +90,7 @@ fn bot_row(row: &Row<'_>) -> rusqlite::Result<BotRow> {
             },
             provider: row.get(6)?,
             model: row.get(7)?,
+            effort: row.get(15)?,
             permission_level: level_from(&row.get::<_, String>(8)?),
             workspace: row.get(9)?,
             pinned: row.get(10)?,
@@ -105,8 +108,8 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO bots (name, title, instructions, avatar_color, avatar_glyph, provider,
-                model, permission_level, workspace, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                model, permission_level, workspace, created_at_ms, effort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 new.name,
                 new.title,
@@ -117,7 +120,8 @@ impl Store {
                 new.model,
                 level_name(new.permission_level),
                 new.workspace,
-                now_ms()
+                now_ms(),
+                new.effort
             ],
         )?;
         let id = transaction.last_insert_rowid();
@@ -149,7 +153,10 @@ impl Store {
         Ok(bots)
     }
 
-    /// Applies the fields that the patch holds. `None` means the bot does not exist.
+    /// Applies the fields that the patch holds. `None` means the bot does not
+    /// exist. A bot that moves to another provider leaves its model and its
+    /// reasoning level with the provider it leaves, and takes back the ones
+    /// it had with the provider it moves to.
     pub fn update_bot(&self, id: i64, patch: &BotPatch) -> Result<Option<BotRow>, StoreError> {
         let Some(BotRow {
             mut bot,
@@ -161,8 +168,10 @@ impl Store {
         };
         let session_settings = |bot: &Bot| {
             (
+                bot.provider.clone(),
                 bot.instructions.clone(),
                 bot.model.clone(),
+                bot.effort.clone(),
                 bot.workspace.clone(),
             )
         };
@@ -173,25 +182,47 @@ impl Store {
             instructions,
             avatar,
             model,
+            effort,
+            provider,
             permission_level,
             workspace,
             pinned,
             hidden,
         } = patch.clone();
+        let transaction = self.connection.unchecked_transaction()?;
+        if let Some(provider) = provider.filter(|provider| *provider != bot.provider) {
+            transaction.execute(
+                "INSERT INTO bot_models (bot_id, provider, model, effort) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (bot_id, provider) DO UPDATE SET
+                    model = excluded.model, effort = excluded.effort",
+                params![id, bot.provider, bot.model, bot.effort],
+            )?;
+            let kept = transaction
+                .query_row(
+                    "SELECT model, effort FROM bot_models WHERE bot_id = ?1 AND provider = ?2",
+                    params![id, provider],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            (bot.model, bot.effort) = kept.unwrap_or_default();
+            bot.provider = provider;
+        }
         bot.name = name.unwrap_or(bot.name);
         bot.title = title.unwrap_or(bot.title);
         bot.instructions = instructions.unwrap_or(bot.instructions);
         bot.avatar = avatar.unwrap_or(bot.avatar);
         bot.model = model.unwrap_or(bot.model);
+        bot.effort = effort.unwrap_or(bot.effort);
         bot.permission_level = permission_level.unwrap_or(bot.permission_level);
         bot.workspace = workspace.unwrap_or(bot.workspace);
         bot.pinned = pinned.unwrap_or(bot.pinned);
         bot.hidden = hidden.unwrap_or(bot.hidden);
         let revision = session_revision + i64::from(session_settings(&bot) != before);
-        self.connection.execute(
+        transaction.execute(
             "UPDATE bots SET name = ?2, title = ?3, instructions = ?4, avatar_color = ?5,
                 avatar_glyph = ?6, model = ?7, permission_level = ?8, workspace = ?9,
-                pinned = ?10, hidden = ?11, session_revision = ?12
+                pinned = ?10, hidden = ?11, session_revision = ?12, provider = ?13,
+                effort = ?14
              WHERE id = ?1",
             params![
                 id,
@@ -205,16 +236,33 @@ impl Store {
                 bot.workspace,
                 bot.pinned,
                 bot.hidden,
-                revision
+                revision,
+                bot.provider,
+                bot.effort
             ],
         )?;
+        transaction.commit()?;
+        self.bot(id)
+    }
+
+    /// The bot goes back to the default model of its provider, when its model
+    /// is still `model`. The session that runs keeps running: it already
+    /// stands on that default. `None` means nothing changed.
+    pub fn clear_bot_model(&self, id: i64, model: &str) -> Result<Option<BotRow>, StoreError> {
+        let cleared = self.connection.execute(
+            "UPDATE bots SET model = NULL WHERE id = ?1 AND model = ?2",
+            params![id, model],
+        )?;
+        if cleared == 0 {
+            return Ok(None);
+        }
         self.bot(id)
     }
 
     /// Removes a bot with its conversations, their events, and their queues.
     pub fn delete_bot(&self, id: i64) -> Result<bool, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        for owned in ["queue", "events"] {
+        for owned in ["queue", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN
@@ -224,6 +272,7 @@ impl Store {
             )?;
         }
         transaction.execute("DELETE FROM conversations WHERE bot_id = ?1", params![id])?;
+        transaction.execute("DELETE FROM bot_models WHERE bot_id = ?1", params![id])?;
         let deleted = transaction.execute("DELETE FROM bots WHERE id = ?1", params![id])?;
         transaction.commit()?;
         Ok(deleted > 0)
@@ -238,7 +287,7 @@ impl Store {
         let Some(current) = self.insert_conversation(bot_id)? else {
             return Ok(None);
         };
-        for owned in ["queue", "events"] {
+        for owned in ["queue", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN
@@ -516,6 +565,7 @@ mod tests {
             },
             provider: "claude".to_owned(),
             model: Some("opus".to_owned()),
+            effort: None,
             permission_level: PermissionLevel::AskFirst,
             workspace: "/bots/atlas".to_owned(),
         }
@@ -630,6 +680,66 @@ mod tests {
             ..BotPatch::default()
         });
         assert_eq!(workspace, start + 3);
+        let effort = revision(BotPatch {
+            effort: Some(Some("high".to_owned())),
+            ..BotPatch::default()
+        });
+        assert_eq!(effort, start + 4);
+        let provider = revision(BotPatch {
+            provider: Some("codex".to_owned()),
+            ..BotPatch::default()
+        });
+        assert_eq!(provider, start + 5);
+        let same_provider = revision(BotPatch {
+            provider: Some("codex".to_owned()),
+            ..BotPatch::default()
+        });
+        assert_eq!(same_provider, start + 5);
+    }
+
+    #[test]
+    fn a_bot_takes_back_the_model_it_had_with_a_provider() {
+        let store = store();
+        let id = store.create_bot(&new_bot("Atlas")).unwrap().bot.id;
+        let update = |patch: BotPatch| store.update_bot(id, &patch).unwrap().unwrap().bot;
+        update(BotPatch {
+            effort: Some(Some("high".to_owned())),
+            ..BotPatch::default()
+        });
+        let moved = update(BotPatch {
+            provider: Some("codex".to_owned()),
+            ..BotPatch::default()
+        });
+        assert_eq!(moved.provider, "codex");
+        assert_eq!((moved.model, moved.effort), (None, None));
+        update(BotPatch {
+            model: Some(Some("gpt".to_owned())),
+            ..BotPatch::default()
+        });
+        let back = update(BotPatch {
+            provider: Some("claude".to_owned()),
+            ..BotPatch::default()
+        });
+        assert_eq!(back.model.as_deref(), Some("opus"));
+        assert_eq!(back.effort.as_deref(), Some("high"));
+        let chosen = update(BotPatch {
+            provider: Some("codex".to_owned()),
+            model: Some(None),
+            ..BotPatch::default()
+        });
+        assert_eq!((chosen.model, chosen.effort), (None, None));
+        assert!(store.delete_bot(id).unwrap());
+    }
+
+    #[test]
+    fn a_model_that_is_gone_is_cleared_without_a_new_revision() {
+        let store = store();
+        let created = store.create_bot(&new_bot("Atlas")).unwrap();
+        let id = created.bot.id;
+        assert!(store.clear_bot_model(id, "sonnet").unwrap().is_none());
+        let cleared = store.clear_bot_model(id, "opus").unwrap().unwrap();
+        assert_eq!(cleared.bot.model, None);
+        assert_eq!(cleared.session_revision, created.session_revision);
     }
 
     #[test]
@@ -940,22 +1050,24 @@ the plan."
             );
 
             // A session started with another provider or folder is not resumed.
-            let sessions: Vec<(Option<String>, Option<i64>)> = [1, 2, 3]
+            let sessions: Vec<Option<(String, String)>> = [1, 2, 3]
                 .iter()
                 .map(|id| {
-                    let conversation = store.conversation(*id).unwrap().unwrap();
-                    (
-                        conversation.provider_session_id,
-                        conversation.session_revision,
-                    )
+                    store
+                        .provider_session(*id, "claude")
+                        .unwrap()
+                        .map(|session| (session.session_id, session.fingerprint))
                 })
                 .collect();
             assert_eq!(
                 sessions,
                 [
-                    (Some("session-1".to_owned()), None),
-                    (Some("session-2".to_owned()), Some(owner.session_revision)),
-                    (None, None)
+                    None,
+                    Some((
+                        "session-2".to_owned(),
+                        super::super::session_fingerprint(&owner.bot)
+                    )),
+                    None
                 ]
             );
         }

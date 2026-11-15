@@ -1,4 +1,7 @@
-use crowbot_protocol::{AVATAR_COLORS, Avatar, ProviderState, ProviderStatus};
+use crowbot_protocol::{
+    AVATAR_COLORS, Avatar, ClientMessage, ModelChoice, ModelsState, ProviderState, ProviderStatus,
+    RuntimeInstall,
+};
 use gpui::{
     AnyElement, Context, Div, Entity, Focusable, FontWeight, Hsla, Role, SharedString, Stateful,
     Window, div, prelude::*,
@@ -8,7 +11,9 @@ use super::Workspace;
 use crate::assets::Icon;
 use crate::bots;
 use crate::composer::Composer;
-use crate::theme::{Theme, control, icon as icon_size, layout, opacity, radius, size, space, text};
+use crate::theme::{
+    Theme, control, font, icon as icon_size, layout, opacity, radius, size, space, text,
+};
 use crate::ui::{self, ButtonKind};
 
 pub(super) const GLYPHS: [&str; 11] = [
@@ -100,6 +105,7 @@ pub(super) fn provider_state(status: &ProviderStatus, theme: &Theme) -> (&'stati
         ProviderState::Ready => ("Ready", theme.success_text.into()),
         ProviderState::SignedOut => ("Signed out", theme.warning_text.into()),
         ProviderState::RuntimeMissing => ("Runtime missing", theme.danger_text.into()),
+        ProviderState::NotInstalled => ("Not installed yet", theme.text_muted.into()),
         ProviderState::Unknown if status.checking => ("Checking…", theme.text_muted.into()),
         ProviderState::Unknown => ("Not known", theme.text_muted.into()),
     }
@@ -119,7 +125,234 @@ pub(super) fn provider_problem(status: &ProviderStatus) -> Option<SharedString> 
             }
             .into(),
         ),
-        ProviderState::Ready | ProviderState::Unknown => None,
+        ProviderState::Ready | ProviderState::NotInstalled | ProviderState::Unknown => None,
+    }
+}
+
+/// One choice of a picker. `value` is what the choice stores: `None` is the
+/// default of the provider.
+pub(super) struct Choice {
+    pub value: Option<String>,
+    pub label: SharedString,
+    pub chosen: bool,
+}
+
+type Pick = fn(&mut Workspace, Option<String>, &mut Window, &mut Context<Workspace>);
+
+fn megabytes(bytes: u64) -> u64 {
+    bytes.div_ceil(1 << 20)
+}
+
+/// How far the download of a runtime is, in words.
+pub(super) fn download_text(name: &str, install: RuntimeInstall) -> SharedString {
+    format!(
+        "Downloading the {name} runtime: {} of {} MB…",
+        megabytes(install.received),
+        megabytes(install.total)
+    )
+    .into()
+}
+
+fn default_choice(default: Option<&str>, listed: &[ModelChoice], chosen: bool) -> Choice {
+    let name = default.map(|default| {
+        listed
+            .iter()
+            .find(|choice| choice.id == default)
+            .map_or(default, |choice| choice.name.as_str())
+    });
+    Choice {
+        value: None,
+        label: match name {
+            Some(name) => format!("Default: {name}").into(),
+            None => "Default".into(),
+        },
+        chosen,
+    }
+}
+
+fn choices(default: Option<&str>, listed: &[ModelChoice], current: Option<&str>) -> Vec<Choice> {
+    std::iter::once(default_choice(default, listed, current.is_none()))
+        .chain(listed.iter().map(|choice| Choice {
+            value: Some(choice.id.clone()),
+            label: choice.name.clone().into(),
+            chosen: current == Some(choice.id.as_str()),
+        }))
+        .collect()
+}
+
+impl Workspace {
+    /// The providers a bot can run on, with the one it runs on marked.
+    pub(super) fn provider_choices(&self, current: &str) -> Vec<Choice> {
+        self.providers
+            .iter()
+            .map(|status| Choice {
+                value: Some(status.id.clone()),
+                label: status.name.clone().into(),
+                chosen: status.id == current,
+            })
+            .collect()
+    }
+
+    /// The models of a provider, after its default, with the current one
+    /// marked. A provider that lists no model has its default only.
+    pub(super) fn model_choices(&self, provider: &str, current: Option<&str>) -> Vec<Choice> {
+        match self.models.get(provider) {
+            Some(models) => choices(models.default_model.as_deref(), &models.models, current),
+            None => choices(None, &[], current),
+        }
+    }
+
+    /// The reasoning levels of a provider, after its default. Empty when the
+    /// provider has none.
+    pub(super) fn effort_choices(&self, provider: &str, current: Option<&str>) -> Vec<Choice> {
+        match self.models.get(provider) {
+            Some(models) if !models.efforts.is_empty() => {
+                choices(models.default_effort.as_deref(), &models.efforts, current)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Why the models of a provider are not listed, when they are not.
+    pub(super) fn models_note(&self, provider: &str) -> Option<SharedString> {
+        let models = self.models.get(provider)?;
+        match models.state {
+            ModelsState::Listed => None,
+            ModelsState::Loading => Some("Asking the provider for its models…".into()),
+            ModelsState::Unavailable => {
+                let reason = models
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "The list of models is not available.".to_owned());
+                Some(format!("{reason} The bot runs on the default model of the provider.").into())
+            }
+        }
+    }
+
+    /// A row of choices, one of which is marked.
+    pub(super) fn choice_chips(
+        &self,
+        prefix: &'static str,
+        name: &'static str,
+        choices: Vec<Choice>,
+        pick: Pick,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let live = self.live();
+        let (hover, focus, accent) = (theme.control_hover, theme.border_focus, theme.accent);
+        div()
+            .id(prefix)
+            .debug_selector(move || prefix.into())
+            .role(Role::Group)
+            .aria_label(name)
+            .pl(layout::FIELD_LABEL_INDENT)
+            .flex()
+            .flex_wrap()
+            .gap(space::S1)
+            .when(!live, |chips| chips.opacity(opacity::DISABLED))
+            .children(choices.into_iter().enumerate().map(|(index, choice)| {
+                let Choice {
+                    value,
+                    label,
+                    chosen,
+                } = choice;
+                let spoken = if chosen {
+                    format!("{label}, selected")
+                } else {
+                    label.to_string()
+                };
+                div()
+                    .id((prefix, index))
+                    .debug_selector(move || {
+                        if chosen {
+                            format!("{prefix}-{index}-chosen")
+                        } else {
+                            format!("{prefix}-{index}")
+                        }
+                    })
+                    .focusable()
+                    .tab_stop(live)
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(spoken))
+                    .h(layout::BADGE_HEIGHT)
+                    .px(space::S2)
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if chosen {
+                        Hsla::from(accent)
+                    } else {
+                        theme.border_strong.into()
+                    })
+                    .when(chosen, |chip| {
+                        chip.bg(theme.accent_soft).font_weight(FontWeight::MEDIUM)
+                    })
+                    .text_size(text::SM.size)
+                    .line_height(text::SM.leading)
+                    .when(live, |chip| {
+                        chip.cursor_pointer()
+                            .focus_visible(move |style| style.border_color(focus))
+                            .when(!chosen, |chip| chip.hover(move |style| style.bg(hover)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                pick(this, value.clone(), window, cx);
+                                cx.notify();
+                            }))
+                    })
+                    .child(label)
+            }))
+    }
+
+    /// What stops a provider from running a turn, with the controls that fix it.
+    pub(super) fn render_provider_notice(
+        &self,
+        status: &ProviderStatus,
+        prefix: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let problem = provider_problem(status)?;
+        Some(
+            div()
+                .id((prefix, 40_usize))
+                .debug_selector(move || format!("{prefix}-provider-notice"))
+                .role(Role::Status)
+                .aria_label(problem.clone())
+                .p(space::S3)
+                .flex()
+                .flex_col()
+                .gap(space::S2)
+                .rounded(radius::MD)
+                .bg(theme.warning_soft)
+                .child(
+                    div()
+                        .flex()
+                        .gap(space::S2)
+                        .child(
+                            div()
+                                .flex_none()
+                                .h(text::MD.leading)
+                                .flex()
+                                .items_center()
+                                .child(ui::icon(
+                                    Icon::TriangleAlert,
+                                    icon_size::SM,
+                                    theme.warning_text,
+                                )),
+                        )
+                        .child(div().flex_1().min_w_0().child(problem)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(space::S2)
+                        .children(self.provider_controls(status, prefix, theme, cx)),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -328,6 +561,10 @@ impl Workspace {
     ) -> Vec<AnyElement> {
         let live = self.live();
         let provider = status.id.clone();
+        let name = &status.name;
+        // Several providers show the same controls: each one is spoken with
+        // the name of its provider.
+        let spoken = |label: String| SharedString::from(label);
         let selector = move |name: &str| format!("{prefix}-{name}");
         let dimmed = |button: Stateful<Div>| {
             if live {
@@ -354,6 +591,44 @@ impl Workspace {
                     .child("Finish signing in in your browser.")
                     .into_any_element(),
             );
+            // The page asks the person to check that it shows the code of
+            // this sign-in: the row shows it too.
+            if let Some(code) = status.sign_in_url.as_deref().and_then(sign_in_code) {
+                let shown = selector("sign-in-code");
+                controls.push(
+                    div()
+                        .id((prefix, 4_usize))
+                        .debug_selector(move || shown.clone())
+                        .role(Role::Status)
+                        .aria_label(spoken(format!("Sign-in code of {name}: {code}")))
+                        .flex()
+                        .items_center()
+                        .gap(space::S1_5)
+                        .child(div().text_color(theme.text_muted).child("Code"))
+                        .child(
+                            div()
+                                .font(font::mono())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(code),
+                        )
+                        .into_any_element(),
+                );
+            }
+            if let Some(page) = status.sign_in_url.clone() {
+                let open = selector("sign-in-page");
+                controls.push(
+                    ui::button(
+                        (prefix, 3_usize),
+                        "Open the page",
+                        ButtonKind::Outline,
+                        theme,
+                    )
+                    .debug_selector(move || open.clone())
+                    .aria_label(spoken(format!("Open the sign-in page of {name}")))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_link(&page, cx)))
+                    .into_any_element(),
+                );
+            }
             controls.push(
                 dimmed(ui::button(
                     (prefix, 2_usize),
@@ -362,6 +637,7 @@ impl Workspace {
                     theme,
                 ))
                 .debug_selector(move || cancel.clone())
+                .aria_label(spoken(format!("Cancel the sign-in to {name}")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.provider_request(crowbot_protocol::ClientMessage::CancelSignIn {
                         provider: id.clone(),
@@ -373,18 +649,83 @@ impl Workspace {
             return controls;
         }
         if status.state == ProviderState::SignedOut && status.can_sign_in {
+            // A provider with several sign-ins has one button for each, by
+            // its name. With one, the button starts that one.
+            let methods: Vec<(Option<String>, SharedString)> = if status.sign_in_methods.len() > 1 {
+                status
+                    .sign_in_methods
+                    .iter()
+                    .map(|method| (Some(method.id.clone()), method.name.clone().into()))
+                    .collect()
+            } else {
+                vec![(None, "Sign in".into())]
+            };
+            for (index, (method, label)) in methods.into_iter().enumerate() {
+                let id = provider.clone();
+                let sign_in = match &method {
+                    Some(method) => selector(&format!("sign-in-{method}")),
+                    None => selector("sign-in"),
+                };
+                let kind = if index == 0 {
+                    ButtonKind::Primary
+                } else {
+                    ButtonKind::Outline
+                };
+                let said = match &method {
+                    Some(_) => format!("{name}: {label}"),
+                    None => format!("Sign in to {name}"),
+                };
+                controls.push(
+                    dimmed(ui::button((prefix, 10 + index), label, kind, theme))
+                        .debug_selector(move || sign_in.clone())
+                        .aria_label(spoken(said))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.provider_request(ClientMessage::SignIn {
+                                provider: id.clone(),
+                                method: method.clone(),
+                            });
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        if let Some(install) = status.install {
+            let download = selector("download");
+            let progress = download_text(&status.name, install);
+            controls.push(
+                div()
+                    .id((prefix, 7_usize))
+                    .debug_selector(move || download.clone())
+                    .role(Role::Status)
+                    .aria_label(progress.clone())
+                    .h(control::MD)
+                    .flex()
+                    .items_center()
+                    .gap(space::S1_5)
+                    .text_color(theme.text_muted)
+                    .child(ui::spinner(
+                        (prefix, 8_usize),
+                        icon_size::SM,
+                        theme.text_muted,
+                    ))
+                    .child(progress)
+                    .into_any_element(),
+            );
+        } else if status.state == ProviderState::NotInstalled {
             let id = provider.clone();
-            let sign_in = selector("sign-in");
+            let install = selector("install");
             controls.push(
                 dimmed(ui::button(
-                    (prefix, 3_usize),
-                    "Sign in",
-                    ButtonKind::Primary,
+                    (prefix, 9_usize),
+                    "Install now",
+                    ButtonKind::Outline,
                     theme,
                 ))
-                .debug_selector(move || sign_in.clone())
+                .debug_selector(move || install.clone())
+                .aria_label(spoken(format!("Install the {name} runtime now")))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.provider_request(crowbot_protocol::ClientMessage::SignIn {
+                    this.provider_request(ClientMessage::InstallRuntime {
                         provider: id.clone(),
                     });
                     cx.notify();
@@ -438,6 +779,7 @@ impl Workspace {
                     theme,
                 ))
                 .debug_selector(move || check.clone())
+                .aria_label(spoken(format!("Check {name} again")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.provider_request(crowbot_protocol::ClientMessage::CheckProvider {
                         provider: provider.clone(),
@@ -449,4 +791,19 @@ impl Workspace {
         }
         controls
     }
+}
+
+/// The code a sign-in page carries in its address, as the person must find
+/// it on that page. Only letters, digits, and dashes are taken.
+pub(super) fn sign_in_code(page: &str) -> Option<String> {
+    let (_, query) = page.split_once('?')?;
+    let code = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("user_code="))?;
+    let plain = !code.is_empty()
+        && code.len() <= 16
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    plain.then(|| code.to_ascii_uppercase())
 }

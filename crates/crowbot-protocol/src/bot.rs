@@ -43,6 +43,9 @@ pub struct Bot {
     pub provider: String,
     /// `None` means the provider's default model.
     pub model: Option<String>,
+    /// The reasoning level. `None` means the provider's default.
+    #[serde(default)]
+    pub effort: Option<String>,
     pub permission_level: PermissionLevel,
     /// The folder the bot works in.
     pub workspace: String,
@@ -67,6 +70,8 @@ pub struct BotDraft {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
     pub permission_level: Option<PermissionLevel>,
     #[serde(default)]
     pub workspace: Option<String>,
@@ -90,6 +95,18 @@ pub struct BotPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub model: Option<Option<String>>,
+    /// `Some(None)` goes back to the provider's default reasoning level.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effort: Option<Option<String>>,
+    /// Moves the bot to another provider. Its conversations stay, and its
+    /// model and reasoning level go back to the provider's defaults unless
+    /// the patch sets them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<PermissionLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +190,28 @@ mod tests {
             let wire = serde_json::to_string(&patch).unwrap();
             assert_eq!(serde_json::from_str::<BotPatch>(&wire).unwrap(), patch);
         }
+    }
+
+    #[test]
+    fn a_patch_moves_a_bot_to_another_provider_and_clears_its_reasoning_level() {
+        let patch: BotPatch =
+            serde_json::from_str(r#"{"provider":"codex","effort":null}"#).unwrap();
+        assert_eq!(patch.provider.as_deref(), Some("codex"));
+        assert_eq!(patch.effort, Some(None));
+        assert_eq!(patch.model, None);
+        let wire = serde_json::to_string(&patch).unwrap();
+        assert_eq!(wire, r#"{"effort":null,"provider":"codex"}"#);
+    }
+
+    #[test]
+    fn a_bot_stored_before_reasoning_levels_has_none() {
+        let bot: Bot = serde_json::from_str(
+            r##"{"id":1,"name":"Atlas","title":"","instructions":"","avatar":{"color":"#3b82f6",
+            "glyph":"A"},"provider":"claude","model":null,"permission_level":"ask_first",
+            "workspace":"/work","pinned":false,"hidden":false,"created_at_ms":0}"##,
+        )
+        .unwrap();
+        assert_eq!(bot.effort, None);
     }
 
     #[test]

@@ -6,59 +6,198 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AuthCapabilities, AuthMethod, AuthState, AuthStatusRequest, CancelNotification,
-    ClientCapabilities, ContentBlock, InitializeRequest, NewSessionRequest, PermissionOptionKind,
-    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue, SessionId,
-    SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, SystemPrompt, TextContent,
-    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdateFields,
+    AuthCapabilities, AuthMethod, AuthState, AuthStatusRequest, AuthenticateRequest,
+    CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
+    NewSessionRequest, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
+    SessionConfigSelectOptions, SessionId, SessionModeId, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, SystemPrompt,
+    TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdateFields,
     ToolKind as AgentToolKind,
 };
-use agent_client_protocol::{AcpAgent, Agent, Client, Error, ErrorCode};
+use agent_client_protocol::{
+    AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, UntypedMessage,
+};
 use crowbot_protocol::{
-    APPROVAL_TARGET_BYTES, Event, FailureCause, ProviderState, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES,
-    ToolKind, ToolStatus, TurnEnd, cut_text,
+    APPROVAL_TARGET_BYTES, Event, FailureCause, ModelChoice, ProviderState, TOOL_INPUT_BYTES,
+    TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
 };
 use serde_json::{Map, Value};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
+/// What the daemon knows about a provider before it starts its agent.
 pub struct AgentProfile {
     /// The name a person reads.
     pub name: &'static str,
-    pub command: String,
+    /// The arguments and the environment the agent gets after the ones of
+    /// its program.
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
     pub session_meta: Option<Map<String, Value>>,
-    pub session_mode: Option<String>,
-    /// Where a person gets the program that starts the agent, when it is missing.
-    pub runtime_url: Option<&'static str>,
+    /// The session mode in which the agent asks before each gated tool call.
+    /// A session that cannot be put in it does not start.
+    pub session_mode: Option<&'static str>,
+    /// The mode an agent that reports no session mode starts in, from its
+    /// arguments. A session that reports moving out of it is stopped.
+    pub started_mode: Option<&'static str>,
+    /// The sign-in method the agent wants named before it opens a session.
+    pub session_auth: Option<&'static str>,
+    /// The sign-in methods that take a key: the daemon never offers them.
+    pub hidden_sign_ins: &'static [&'static str],
+    /// The request that names the page where a person finishes a sign-in
+    /// the agent runs. Such an agent opens no browser itself.
+    pub sign_in_page: Option<&'static str>,
+    /// The folders the agent needs, which the daemon makes before each start.
+    pub folders: Vec<PathBuf>,
+    /// The files the daemon writes before each start, with their content.
+    pub files: Vec<(PathBuf, String)>,
 }
 
 impl AgentProfile {
-    pub fn generic(command: String) -> Self {
+    pub fn generic() -> Self {
         Self {
             name: "Custom agent",
-            command,
+            args: Vec::new(),
+            env: BTreeMap::new(),
             session_meta: None,
             session_mode: None,
-            runtime_url: None,
+            started_mode: None,
+            session_auth: None,
+            hidden_sign_ins: &[],
+            sign_in_page: None,
+            folders: Vec::new(),
+            files: Vec::new(),
         }
+    }
+
+    /// Writes what the agent reads at its start.
+    pub fn prepare(&self) -> std::io::Result<()> {
+        for folder in &self.folders {
+            std::fs::create_dir_all(folder)?;
+        }
+        for (path, content) in &self.files {
+            if let Some(folder) = path.parent() {
+                std::fs::create_dir_all(folder)?;
+            }
+            std::fs::write(path, content)?;
+        }
+        Ok(())
     }
 }
 
-/// How long an agent gets to start and tell its sign-in state. The first start
-/// of an adapter can download it.
+/// The command that starts an agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+impl Launch {
+    pub fn of(program: PathBuf) -> Self {
+        Self {
+            program,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    /// Reads a command line, or the JSON form with `command`, `args`, and `env`.
+    pub fn parse(command: &str) -> Result<Self, String> {
+        let config = AcpAgent::from_str(command)
+            .map_err(|error| error.to_string())?
+            .into_config();
+        Ok(Self {
+            program: config.command().to_owned(),
+            args: config.arguments().to_vec(),
+            env: config.environment().clone(),
+        })
+    }
+
+    #[must_use]
+    pub fn with(mut self, profile: &AgentProfile) -> Self {
+        self.args.extend(profile.args.iter().cloned());
+        self.env.extend(profile.env.clone());
+        self
+    }
+
+    fn agent(&self) -> AcpAgent {
+        AcpAgent::new(
+            AcpAgentConfig::new(&self.program)
+                .args(self.args.iter().cloned())
+                .envs(self.env.clone()),
+        )
+    }
+
+    /// Whether the system would find the program: a path as it is written, a
+    /// bare name in the folders of `PATH` and next to the daemon.
+    pub fn program_exists(&self) -> bool {
+        let program = self.program.as_path();
+        let named = |folder: &Path| {
+            let path = folder.join(program);
+            path.is_file()
+                || (cfg!(windows)
+                    && path.extension().is_none()
+                    && path.with_extension("exe").is_file())
+        };
+        if program.components().count() > 1 {
+            return named(Path::new(""));
+        }
+        let path = self
+            .env
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+            .map(|(_, value)| value.into())
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|daemon| daemon.parent().map(Path::to_owned));
+        std::env::split_paths(&path)
+            .chain(beside)
+            .any(|folder| named(&folder))
+    }
+}
+
+fn client_info() -> Implementation {
+    Implementation::new("crowbot", env!("CARGO_PKG_VERSION"))
+}
+
+/// How long an agent gets to start and tell its sign-in state.
 const PROBE_PATIENCE: Duration = Duration::from_secs(60);
+/// How long an agent that pushes its sign-in state gets to push it.
+const STATUS_PATIENCE: Duration = Duration::from_secs(8);
+/// How long an agent gets to accept the sign-in it already holds.
+const SESSION_AUTH_PATIENCE: Duration = Duration::from_secs(30);
 const PROBE_DETAIL_BYTES: usize = 300;
+const STATUS_UPDATES: [&str; 2] = ["_auth/status_update", "auth/status_update"];
 
 /// The agent's own sign-in, as a command to run: the agent command followed by
-/// the arguments of its first sign-in method of the `terminal` kind.
+/// the arguments of a sign-in method of the `terminal` kind.
 #[derive(Clone)]
 pub struct SignInCommand {
     pub program: PathBuf,
     pub arguments: Vec<String>,
     pub environment: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+pub enum SignInStart {
+    /// The daemon runs the command and reads its exit status.
+    Command(SignInCommand),
+    /// The agent runs the sign-in when it is asked to authenticate.
+    Agent,
+}
+
+#[derive(Clone)]
+pub struct SignInOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub start: SignInStart,
 }
 
 /// What an agent tells about itself with no session.
@@ -68,16 +207,16 @@ pub struct Probe {
     /// rest of what the agent tells about the account is dropped here.
     pub account: Option<String>,
     pub detail: Option<String>,
-    pub sign_in: Option<SignInCommand>,
+    pub sign_ins: Vec<SignInOption>,
 }
 
 impl Probe {
-    fn without_answer(state: ProviderState, detail: impl Into<String>) -> Self {
+    pub fn without_answer(state: ProviderState, detail: impl Into<String>) -> Self {
         Self {
             state,
             account: None,
             detail: Some(short(detail.into())),
-            sign_in: None,
+            sign_ins: Vec::new(),
         }
     }
 }
@@ -87,78 +226,64 @@ fn short(mut detail: String) -> String {
     detail
 }
 
-/// Starts the agent for one short connection and reads whether it can run a
-/// turn: its program exists, it answers, and it reports a sign-in.
-pub async fn probe(command: &str) -> Probe {
-    let agent = match AcpAgent::from_str(command) {
-        Ok(agent) => agent,
-        Err(error) => return Probe::without_answer(ProviderState::Unknown, error.to_string()),
-    };
-    let config = agent.config().clone();
-    if !program_exists(config.command(), config.environment()) {
-        return Probe::without_answer(
-            ProviderState::RuntimeMissing,
-            format!(
-                "The program `{}` was not found on this computer.",
-                config.command().display()
-            ),
-        );
+type Status = (ProviderState, Option<String>, Option<String>);
+
+/// What an agent pushes about its sign-in, with no request: the state, and the
+/// label of the account.
+fn pushed_status(message: &UntypedMessage) -> Option<Status> {
+    if !STATUS_UPDATES.contains(&message.method.as_str()) {
+        return None;
     }
-    let asked = Client
-        .v1()
-        .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
-            let capabilities =
-                ClientCapabilities::new().auth(AuthCapabilities::new().terminal(true));
-            let initialized = connection
-                .send_request(
-                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
-                )
-                .block_task()
-                .await?;
-            let status = if initialized.agent_capabilities.auth.status.is_some() {
-                Some(
-                    connection
-                        .send_request(AuthStatusRequest::new())
-                        .block_task()
-                        .await,
-                )
-            } else {
-                None
-            };
-            Ok((initialized.auth_methods, status))
-        });
-    let (methods, status) = match tokio::time::timeout(PROBE_PATIENCE, asked).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(error)) => {
-            return Probe::without_answer(ProviderState::RuntimeMissing, failure_message(&error));
-        }
-        Err(_) => {
-            return Probe::without_answer(
-                ProviderState::Unknown,
-                "The agent did not answer in time.",
-            );
-        }
-    };
-    let sign_in = methods.into_iter().find_map(|method| match method {
-        AuthMethod::Terminal(terminal) => Some(SignInCommand {
-            program: config.command().to_owned(),
-            arguments: config
-                .arguments()
-                .iter()
-                .cloned()
-                .chain(terminal.args)
-                .collect(),
-            environment: config
-                .environment()
-                .clone()
-                .into_iter()
-                .chain(terminal.env)
-                .collect(),
-        }),
-        _ => None,
-    });
-    let (state, account, detail) = match status {
-        Some(Ok(status)) => {
+    let status = message.params.get("authStatus")?;
+    let label = status
+        .get("label")
+        .and_then(Value::as_str)
+        .map(|label| short(label.to_owned()));
+    match status.get("kind")?.as_str()? {
+        "none" => Some((ProviderState::SignedOut, None, None)),
+        _ => Some((ProviderState::Ready, label, None)),
+    }
+}
+
+fn sign_in_options(
+    profile: &AgentProfile,
+    launch: &Launch,
+    methods: Vec<AuthMethod>,
+) -> Vec<SignInOption> {
+    methods
+        .into_iter()
+        .filter_map(|method| match method {
+            AuthMethod::Terminal(terminal) => Some(SignInOption {
+                id: terminal.id.0.to_string(),
+                name: terminal.name,
+                description: terminal.description,
+                start: SignInStart::Command(SignInCommand {
+                    program: launch.program.clone(),
+                    arguments: launch.args.iter().cloned().chain(terminal.args).collect(),
+                    // What the profile sets, such as the home the daemon
+                    // owns, wins over what the agent asks for its sign-in.
+                    environment: terminal.env.into_iter().chain(launch.env.clone()).collect(),
+                }),
+            }),
+            AuthMethod::Agent(agent) => Some(SignInOption {
+                id: agent.id.0.to_string(),
+                name: agent.name,
+                description: agent.description,
+                start: SignInStart::Agent,
+            }),
+            _ => None,
+        })
+        .filter(|option| !profile.hidden_sign_ins.contains(&option.id.as_str()))
+        .collect()
+}
+
+async fn asked_status(connection: &ConnectionTo<Agent>) -> Status {
+    let status = connection
+        .send_request(AuthStatusRequest::new())
+        .block_task()
+        .await;
+    match status {
+        Ok(status) => {
             let account = status
                 .accounts
                 .iter()
@@ -177,52 +302,193 @@ pub async fn probe(command: &str) -> Probe {
                 ),
             }
         }
-        Some(Err(error)) => (
+        Err(error) => (
             ProviderState::Unknown,
             None,
             Some(short(failure_message(&error))),
         ),
-        None => (
-            ProviderState::Unknown,
-            None,
-            Some("The agent does not tell whether it is signed in.".to_owned()),
-        ),
+    }
+}
+
+/// Starts the agent for one short connection and reads whether it can run a
+/// turn: its program exists, it answers, and it reports a sign-in. `signed_in`
+/// tells that a sign-in started from the daemon ended well: an agent that
+/// reports nothing is then asked to accept the sign-in it holds.
+pub async fn probe(profile: &AgentProfile, launch: &Launch, signed_in: bool) -> Probe {
+    if !launch.program_exists() {
+        return Probe::without_answer(
+            ProviderState::RuntimeMissing,
+            format!(
+                "The program `{}` was not found on this computer.",
+                launch.program.display()
+            ),
+        );
+    }
+    let (pushed, mut pushes) = tokio::sync::mpsc::unbounded_channel();
+    let session_auth = profile.session_auth;
+    let asked = Client
+        .v1()
+        .on_receive_notification(
+            async move |message: UntypedMessage, _connection| {
+                if let Some(status) = pushed_status(&message) {
+                    pushed.send(status).ok();
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(
+            launch.agent(),
+            |connection: ConnectionTo<Agent>| async move {
+                let capabilities =
+                    ClientCapabilities::new().auth(AuthCapabilities::new().terminal(true));
+                let initialized = connection
+                    .send_request(
+                        InitializeRequest::new(ProtocolVersion::V1)
+                            .client_capabilities(capabilities)
+                            .client_info(client_info()),
+                    )
+                    .block_task()
+                    .await?;
+                let agent = &initialized.agent_capabilities;
+                let pushes_status = agent
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.contains_key("authStatus"));
+                let status = if agent.auth.status.is_some() {
+                    Some(asked_status(&connection).await)
+                } else if pushes_status {
+                    tokio::time::timeout(STATUS_PATIENCE, pushes.recv())
+                        .await
+                        .ok()
+                        .flatten()
+                } else if let Some(method) = session_auth {
+                    let accepted = signed_in
+                        && matches!(
+                            tokio::time::timeout(
+                                SESSION_AUTH_PATIENCE,
+                                connection
+                                    .send_request(AuthenticateRequest::new(method))
+                                    .block_task(),
+                            )
+                            .await,
+                            Ok(Ok(_))
+                        );
+                    let state = if accepted {
+                        ProviderState::Ready
+                    } else {
+                        ProviderState::SignedOut
+                    };
+                    Some((state, None, None))
+                } else {
+                    None
+                };
+                Ok((initialized.auth_methods, status))
+            },
+        );
+    let (methods, status) = match tokio::time::timeout(PROBE_PATIENCE, asked).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
+            return Probe::without_answer(ProviderState::RuntimeMissing, failure_message(&error));
+        }
+        Err(_) => {
+            return Probe::without_answer(
+                ProviderState::Unknown,
+                "The agent did not answer in time.",
+            );
+        }
     };
+    let (state, account, detail) = status.unwrap_or((
+        ProviderState::Unknown,
+        None,
+        Some("The agent does not tell whether it is signed in.".to_owned()),
+    ));
     Probe {
         state,
         account,
         detail,
-        sign_in,
+        sign_ins: sign_in_options(profile, launch, methods),
     }
 }
 
-/// Whether the system would find the program: a path as it is written, a bare
-/// name in the folders of `PATH` and next to the daemon.
-fn program_exists(program: &Path, environment: &BTreeMap<String, String>) -> bool {
-    let named = |folder: &Path| {
-        let path = folder.join(program);
-        path.is_file()
-            || (cfg!(windows) && path.extension().is_none() && path.with_extension("exe").is_file())
-    };
-    if program.components().count() > 1 {
-        return named(Path::new(""));
-    }
-    let path = environment
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value.into())
-        .or_else(|| std::env::var_os("PATH"))
-        .unwrap_or_default();
-    let beside = std::env::current_exe()
-        .ok()
-        .and_then(|daemon| daemon.parent().map(Path::to_owned));
-    std::env::split_paths(&path)
-        .chain(beside)
-        .any(|folder| named(&folder))
+/// How often, and how many times, an agent is asked for its sign-in page.
+const SIGN_IN_PAGE_INTERVAL: Duration = Duration::from_millis(300);
+const SIGN_IN_PAGE_TRIES: u32 = 40;
+
+/// Asks the agent to run one of its own sign-ins, and waits until it ends.
+/// When the agent names the page where the person signs in, through the
+/// request `page_request`, `on_page` gets its address. Dropping the call
+/// closes the agent, and the sign-in with it.
+pub async fn authenticate(
+    launch: &Launch,
+    method: &str,
+    page_request: Option<&'static str>,
+    on_page: impl Fn(String) + Send + 'static,
+) -> Result<(), String> {
+    let method = method.to_owned();
+    Client
+        .v1()
+        .connect_with(
+            launch.agent(),
+            |connection: ConnectionTo<Agent>| async move {
+                let capabilities =
+                    ClientCapabilities::new().auth(AuthCapabilities::new().terminal(true));
+                connection
+                    .send_request(
+                        InitializeRequest::new(ProtocolVersion::V1)
+                            .client_capabilities(capabilities)
+                            .client_info(client_info()),
+                    )
+                    .block_task()
+                    .await?;
+                let signing_in = connection
+                    .send_request(AuthenticateRequest::new(method))
+                    .block_task();
+                let naming = async {
+                    if let Some(request) = page_request {
+                        for _ in 0..SIGN_IN_PAGE_TRIES {
+                            tokio::time::sleep(SIGN_IN_PAGE_INTERVAL).await;
+                            let asked = UntypedMessage::new(request, Map::new())?;
+                            let answer = connection.send_request(asked).block_task().await;
+                            if let Some(page) = answer.ok().as_ref().and_then(sign_in_page) {
+                                on_page(page);
+                                break;
+                            }
+                        }
+                    }
+                    std::future::pending::<Result<(), Error>>().await
+                };
+                tokio::select! {
+                    signed_in = signing_in => signed_in.map(|_| ()),
+                    failed = naming => failed,
+                }
+            },
+        )
+        .await
+        .map_err(|error| short(failure_message(&error)))
+}
+
+/// The address of a sign-in page, as an agent names it. Only a secure web
+/// address is kept: a client opens it in the browser.
+fn sign_in_page(answer: &Value) -> Option<String> {
+    let page = answer.get("auth_url")?.as_str()?;
+    page.starts_with("https://").then(|| page.to_owned())
+}
+
+/// The models and the reasoning levels a session offers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Offer {
+    pub models: Vec<ModelChoice>,
+    pub model: Option<String>,
+    pub efforts: Vec<ModelChoice>,
+    pub effort: Option<String>,
+    /// The session is new: what it stands on is what the provider chose.
+    pub new_session: bool,
 }
 
 pub struct SessionConfig {
     pub agent: AgentProfile,
+    pub launch: Launch,
     pub cwd: PathBuf,
     pub resume: Option<String>,
     /// The bot's instructions. They reach the agent as the system prompt of
@@ -231,6 +497,10 @@ pub struct SessionConfig {
     pub instructions: String,
     /// The model the session runs on. `None` keeps the agent's default.
     pub model: Option<String>,
+    /// The reasoning level. `None` keeps the agent's default.
+    pub effort: Option<String>,
+    /// Whether a sign-in started from the daemon ended well.
+    pub signed_in: bool,
 }
 
 pub enum AgentEvent {
@@ -238,6 +508,11 @@ pub enum AgentEvent {
         provider_session_id: String,
     },
     Event(Event),
+    Offer(Offer),
+    /// The bot's model is not offered: the session runs on the agent's default.
+    ModelUnavailable {
+        model: String,
+    },
     ApprovalNeeded {
         tool_call_id: String,
         title: Option<String>,
@@ -254,7 +529,12 @@ pub enum AgentEvent {
 }
 
 pub enum SessionCommand {
-    Prompt(String),
+    /// A message, after what the session must read first: what was said in
+    /// the conversation with another provider.
+    Prompt {
+        text: String,
+        handoff: Option<String>,
+    },
     /// Asks the agent to end the running turn, then answers the approvals that
     /// waited as cancelled, in that order: an agent that reads its cancelled
     /// requests already knows that the turn is stopping. The turn still ends
@@ -277,6 +557,15 @@ pub struct SessionFailure {
     pub cause: Option<FailureCause>,
 }
 
+impl SessionFailure {
+    pub fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cause: None,
+        }
+    }
+}
+
 impl From<Error> for SessionFailure {
     fn from(error: Error) -> Self {
         Self {
@@ -286,29 +575,168 @@ impl From<Error> for SessionFailure {
     }
 }
 
+fn choice(option: &SessionConfigSelectOption) -> ModelChoice {
+    ModelChoice {
+        id: option.value.0.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+    }
+}
+
+fn choices(options: &SessionConfigSelectOptions) -> Vec<ModelChoice> {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => options.iter().map(choice).collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter().map(choice))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The option of a category, with its choices and the one it stands on.
+fn select_of(
+    options: &[SessionConfigOption],
+    category: &SessionConfigOptionCategory,
+) -> Option<(SessionConfigId, Vec<ModelChoice>, String)> {
+    let option = options
+        .iter()
+        .find(|option| option.category.as_ref() == Some(category))?;
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some((
+            option.id.clone(),
+            choices(&select.options),
+            select.current_value.0.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+fn offer_of(options: &[SessionConfigOption], new_session: bool) -> Offer {
+    let (models, model) = select_of(options, &SessionConfigOptionCategory::Model)
+        .map_or((Vec::new(), None), |(_, choices, current)| {
+            (choices, Some(current))
+        });
+    let (efforts, effort) = select_of(options, &SessionConfigOptionCategory::ThoughtLevel)
+        .map_or((Vec::new(), None), |(_, choices, current)| {
+            (choices, Some(current))
+        });
+    Offer {
+        models,
+        model,
+        efforts,
+        effort,
+        new_session,
+    }
+}
+
+/// The option to set so that the session stands on `wanted`, when it does
+/// not yet. `Err` means the agent does not offer that choice.
+fn choice_to_set(
+    options: &[SessionConfigOption],
+    category: &SessionConfigOptionCategory,
+    wanted: &str,
+) -> Result<Option<SessionConfigId>, ()> {
+    let (id, choices, current) = select_of(options, category).ok_or(())?;
+    if !choices.iter().any(|choice| choice.id == wanted) {
+        return Err(());
+    }
+    Ok((current != wanted).then_some(id))
+}
+
+/// Names the sign-in method to an agent that wants it before each session.
+/// Without a sign-in started from the daemon, the agent is not asked: it
+/// would start a sign-in of its own in the middle of a turn.
+async fn accept_sign_in(
+    connection: &ConnectionTo<Agent>,
+    profile: &AgentProfile,
+    signed_in: bool,
+) -> Result<(), Error> {
+    let Some(method) = profile.session_auth else {
+        return Ok(());
+    };
+    if !signed_in {
+        return Err(Error::auth_required());
+    }
+    let accepted = tokio::time::timeout(
+        SESSION_AUTH_PATIENCE,
+        connection
+            .send_request(AuthenticateRequest::new(method))
+            .block_task(),
+    )
+    .await;
+    match accepted {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err(Error::auth_required()),
+    }
+}
+
+/// Reads the models and the reasoning levels an agent offers: one session is
+/// opened in `cwd`, with no prompt, and closed.
+pub async fn read_offer(
+    profile: AgentProfile,
+    launch: &Launch,
+    cwd: PathBuf,
+    signed_in: bool,
+) -> Result<Offer, SessionFailure> {
+    Client
+        .v1()
+        .connect_with(
+            launch.agent(),
+            |connection: ConnectionTo<Agent>| async move {
+                connection
+                    .send_request(
+                        InitializeRequest::new(ProtocolVersion::V1).client_info(client_info()),
+                    )
+                    .block_task()
+                    .await?;
+                accept_sign_in(&connection, &profile, signed_in).await?;
+                let mut request = NewSessionRequest::new(cwd);
+                request.meta = profile.session_meta;
+                let created = connection.send_request(request).block_task().await?;
+                Ok(offer_of(
+                    created.config_options.as_deref().unwrap_or_default(),
+                    true,
+                ))
+            },
+        )
+        .await
+        .map_err(SessionFailure::from)
+}
+
 pub async fn run_session(
     config: SessionConfig,
+    first: Vec<SessionCommand>,
     mut commands: UnboundedReceiver<SessionCommand>,
     events: UnboundedSender<AgentEvent>,
 ) -> Result<(), SessionFailure> {
     let SessionConfig {
         agent,
+        launch,
         cwd,
         resume,
         instructions,
         model,
+        effort,
+        signed_in,
     } = config;
-    let process = AcpAgent::from_str(&agent.command).map_err(|error| SessionFailure {
-        message: error.to_string(),
-        cause: None,
-    })?;
     let update_events = events.clone();
     let approval_events = events.clone();
+    let mut first = first.into_iter();
+    // The modes the agent reports it moved to on its own, out of the one in
+    // which it asks first.
+    let guarded_mode = agent.session_mode.or(agent.started_mode);
+    let (left_mode, mut mode_left) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     Client
         .v1()
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
+                if let SessionUpdate::CurrentModeUpdate(update) = &notification.update
+                    && guarded_mode.is_some_and(|mode| update.current_mode_id.0.as_ref() != mode)
+                {
+                    left_mode.send(update.current_mode_id.0.to_string()).ok();
+                }
                 if let Some(event) = translate(notification.update) {
                     update_events.send(AgentEvent::Event(event)).ok();
                 }
@@ -354,11 +782,14 @@ pub async fn run_session(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(process, |connection: ConnectionTo<Agent>| async move {
+        .connect_with(launch.agent(), |connection: ConnectionTo<Agent>| async move {
             let initialized = connection
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_info(client_info()),
+                )
                 .block_task()
                 .await?;
+            accept_sign_in(&connection, &agent, signed_in).await?;
 
             let capabilities = initialized.agent_capabilities.session_capabilities;
             let system_prompt = (capabilities.system_prompt.is_some() && !instructions.is_empty())
@@ -373,6 +804,7 @@ pub async fn run_session(
                 (system_prompt.is_none() && resume.is_none() && !instructions.is_empty())
                     .then_some(instructions);
 
+            let new_session = resume.is_none();
             let (session_id, modes, config_options) = match resume {
                 Some(provider_session_id) => {
                     if capabilities.resume.is_none() {
@@ -394,8 +826,8 @@ pub async fn run_session(
                 }
             };
 
-            if let Some(mode) = agent.session_mode.as_deref()
-                && needs_mode_change(modes.as_ref(), mode)?
+            if let Some(mode) = agent.session_mode
+                && needs_mode_change(agent.name, modes.as_ref(), mode)?
             {
                 connection
                     .send_request(SetSessionModeRequest::new(
@@ -403,23 +835,48 @@ pub async fn run_session(
                         SessionModeId::new(mode),
                     ))
                     .block_task()
-                    .await?;
-            }
-
-            if let Some(model) = model.as_deref()
-                && let Some(option) = model_option(config_options.as_deref(), model)?
-            {
-                connection
-                    .send_request(SetSessionConfigOptionRequest::new(
-                        session_id.clone(),
-                        option,
-                        SessionConfigOptionValue::value_id(model.to_owned()),
-                    ))
-                    .block_task()
                     .await
-                    .map_err(|error| {
-                        failure(&format!("the agent refused the model `{model}`: {error}"))
-                    })?;
+                    .map_err(|error| missing_mode(agent.name, mode, &error.to_string()))?;
+            }
+            // What the agent reported before it stood in the wanted mode is
+            // past: no prompt has been sent yet.
+            while mode_left.try_recv().is_ok() {}
+
+            let mut config_options = config_options.unwrap_or_default();
+            events
+                .send(AgentEvent::Offer(offer_of(&config_options, new_session)))
+                .ok();
+            let wanted = [
+                (model, SessionConfigOptionCategory::Model, true),
+                (effort, SessionConfigOptionCategory::ThoughtLevel, false),
+            ];
+            for (value, category, is_model) in wanted {
+                let Some(value) = value else {
+                    continue;
+                };
+                match choice_to_set(&config_options, &category, &value) {
+                    Ok(None) => {}
+                    Ok(Some(option)) => {
+                        let set = connection
+                            .send_request(SetSessionConfigOptionRequest::new(
+                                session_id.clone(),
+                                option,
+                                SessionConfigOptionValue::value_id(value.clone()),
+                            ))
+                            .block_task()
+                            .await
+                            .map_err(|error| {
+                                failure(&format!("the agent refused the choice `{value}`: {error}"))
+                            })?;
+                        config_options = set.config_options;
+                    }
+                    Err(()) if is_model => {
+                        events
+                            .send(AgentEvent::ModelUnavailable { model: value })
+                            .ok();
+                    }
+                    Err(()) => {}
+                }
             }
 
             events
@@ -428,14 +885,25 @@ pub async fn run_session(
                 })
                 .ok();
 
-            while let Some(command) = commands.recv().await {
-                let SessionCommand::Prompt(prompt) = command else {
+            loop {
+                let command = match first.next() {
+                    Some(command) => command,
+                    None => match commands.recv().await {
+                        Some(command) => command,
+                        None => break,
+                    },
+                };
+                let SessionCommand::Prompt { text, handoff } = command else {
                     continue;
                 };
+                if let (Some(mode), Ok(left)) = (guarded_mode, mode_left.try_recv()) {
+                    return Err(left_mode_error(agent.name, mode, &left));
+                }
                 let content = preface
                     .take()
                     .into_iter()
-                    .chain([prompt])
+                    .chain(handoff)
+                    .chain([text])
                     .map(|text| ContentBlock::Text(TextContent::new(text)))
                     .collect();
                 let mut answer = std::pin::pin!(
@@ -446,6 +914,15 @@ pub async fn run_session(
                 let response = loop {
                     tokio::select! {
                         response = &mut answer => break response?,
+                        Some(left) = mode_left.recv() => {
+                            // The agent would now run tools without asking:
+                            // the turn stops, and the session closes with it.
+                            connection
+                                .send_notification(CancelNotification::new(session_id.clone()))
+                                .ok();
+                            let mode = guarded_mode.unwrap_or_default();
+                            return Err(left_mode_error(agent.name, mode, &left));
+                        }
                         command = commands.recv() => match command {
                             Some(SessionCommand::Cancel { approvals }) => {
                                 connection
@@ -455,7 +932,7 @@ pub async fn run_session(
                                 }
                             }
                             // The conversation sends one prompt at a time.
-                            Some(SessionCommand::Prompt(_)) => {}
+                            Some(SessionCommand::Prompt { .. }) => {}
                             None => return Ok(()),
                         },
                     }
@@ -505,7 +982,27 @@ fn failure(message: &str) -> Error {
     Error::internal_error().data(Value::String(message.to_owned()))
 }
 
-fn needs_mode_change(modes: Option<&SessionModeState>, mode: &str) -> Result<bool, Error> {
+/// The error of a session that cannot be put in the mode where the agent asks
+/// before each gated tool call.
+fn missing_mode(provider: &str, mode: &str, reason: &str) -> Error {
+    failure(&format!(
+        "{provider} cannot run in the session mode `{mode}` ({reason}), so Crow Bot would not receive its approval requests. No tool was run."
+    ))
+}
+
+/// The error of a session whose agent left, on its own, the mode in which it
+/// asks before each gated tool call.
+fn left_mode_error(provider: &str, mode: &str, left: &str) -> Error {
+    failure(&format!(
+        "{provider} left the session mode `{mode}` for `{left}`, so Crow Bot would not receive its approval requests. The turn was stopped."
+    ))
+}
+
+fn needs_mode_change(
+    provider: &str,
+    modes: Option<&SessionModeState>,
+    mode: &str,
+) -> Result<bool, Error> {
     let offered = modes.is_some_and(|modes| {
         modes
             .available_modes
@@ -513,33 +1010,9 @@ fn needs_mode_change(modes: Option<&SessionModeState>, mode: &str) -> Result<boo
             .any(|available| available.id.0.as_ref() == mode)
     });
     if !offered {
-        return Err(failure(&format!(
-            "the agent does not offer the session mode `{mode}`"
-        )));
+        return Err(missing_mode(provider, mode, "it does not offer that mode"));
     }
     Ok(modes.is_some_and(|modes| modes.current_mode_id.0.as_ref() != mode))
-}
-
-/// The config option that sets the model, when the session does not run on
-/// `model` yet. An agent that offers no model choice cannot run the bot's model.
-fn model_option(
-    options: Option<&[SessionConfigOption]>,
-    model: &str,
-) -> Result<Option<SessionConfigId>, Error> {
-    let option = options
-        .unwrap_or_default()
-        .iter()
-        .find(|option| option.category == Some(SessionConfigOptionCategory::Model))
-        .ok_or_else(|| {
-            failure(&format!(
-                "the agent offers no model choice, so it cannot run on the model `{model}`"
-            ))
-        })?;
-    let current = match &option.kind {
-        SessionConfigKind::Select(select) => Some(select.current_value.0.as_ref()),
-        _ => None,
-    };
-    Ok((current != Some(model)).then(|| option.id.clone()))
 }
 
 fn select(
@@ -730,8 +1203,8 @@ fn turn_end(reason: StopReason) -> TurnEnd {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::v1::schema::{
-        Content, ContentChunk, Diff, PermissionOption, SessionConfigSelectOption, SessionMode,
-        Terminal, ToolCall, ToolCallUpdate,
+        AuthMethodAgent, AuthMethodTerminal, Content, ContentChunk, Diff, PermissionOption,
+        SessionMode, Terminal, ToolCall, ToolCallUpdate,
     };
     use serde_json::json;
 
@@ -812,20 +1285,20 @@ mod tests {
     #[test]
     fn a_session_already_in_the_wanted_mode_needs_no_change() {
         let state = modes("default", &["default", "plan"]);
-        assert!(!needs_mode_change(Some(&state), "default").unwrap());
+        assert!(!needs_mode_change("Agent", Some(&state), "default").unwrap());
     }
 
     #[test]
     fn a_session_in_another_mode_needs_a_change() {
         let state = modes("bypassPermissions", &["default", "bypassPermissions"]);
-        assert!(needs_mode_change(Some(&state), "default").unwrap());
+        assert!(needs_mode_change("Agent", Some(&state), "default").unwrap());
     }
 
     #[test]
     fn an_agent_that_does_not_offer_the_mode_is_an_error() {
         let state = modes("plan", &["plan"]);
-        assert!(needs_mode_change(Some(&state), "default").is_err());
-        assert!(needs_mode_change(None, "default").is_err());
+        assert!(needs_mode_change("Agent", Some(&state), "default").is_err());
+        assert!(needs_mode_change("Agent", None, "default").is_err());
     }
 
     fn no_choice() -> Vec<SessionConfigSelectOption> {
@@ -845,28 +1318,153 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_mode_names_the_provider_and_the_mode() {
+        let state = modes("plan", &["plan"]);
+        let error = needs_mode_change("Codex", Some(&state), "read-only").unwrap_err();
+        let message = SessionFailure::from(error).message;
+        assert!(message.contains("Codex"), "{message}");
+        assert!(message.contains("`read-only`"), "{message}");
+        assert!(message.contains("No tool was run"), "{message}");
+    }
+
+    const MODEL: SessionConfigOptionCategory = SessionConfigOptionCategory::Model;
+    const EFFORT: SessionConfigOptionCategory = SessionConfigOptionCategory::ThoughtLevel;
+
+    #[test]
     fn the_model_is_set_through_the_option_of_the_model_category() {
         let options = model_options("fast");
-        let option = model_option(Some(&options), "smart").unwrap();
-        assert_eq!(option, Some(SessionConfigId::new("model")));
+        assert_eq!(
+            choice_to_set(&options, &MODEL, "smart"),
+            Ok(Some(SessionConfigId::new("model")))
+        );
     }
 
     #[test]
     fn a_session_already_on_the_model_needs_no_change() {
         let options = model_options("smart");
-        assert_eq!(model_option(Some(&options), "smart").unwrap(), None);
+        assert_eq!(choice_to_set(&options, &MODEL, "smart"), Ok(None));
     }
 
     #[test]
-    fn an_agent_with_no_model_choice_cannot_run_a_chosen_model() {
+    fn a_model_the_agent_does_not_offer_is_told_apart_from_one_to_set() {
         let no_model = vec![SessionConfigOption::select(
             "mode",
             "Mode",
             "default",
             no_choice(),
         )];
-        assert!(model_option(Some(&no_model), "smart").is_err());
-        assert!(model_option(None, "smart").is_err());
+        assert_eq!(choice_to_set(&no_model, &MODEL, "smart"), Err(()));
+        assert_eq!(choice_to_set(&[], &MODEL, "smart"), Err(()));
+        assert_eq!(
+            choice_to_set(&model_options("fast"), &MODEL, "bogus"),
+            Err(())
+        );
+        assert_eq!(
+            choice_to_set(&model_options("fast"), &EFFORT, "high"),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn an_offer_lists_the_models_and_the_reasoning_levels_with_what_the_session_stands_on() {
+        let mut options = model_options("fast");
+        options.push(
+            SessionConfigOption::select(
+                "reasoning_effort",
+                "Reasoning effort",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High").description("Deeper".to_owned()),
+                ],
+            )
+            .category(EFFORT),
+        );
+        let offer = offer_of(&options, true);
+        let ids = |choices: &[ModelChoice]| {
+            choices
+                .iter()
+                .map(|choice| choice.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&offer.models), ["fast", "smart"]);
+        assert_eq!(offer.models[1].name, "Smart");
+        assert_eq!(offer.model.as_deref(), Some("fast"));
+        assert_eq!(ids(&offer.efforts), ["low", "high"]);
+        assert_eq!(offer.efforts[1].description.as_deref(), Some("Deeper"));
+        assert_eq!(offer.effort.as_deref(), Some("high"));
+        assert!(offer.new_session);
+        assert_eq!(offer_of(&[], false), Offer::default());
+    }
+
+    #[test]
+    fn an_agent_pushes_its_sign_in_as_a_state_and_a_label_only() {
+        let pushed = |method: &str, params: Value| {
+            pushed_status(&UntypedMessage::new(method, params).unwrap())
+        };
+        assert_eq!(
+            pushed(
+                "_auth/status_update",
+                json!({ "authStatus": { "kind": "account", "label": "ChatGPT Plus",
+                    "account": { "email": "someone@example.com", "plan": "plus" } } })
+            ),
+            Some((ProviderState::Ready, Some("ChatGPT Plus".to_owned()), None))
+        );
+        assert_eq!(
+            pushed(
+                "auth/status_update",
+                json!({ "authStatus": { "kind": "none", "label": "Not logged in" } })
+            ),
+            Some((ProviderState::SignedOut, None, None))
+        );
+        assert_eq!(pushed("_auth/status_update", json!({})), None);
+        assert_eq!(
+            pushed(
+                "session/update",
+                json!({ "authStatus": { "kind": "none" } })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_launch_reads_a_command_line_and_adds_what_the_profile_gives() {
+        let launch = Launch::parse(r#"{"command":"agent","args":["stdio"]}"#).unwrap();
+        assert_eq!(launch.program, Path::new("agent"));
+        assert_eq!(launch.args, ["stdio"]);
+        let mut profile = AgentProfile::generic();
+        profile.args = vec!["--ask".to_owned()];
+        profile
+            .env
+            .insert("AGENT_HOME".to_owned(), "/data/home".to_owned());
+        let launch = launch.with(&profile);
+        assert_eq!(launch.args, ["stdio", "--ask"]);
+        assert_eq!(
+            launch.env.get("AGENT_HOME").map(String::as_str),
+            Some("/data/home")
+        );
+    }
+
+    #[test]
+    fn the_sign_ins_keep_the_order_of_the_agent_and_leave_out_the_hidden_ones() {
+        let mut profile = AgentProfile::generic();
+        profile.hidden_sign_ins = &["api-key"];
+        let launch = Launch::of(PathBuf::from("agent"));
+        let methods = vec![
+            AuthMethod::Agent(AuthMethodAgent::new("api-key", "API key")),
+            AuthMethod::Agent(AuthMethodAgent::new("chat", "Chat plan")),
+            AuthMethod::Terminal(
+                AuthMethodTerminal::new("console", "Console").args(vec!["login".to_owned()]),
+            ),
+        ];
+        let options = sign_in_options(&profile, &launch, methods);
+        let names: Vec<&str> = options.iter().map(|option| option.name.as_str()).collect();
+        assert_eq!(names, ["Chat plan", "Console"]);
+        assert!(matches!(options[0].start, SignInStart::Agent));
+        match &options[1].start {
+            SignInStart::Command(command) => assert_eq!(command.arguments, ["login"]),
+            SignInStart::Agent => panic!("a terminal method is a command"),
+        }
     }
 
     #[test]

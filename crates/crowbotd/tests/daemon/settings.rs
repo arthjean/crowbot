@@ -268,6 +268,7 @@ async fn a_signed_out_provider_signs_in_through_its_own_program() {
     client
         .send(ClientMessage::SignIn {
             provider: PROVIDER.to_owned(),
+            method: None,
         })
         .await;
     let started = Instant::now();
@@ -332,6 +333,7 @@ async fn a_cancelled_sign_in_ends_its_process_and_the_processes_it_started() {
 
     let sign_in = ClientMessage::SignIn {
         provider: PROVIDER.to_owned(),
+        method: None,
     };
     client.send(sign_in.clone()).await;
     until_provider(&mut client, |status| status.signing_in).await;
@@ -370,6 +372,7 @@ async fn a_finished_sign_in_leaves_the_processes_it_started_alone() {
     client
         .send(ClientMessage::SignIn {
             provider: PROVIDER.to_owned(),
+            method: None,
         })
         .await;
     until_provider(&mut client, |status| {
@@ -393,6 +396,7 @@ async fn a_sign_in_that_fails_says_so_and_leaves_the_provider_signed_out() {
     client
         .send(ClientMessage::SignIn {
             provider: PROVIDER.to_owned(),
+            method: None,
         })
         .await;
     until_provider(&mut client, |status| status.signing_in).await;
@@ -408,6 +412,7 @@ async fn a_sign_in_that_fails_says_so_and_leaves_the_provider_signed_out() {
     client
         .send(ClientMessage::SignIn {
             provider: PROVIDER.to_owned(),
+            method: None,
         })
         .await;
     let ready = until_provider(&mut client, |status| {
@@ -450,6 +455,7 @@ async fn a_provider_that_tells_nothing_about_its_sign_in_is_unknown() {
     client
         .send(ClientMessage::SignIn {
             provider: PROVIDER.to_owned(),
+            method: None,
         })
         .await;
     let refused = client.until_error().await;
@@ -468,10 +474,11 @@ async fn a_provider_that_tells_nothing_about_its_sign_in_is_unknown() {
 }
 
 #[tokio::test]
-#[ignore = "starts the real Claude adapter and reads the user's own sign-in state"]
+#[ignore = "downloads the pinned Claude runtime and reads the user's own sign-in state"]
 async fn the_claude_adapter_tells_its_sign_in_state() {
     let daemon = Daemon::start_with_claude();
     let mut client = daemon.client().await;
+    // A fresh daemon has no runtime yet: it says so, and installs it on request.
     client.send(ClientMessage::ListProviders).await;
     let status = client
         .until(|message| match message {
@@ -479,6 +486,21 @@ async fn the_claude_adapter_tells_its_sign_in_state() {
             _ => None,
         })
         .await;
+    assert_eq!(status.state, ProviderState::NotInstalled, "{status:?}");
+    client
+        .send(ClientMessage::InstallRuntime {
+            provider: "claude".to_owned(),
+        })
+        .await;
+    let status = loop {
+        if let ServerMessage::ProviderChanged(status) = client.next_within_minutes().await
+            && settled(&status)
+            && status.install.is_none()
+            && status.state != ProviderState::NotInstalled
+        {
+            break status;
+        }
+    };
     println!(
         "Claude: {:?}, can sign in: {}, detail: {:?}",
         status.state, status.can_sign_in, status.detail

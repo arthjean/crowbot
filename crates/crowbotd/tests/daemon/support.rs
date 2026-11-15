@@ -36,7 +36,7 @@ pub fn test_dir() -> PathBuf {
     dir
 }
 
-fn fake_agent() -> &'static Path {
+pub fn fake_agent() -> &'static Path {
     static AGENT: OnceLock<PathBuf> = OnceLock::new();
     AGENT.get_or_init(|| {
         let name = format!("fake_acp_agent{}", std::env::consts::EXE_SUFFIX);
@@ -66,6 +66,13 @@ enum Agent {
     Missing,
     /// The daemon's own Claude profile: the real adapter and the real model.
     Claude,
+    /// The daemon's own Claude profile and the runtime it installs itself,
+    /// on a `PATH` that holds neither Bun nor Node.js.
+    ClaudeAlone,
+    /// The daemon's own providers. The runtimes it installs are the ones of
+    /// the file `manifest.json` of the test folder, and the process gets the
+    /// variables given, which the scripted agent it starts reads.
+    Providers(&'static [(&'static str, &'static str)]),
 }
 
 fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
@@ -102,6 +109,26 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
             command.args(["--agent", &agent.to_string()]);
         }
         Agent::Claude => {}
+        Agent::ClaudeAlone => {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let kept = std::env::split_paths(&path).filter(|folder| {
+                !["bun", "node"].iter().any(|runtime| {
+                    folder
+                        .join(runtime)
+                        .with_extension(std::env::consts::EXE_EXTENSION)
+                        .is_file()
+                        || folder.join(runtime).is_file()
+                })
+            });
+            command.env("PATH", std::env::join_paths(kept).unwrap());
+        }
+        Agent::Providers(variables) => {
+            command
+                .arg("--runtime-manifest")
+                .arg(dir.join("manifest.json"))
+                .env("FAKE_AGENT_HEARTBEAT", heartbeat)
+                .envs(variables.iter().copied());
+        }
     }
     command
 }
@@ -152,6 +179,30 @@ impl Daemon {
     /// A daemon whose bots run on Claude, with the user's own sign-in.
     pub fn start_with_claude() -> Self {
         Self::start_with(Agent::Claude)
+    }
+
+    /// A daemon whose bots run on Claude, started from the runtime the
+    /// daemon installs, on a computer with neither Bun nor Node.js.
+    pub fn start_with_claude_alone() -> Self {
+        Self::start_with(Agent::ClaudeAlone)
+    }
+
+    /// A daemon with its own providers, which installs the runtimes that
+    /// `manifest` lists and no other. Each provider runs the scripted agent
+    /// once a test sets it as the executable of the provider.
+    pub fn start_with_providers(
+        manifest: &serde_json::Value,
+        variables: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        let mut daemon = Self::stopped(Agent::Providers(variables));
+        std::fs::write(daemon.dir.join("manifest.json"), manifest.to_string()).unwrap();
+        daemon.spawn();
+        daemon
+    }
+
+    /// The folder the daemon keeps its runtimes and the files of providers in.
+    pub fn data_dir(&self) -> &Path {
+        &self.dir
     }
 
     /// A daemon that starts on a database file the test wrote first, as an

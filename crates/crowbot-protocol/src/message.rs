@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event};
 use crate::preferences::{Preferences, PreferencesPatch};
-use crate::provider::{DaemonInfo, ProviderStatus};
+use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
 use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -121,10 +121,28 @@ pub enum ClientMessage {
     CheckProvider {
         provider: String,
     },
+    /// Starts a sign-in of the provider. `method` names one of the methods
+    /// of its status; with none, the daemon starts the first one.
     SignIn {
         provider: String,
+        #[serde(default)]
+        method: Option<String>,
     },
     CancelSignIn {
+        provider: String,
+    },
+    /// Downloads the runtime of the provider now, instead of at the first turn.
+    InstallRuntime {
+        provider: String,
+    },
+    /// Sets the executable the daemon starts for the provider, in place of
+    /// the runtime it installs. `None` goes back to that runtime.
+    SetProviderExecutable {
+        provider: String,
+        path: Option<String>,
+    },
+    /// Asks for the models and the reasoning levels the provider offers.
+    ListModels {
         provider: String,
     },
     GetDaemonInfo,
@@ -236,6 +254,8 @@ pub enum ServerMessage {
     },
     Providers(Vec<ProviderStatus>),
     ProviderChanged(ProviderStatus),
+    /// Answers `ListModels`, and follows every change of what a provider offers.
+    ProviderModels(ProviderModels),
     DaemonInfo(DaemonInfo),
     SearchResults(SearchResults),
 }
@@ -333,6 +353,19 @@ mod tests {
         assert!(read.turn_active);
         assert_eq!(read.older, None);
         assert_eq!(read.draft, "");
+    }
+
+    #[test]
+    fn a_sign_in_from_an_older_client_names_no_method() {
+        let read: ClientMessage =
+            serde_json::from_str(r#"{"type":"sign_in","data":{"provider":"claude"}}"#).unwrap();
+        assert_eq!(
+            read,
+            ClientMessage::SignIn {
+                provider: "claude".to_owned(),
+                method: None,
+            }
+        );
     }
 
     #[test]

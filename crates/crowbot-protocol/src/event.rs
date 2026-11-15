@@ -64,6 +64,19 @@ pub enum Event {
     TurnInterrupted {
         cause: Interruption,
     },
+    /// The bot's model is not one the provider offers, so the turn runs on
+    /// the provider's default model.
+    ModelUnavailable {
+        model: String,
+        #[serde(default)]
+        provider: Option<String>,
+    },
+    /// The bot moved to another provider. The turn that follows runs on `to`,
+    /// which received what was said before.
+    ProviderChanged {
+        from: String,
+        to: String,
+    },
 }
 
 impl Event {
@@ -231,6 +244,28 @@ mod tests {
             .unwrap(),
             r#"{"type":"approval_closed","data":{"id":"a1","tool_call_id":"t1","title":null,"reason":"expired"}}"#
         );
+    }
+
+    #[test]
+    fn a_model_fallback_and_a_provider_change_have_a_stable_stored_shape() {
+        let fallback = Event::ModelUnavailable {
+            model: "opus".to_owned(),
+            provider: Some("claude".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_string(&fallback).unwrap(),
+            r#"{"type":"model_unavailable","data":{"model":"opus","provider":"claude"}}"#
+        );
+        assert!(!fallback.ends_turn());
+        let moved = Event::ProviderChanged {
+            from: "claude".to_owned(),
+            to: "codex".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&moved).unwrap(),
+            r#"{"type":"provider_changed","data":{"from":"claude","to":"codex"}}"#
+        );
+        assert!(!moved.ends_turn());
     }
 
     #[test]

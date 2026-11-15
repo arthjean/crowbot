@@ -240,6 +240,7 @@ async fn a_bot_keeps_all_its_fields_across_a_restart() {
             }),
             provider: None,
             model: Some("smart".to_owned()),
+            effort: None,
             permission_level: Some(PermissionLevel::FullAccess),
             workspace: Some(folder.to_string_lossy().into_owned()),
         })
@@ -556,7 +557,7 @@ async fn changed_instructions_or_model_start_a_new_provider_session_and_keep_the
 }
 
 #[tokio::test]
-async fn a_model_the_agent_does_not_offer_fails_the_turn_and_the_bot_stays_usable() {
+async fn a_model_the_agent_does_not_offer_gives_way_to_its_default_and_the_bot_says_so() {
     let daemon = Daemon::start();
     let mut client = daemon.client().await;
     let bot = client
@@ -568,23 +569,38 @@ async fn a_model_the_agent_does_not_offer_fails_the_turn_and_the_bot_stays_usabl
     let conversation = bot.current_conversation_id;
     client.open(conversation).await;
     client.say(conversation, "config").await;
-    let Event::TurnFailed { message, .. } = client.until_turn_ends().await else {
-        panic!("the turn did not fail");
-    };
-    assert!(message.contains("bogus"), "{message}");
+    let fallback = client
+        .until_event(|event| matches!(event, Event::ModelUnavailable { .. }))
+        .await;
+    assert_eq!(
+        fallback,
+        Event::ModelUnavailable {
+            model: "bogus".to_owned(),
+            provider: Some("custom".to_owned()),
+        }
+    );
+    client.until_reply("model=fast").await;
+    assert_eq!(
+        client.until_turn_ends().await,
+        Event::TurnEnded(TurnEnd::Completed)
+    );
+    assert_eq!(client.bot(bot.bot.id).await.bot.model, None);
 
+    // A model the agent offers is still taken.
     client
         .update_bot(
             bot.bot.id,
             BotPatch {
-                model: Some(None),
+                model: Some(Some("smart".to_owned())),
                 ..BotPatch::default()
             },
         )
         .await;
-    client.until_bot(|bot| bot.bot.model.is_none()).await;
+    client
+        .until_bot(|bot| bot.bot.model.as_deref() == Some("smart"))
+        .await;
     let config = client.ask(conversation, "config").await;
-    assert!(config.contains("model=fast"), "{config}");
+    assert!(config.contains("model=smart"), "{config}");
 }
 
 #[tokio::test]

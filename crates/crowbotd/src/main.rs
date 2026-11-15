@@ -1,6 +1,9 @@
 mod conversation;
 mod daemon;
+mod digest;
+mod handoff;
 mod provider;
+mod runtime;
 mod server;
 mod store;
 
@@ -13,18 +16,25 @@ use crowbot_protocol::Endpoint;
 use crowbot_protocol::transport::Listener;
 
 use crate::daemon::Daemon;
+use crate::runtime::Runtimes;
 use crate::store::{SharedStore, Store};
 
 const USAGE: &str =
-    "usage: crowbotd [--db <path>] [--bots-dir <dir>] [--agent <command>] [--endpoint <address>]
+    "usage: crowbotd [--db <path>] [--bots-dir <dir>] [--data-dir <dir>] [--agent <command>]
+                [--runtime-manifest <file>] [--endpoint <address>]
 
 The daemon listens on a local endpoint and serves Crow Bot clients until it is stopped.
-A bot created with no folder gets one of its own under --bots-dir (~/CrowBot/Bots).";
+A bot created with no folder gets one of its own under --bots-dir (~/CrowBot/Bots).
+The agent runtimes the daemon installs, and the files providers keep for bots, go
+under --data-dir (the folder of the database). --runtime-manifest replaces the pinned
+runtimes by the ones a JSON file lists, for a mirror.";
 
 struct Args {
     db: Option<PathBuf>,
     bots_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
     command: Option<String>,
+    runtime_manifest: Option<PathBuf>,
     endpoint: Option<Endpoint>,
 }
 
@@ -32,7 +42,9 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args {
         db: None,
         bots_dir: None,
+        data_dir: None,
         command: None,
+        runtime_manifest: None,
         endpoint: None,
     };
     while let Some(arg) = raw.next() {
@@ -43,7 +55,17 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
                     raw.next().ok_or("--bots-dir needs a directory")?,
                 ));
             }
+            "--data-dir" => {
+                args.data_dir = Some(PathBuf::from(
+                    raw.next().ok_or("--data-dir needs a directory")?,
+                ));
+            }
             "--agent" => args.command = Some(raw.next().ok_or("--agent needs a command")?),
+            "--runtime-manifest" => {
+                args.runtime_manifest = Some(PathBuf::from(
+                    raw.next().ok_or("--runtime-manifest needs a file")?,
+                ));
+            }
             "--endpoint" => {
                 args.endpoint = Some(Endpoint::new(
                     raw.next().ok_or("--endpoint needs an address")?,
@@ -79,6 +101,21 @@ async fn run(args: Args) -> Result<(), String> {
             .map_err(|error| format!("cannot use {} for bots: {error}", dir.display()))?,
         None => default_bots_dir()?,
     };
+    let absolute = |dir: &PathBuf| {
+        std::path::absolute(dir)
+            .map_err(|error| format!("cannot use {} for data: {error}", dir.display()))
+    };
+    let data_dir = match (&args.data_dir, db.parent()) {
+        (Some(dir), _) => absolute(dir)?,
+        (None, Some(folder)) if !folder.as_os_str().is_empty() => absolute(&folder.to_owned())?,
+        (None, _) => absolute(&PathBuf::from("."))?,
+    };
+    let manifest = args
+        .runtime_manifest
+        .as_deref()
+        .map(Runtimes::read_manifest)
+        .transpose()?;
+    let runtimes = Runtimes::new(data_dir.join("runtimes"), manifest);
     let endpoint = match args.endpoint {
         Some(endpoint) => endpoint,
         None => {
@@ -103,7 +140,9 @@ async fn run(args: Args) -> Result<(), String> {
         SharedStore::new(store),
         db,
         bots_dir,
+        data_dir,
         args.command,
+        runtimes,
     ));
     server::serve(daemon, listener).await;
     Ok(())
