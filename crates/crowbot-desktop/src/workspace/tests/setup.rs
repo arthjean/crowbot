@@ -16,7 +16,8 @@ use crate::theme::{Theme, duration};
 use crate::transcript::RowKind;
 use crate::workspace::bot_panel::SaveState;
 use crate::workspace::creation::TEMPLATES;
-use crate::workspace::forms::GLYPHS;
+use crate::workspace::forms::{GLYPHS, automatic_color};
+use gpui::{Modifiers, ScrollDelta, ScrollEvent};
 
 fn text_of(
     workspace: &Entity<Workspace>,
@@ -100,20 +101,21 @@ fn with_no_bot_the_first_bot_form_fills_the_conversation_pane(cx: &mut TestAppCo
     daemon.connect(Vec::new(), cx);
     assert_eq!(daemon.sent().last(), Some(&ClientMessage::ListProviders));
 
-    assert!(shown(cx, "first-bot-heading"));
+    assert!(shown(cx, "creation"));
     assert!(!shown(cx, "cancel-creation"));
     assert!(!shown(cx, "send-message"));
     let pane = bounds(cx, "creation");
     assert!(pane.left() >= bounds(cx, "sidebar").right() - px(1.));
     for part in [
         "creation-avatar",
+        "creation-color-auto",
         "creation-color-0",
-        "creation-color-7",
+        "creation-color-16",
         "creation-glyph-0",
         "creation-glyph-11",
         "creation-name",
         "creation-purpose",
-        "creation-model",
+        "creation-model-row",
         "create-bot",
         "templates",
         "template-0",
@@ -129,15 +131,34 @@ fn with_no_bot_the_first_bot_form_fills_the_conversation_pane(cx: &mut TestAppCo
             "creation-glyph-0",
             "creation-name",
             "creation-purpose",
-            "creation-model",
+            "creation-model-row",
             "create-bot",
             "templates",
         ],
     );
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
 
-    // The name has the focus, and a suggestion fills the name and the purpose.
-    cx.simulate_input("Atlas");
+    // As in OpenBot, no field takes the focus when the form opens; a key
+    // typed there lands nowhere.
+    let name_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            workspace
+                .read(cx)
+                .creation_name
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    };
+    assert!(!name_focused(cx));
+    cx.simulate_input("x");
+    assert_eq!(
+        text_of(&workspace, cx, |this| &this.creation_name),
+        "New bot"
+    );
+
+    // A suggestion fills the name and the purpose.
+    type_name(cx, "Atlas");
+    assert!(name_focused(cx));
     assert_eq!(text_of(&workspace, cx, |this| &this.creation_name), "Atlas");
     click(cx, "template-1");
     assert_eq!(
@@ -152,6 +173,91 @@ fn with_no_bot_the_first_bot_form_fills_the_conversation_pane(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn the_automatic_color_follows_the_picture_until_a_color_is_picked(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1400.)));
+    daemon.connect(Vec::new(), cx);
+    let color = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |this, cx| this.preview_bot(cx).avatar.color)
+    };
+    assert_eq!(color(cx), automatic_color(0));
+    click(cx, "creation-glyph-3");
+    assert_eq!(color(cx), automatic_color(3));
+    click(cx, "creation-color-2");
+    click(cx, "creation-glyph-5");
+    assert_eq!(color(cx), AVATAR_COLORS[2], "a picked color stays");
+    click(cx, "creation-color-auto");
+    assert_eq!(color(cx), automatic_color(5));
+}
+
+#[gpui::test]
+fn a_suggestion_stays_chosen_until_the_form_changes(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1400.)));
+    daemon.connect(Vec::new(), cx);
+    let chosen =
+        |cx: &mut VisualTestContext| workspace.read_with(cx, |this, cx| this.chosen_template(cx));
+    assert_eq!(chosen(cx), None);
+    click(cx, "template-1");
+    assert_eq!(chosen(cx), Some(1));
+    click(cx, "creation-name");
+    cx.simulate_input("!");
+    assert_eq!(
+        chosen(cx),
+        None,
+        "an edited name is no longer the suggestion"
+    );
+}
+
+#[gpui::test]
+fn the_suggestion_row_scrolls_by_wheel_and_by_drag_and_a_drag_is_not_a_click(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, mut daemon, cx) = open(cx);
+    cx.simulate_resize(size(px(1000.), px(1400.)));
+    daemon.connect(Vec::new(), cx);
+    let first = |cx: &mut VisualTestContext| bounds(cx, "template-0").left();
+    let start = first(cx);
+
+    // A vertical wheel moves the row sideways.
+    let row = bounds(cx, "templates");
+    cx.simulate_event(ScrollEvent {
+        position: row.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+        ..ScrollEvent::default()
+    });
+    cx.run_until_parked();
+    let wheeled = first(cx);
+    assert!(wheeled < start, "{wheeled:?} after {start:?}");
+
+    // A drag moves it back, and the card under the release takes no click.
+    let from = bounds(cx, "template-1").center();
+    let to = point(from.x + px(100.), from.y);
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(from.x + px(50.), from.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    assert!(first(cx) > wheeled);
+    assert_eq!(
+        workspace.read_with(cx, |this, cx| this.creation_name.read(cx).text().to_owned()),
+        "New bot",
+        "the drag picked no suggestion"
+    );
+
+    // A plain click still picks one.
+    click(cx, "template-1");
+    assert_eq!(
+        workspace.read_with(cx, |this, cx| this.chosen_template(cx)),
+        Some(1)
+    );
+}
+
+#[gpui::test]
 fn create_shows_a_creating_state_then_the_bot_opens_with_the_composer_focused(
     cx: &mut TestAppContext,
 ) {
@@ -159,11 +265,14 @@ fn create_shows_a_creating_state_then_the_bot_opens_with_the_composer_focused(
     daemon.connect(Vec::new(), cx);
     daemon.sent();
 
-    cx.simulate_input("  Atlas ");
+    type_name(cx, "  Atlas ");
     click(cx, "creation-purpose");
     cx.simulate_input("Plan the week.");
+    click(cx, "creation-model-row");
     click(cx, "creation-model");
     cx.simulate_input("smart");
+    cx.simulate_keystrokes("escape");
+    assert!(!shown(cx, "creation-model-picker"));
     click(cx, "creation-color-3");
     click(cx, "creation-glyph-2");
     click(cx, "create-bot");
@@ -209,32 +318,38 @@ fn create_shows_a_creating_state_then_the_bot_opens_with_the_composer_focused(
         text: "hello".to_owned(),
     }));
 
-    // The next form starts empty.
+    // The next form starts on the default name and an empty purpose.
     click(cx, "new-bot");
-    assert_eq!(text_of(&workspace, cx, |this| &this.creation_name), "");
+    assert_eq!(
+        text_of(&workspace, cx, |this| &this.creation_name),
+        "New bot"
+    );
     assert_eq!(text_of(&workspace, cx, |this| &this.creation_purpose), "");
 }
 
 #[gpui::test]
-fn an_empty_name_shows_an_error_on_the_name_field_and_creates_nothing(cx: &mut TestAppContext) {
+fn the_name_starts_on_a_selected_default_and_an_empty_name_creates_nothing(
+    cx: &mut TestAppContext,
+) {
     let (workspace, mut daemon, cx) = open(cx);
     daemon.connect(Vec::new(), cx);
     daemon.sent();
 
-    click(cx, "create-bot");
-    assert!(shown(cx, "creation-name-error"));
-    let (field, error) = (
-        bounds(cx, "creation-name"),
-        bounds(cx, "creation-name-error"),
+    assert_eq!(
+        text_of(&workspace, cx, |this| &this.creation_name),
+        "New bot"
     );
-    assert!(error.top() >= field.bottom() && error.top() < field.bottom() + px(12.));
+    click(cx, "creation-name");
+    select_all_and_delete(cx);
     cx.simulate_input("   ");
-    assert!(!shown(cx, "creation-name-error"), "typing clears the error");
+    click(cx, "create-bot");
     press_enter(cx);
-    assert!(shown(cx, "creation-name-error"));
-    assert_eq!(daemon.sent(), []);
+    assert_eq!(daemon.sent(), [], "Create waits for a name");
     assert!(workspace.read_with(cx, |this, _| this.bots.is_empty()));
     assert!(!shown(cx, "creating-bot"));
+    assert!(!shown(cx, "creation-name-error"));
+    click(cx, "creation-name");
+    select_all_and_delete(cx);
 
     // A name the daemon refuses shows on the same field, and the form stays.
     cx.simulate_input("Atlas");
@@ -412,21 +527,20 @@ fn new_bot_with_a_bot_opens_the_same_form_with_cancel(cx: &mut TestAppContext) {
     daemon.sent();
 
     click(cx, "new-bot");
-    assert_eq!(daemon.sent(), [ClientMessage::ListProviders]);
+    assert_eq!(daemon.sent(), []);
     assert!(shown(cx, "creation"));
     assert!(shown(cx, "cancel-creation"));
-    assert!(!shown(cx, "first-bot-heading"));
     for part in [
         "creation-name",
         "creation-purpose",
-        "creation-model",
+        "creation-model-row",
         "create-bot",
         "template-0",
     ] {
         assert!(shown(cx, part), "{part}");
     }
     assert!(!shown(cx, "send-message"));
-    cx.simulate_input("Finch");
+    type_name(cx, "Finch");
     assert_eq!(text_of(&workspace, cx, |this| &this.creation_name), "Finch");
 
     click(cx, "cancel-creation");
@@ -434,7 +548,10 @@ fn new_bot_with_a_bot_opens_the_same_form_with_cancel(cx: &mut TestAppContext) {
     assert!(shown(cx, "send-message"));
 
     click(cx, "new-bot");
-    assert_eq!(text_of(&workspace, cx, |this| &this.creation_name), "");
+    assert_eq!(
+        text_of(&workspace, cx, |this| &this.creation_name),
+        "New bot"
+    );
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!shown(cx, "creation"));
@@ -460,7 +577,7 @@ fn the_first_bot_form_gives_way_to_a_bot_made_elsewhere_unless_it_holds_text(
 ) {
     let (_workspace, mut daemon, cx) = open(cx);
     daemon.connect(Vec::new(), cx);
-    cx.simulate_input("Mine");
+    type_name(cx, "Mine");
     daemon.tell(
         ServerMessage::BotChanged(summary(1, "Atlas", BotState::Idle)),
         cx,
@@ -905,10 +1022,7 @@ fn the_settings_dialog_has_general_providers_and_about(cx: &mut TestAppContext) 
 
     click(cx, "open-settings");
     assert!(shown(cx, "settings-dialog"));
-    assert_eq!(
-        daemon.sent(),
-        [ClientMessage::ListProviders, ClientMessage::GetDaemonInfo]
-    );
+    assert_eq!(daemon.sent(), [ClientMessage::GetDaemonInfo]);
     let sections = tops(
         cx,
         &["settings-general", "settings-providers", "settings-about"],

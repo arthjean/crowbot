@@ -7,6 +7,7 @@ mod forms;
 mod header;
 mod overlays;
 mod palette;
+mod rail;
 mod rows;
 mod screens;
 mod settings;
@@ -237,6 +238,8 @@ enum Confirm {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusRequest {
     Composer,
+    /// The creation form itself, so that no field looks focused.
+    Creation,
     CreationName,
 }
 
@@ -327,6 +330,7 @@ pub struct Workspace {
     title_width: Rc<Cell<Pixels>>,
     inert: bool,
     retry_focus: FocusHandle,
+    creation_focus: FocusHandle,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _events: Task<()>,
@@ -355,13 +359,24 @@ impl Workspace {
                 input
             })
         };
-        let creation_name = field("Name", "Name your bot", BOT_NAME_LENGTH, cx);
-        let creation_purpose = area(
-            "Purpose",
-            "What should this bot do?",
-            (layout::PURPOSE_MIN_ROWS, layout::PURPOSE_MAX_ROWS),
-            cx,
-        );
+        let creation_name = cx.new(|cx| {
+            Composer::new("Name your bot", InputStyle::form_field("Name"), cx)
+                .with_max_length(BOT_NAME_LENGTH)
+        });
+        let creation_purpose = cx.new(|cx| {
+            let mut input = Composer::new(
+                "Research a topic, review code, or draft a weekly update.",
+                InputStyle::form_area(
+                    "Purpose",
+                    layout::PURPOSE_MIN_ROWS,
+                    layout::PURPOSE_MAX_ROWS,
+                ),
+                cx,
+            )
+            .with_max_length(BOT_INSTRUCTIONS_LENGTH);
+            input.set_enter_submits(false);
+            input
+        });
         let creation_model = field("Model", "Default model", BOT_MODEL_LENGTH, cx);
         let provider_executable = field(
             "Executable path",
@@ -544,6 +559,7 @@ impl Workspace {
             title_width: Rc::new(Cell::new(Pixels::MAX)),
             inert: false,
             retry_focus: cx.focus_handle(),
+            creation_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
             _events: events,
@@ -607,9 +623,8 @@ impl Workspace {
                 }
                 self.providers_asked = false;
                 self.models_asked.clear();
-                if self.creation.is_some() || self.settings.is_some() || self.side_panel {
-                    self.ask_providers();
-                }
+                // The rail shows the state of every provider.
+                self.ask_providers();
                 if self.settings.is_some() {
                     self.connection.send(ClientMessage::GetDaemonInfo);
                 }
@@ -2204,6 +2219,7 @@ impl Render for Workspace {
         self.sync_models();
         match self.focus_request.take() {
             Some(FocusRequest::Composer) => self.focus_composer(window, cx),
+            Some(FocusRequest::Creation) => window.focus(&self.creation_focus, cx),
             Some(FocusRequest::CreationName) => {
                 window.focus(&self.creation_name.focus_handle(cx), cx);
             }

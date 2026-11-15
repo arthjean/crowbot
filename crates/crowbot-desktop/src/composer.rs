@@ -22,6 +22,9 @@ pub struct InputStyle {
     pub label: &'static str,
     pub min_rows: f32,
     pub max_rows: f32,
+    /// The placeholder reads as a sample value, in `text_placeholder`, not as
+    /// a muted hint.
+    pub sample_placeholder: bool,
 }
 
 impl InputStyle {
@@ -32,6 +35,7 @@ impl InputStyle {
             label: "Message",
             min_rows: 1.,
             max_rows: layout::COMPOSER_MAX_ROWS,
+            sample_placeholder: false,
         }
     }
 
@@ -42,6 +46,7 @@ impl InputStyle {
             label,
             min_rows: 1.,
             max_rows: 1.,
+            sample_placeholder: false,
         }
     }
 
@@ -52,6 +57,25 @@ impl InputStyle {
             label,
             min_rows,
             max_rows,
+            sample_placeholder: false,
+        }
+    }
+
+    /// A field of a form page, such as the name of a new bot.
+    pub fn form_field(label: &'static str) -> Self {
+        Self {
+            step: text::FIELD,
+            sample_placeholder: true,
+            ..Self::field(label)
+        }
+    }
+
+    /// An area of a form page that grows with its text.
+    pub fn form_area(label: &'static str, min_rows: f32, max_rows: f32) -> Self {
+        Self {
+            step: text::AREA,
+            sample_placeholder: true,
+            ..Self::area(label, min_rows, max_rows)
         }
     }
 
@@ -62,6 +86,7 @@ impl InputStyle {
             label: "Search bots",
             min_rows: 1.,
             max_rows: 1.,
+            sample_placeholder: false,
         }
     }
 }
@@ -385,6 +410,13 @@ impl Composer {
         self.reveal_cursor = true;
         window.notify_text_input_changed(&self.focus_handle);
         cx.notify();
+    }
+
+    /// Replaces the text and selects all of it, so that typing replaces a
+    /// value the user did not choose, such as a default name.
+    pub fn set_text_selected(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_text(text, window, cx);
+        self.selected_range = 0..self.content.len();
     }
 
     fn cursor_offset(&self) -> usize {
@@ -942,7 +974,12 @@ impl ComposerText {
     fn display(&self, window: &Window, cx: &App) -> (SharedString, Vec<TextRun>) {
         let composer = self.composer.read(cx);
         let (text, color): (SharedString, gpui::Hsla) = if composer.content.is_empty() {
-            (composer.placeholder.clone(), self.theme.text_muted.into())
+            let color = if composer.style.sample_placeholder {
+                self.theme.text_placeholder
+            } else {
+                self.theme.text_muted
+            };
+            (composer.placeholder.clone(), color.into())
         } else {
             (composer.content.clone().into(), self.theme.text.into())
         };

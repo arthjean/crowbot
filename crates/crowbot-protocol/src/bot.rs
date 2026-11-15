@@ -8,10 +8,13 @@ pub const BOT_TITLE_LENGTH: usize = 80;
 pub const BOT_INSTRUCTIONS_LENGTH: usize = 20_000;
 /// The longest model name a bot can have, in characters.
 pub const BOT_MODEL_LENGTH: usize = 200;
-/// The colors an avatar is picked from, as `#rrggbb`. A bot created with no
-/// avatar takes the next one of this list.
-pub const AVATAR_COLORS: [&str; 8] = [
-    "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316",
+/// The colors an avatar is picked from, as `#rrggbb`, in the order of the hue
+/// wheel, then the deep and the neutral tones. A bot created with no avatar
+/// takes the next one of this list.
+pub const AVATAR_COLORS: [&str; 17] = [
+    "#e8483f", "#f08a24", "#f0b429", "#8ece34", "#3ecf8e", "#2fbfa0", "#38bdf8", "#3b93f0",
+    "#34479c", "#5d67ee", "#8b5cf6", "#e152b0", "#f27ba5", "#a8324e", "#8b5e3c", "#d6b98c",
+    "#a3a3a3",
 ];
 
 /// What a bot may do without asking.

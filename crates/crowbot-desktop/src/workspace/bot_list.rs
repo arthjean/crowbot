@@ -34,18 +34,6 @@ impl Workspace {
         } else {
             "Collapse sidebar"
         };
-        let toggle = div()
-            .occlude()
-            .flex()
-            .items_center()
-            .children((!shown.compact).then(|| {
-                ui::icon_button("open-settings", Icon::Settings, "Settings", theme)
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
-            }))
-            .child(
-                ui::icon_button("toggle-sidebar", Icon::PanelLeft, label, theme)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-            );
         div()
             .id("sidebar-topbar")
             .window_control_area(WindowControlArea::Drag)
@@ -55,23 +43,16 @@ impl Workspace {
             .flex()
             .items_center()
             .when(cfg!(target_os = "macos"), |bar| {
-                bar.pl(layout::MAC_TRAFFIC_LIGHTS)
+                bar.pl(layout::MAC_TRAFFIC_LIGHTS - layout::RAIL_WIDTH)
             })
             .when(shown.compact, |bar| bar.justify_center())
-            .when(!shown.compact, |bar| {
-                bar.justify_between()
-                    .gap(space::S2)
-                    .pl(layout::TOPBAR_PADDING_START)
-                    .pr(layout::TOPBAR_PADDING_END)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Crow Bot"),
-                    )
-            })
-            .child(toggle)
+            .when(!shown.compact, |bar| bar.pl(layout::TOPBAR_PADDING_START))
+            .child(
+                div().occlude().child(
+                    ui::icon_button("toggle-sidebar", Icon::PanelLeft, label, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                ),
+            )
     }
 
     pub(super) fn render_sidebar(
@@ -123,12 +104,12 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(space::S3)
+                    .px(space::S2)
                     .pt(space::S1)
                     .pb(space::S3)
                     .flex()
                     .flex_col()
-                    .gap(space::S1_5)
+                    .gap(space::S1)
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -164,16 +145,13 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .gap(space::S2)
-                .rounded(radius::SM)
+                .rounded(radius::MD)
                 .bg(theme.hover)
-                .border_1()
-                .border_color(theme.border)
-                .child(ui::icon(Icon::Search, icon_size::SM, theme.text_muted))
+                .child(ui::icon(Icon::Search, icon_size::MD, theme.text_muted))
                 .child(div().flex_1().min_w_0().child(self.search.clone())),
         )
         .child(
             ui::icon_button("new-bot", Icon::Plus, "New bot", theme)
-                .size(control::MD)
                 .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx))),
         )
     }
@@ -204,7 +182,15 @@ impl Workspace {
                     .tooltip(ui::tooltip("Create your first bot"))
             })
             .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx)))
-            .child(
+            // The bot being made: the avatar follows the form as it changes.
+            .child(if self.creation.is_some() {
+                ui::avatar(
+                    &self.preview_bot(cx),
+                    size::AVATAR_ROW,
+                    size::AVATAR_TEMPLATE_GLYPH,
+                    theme,
+                )
+            } else {
                 div()
                     .flex_none()
                     .size(size::AVATAR_ROW)
@@ -215,8 +201,8 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(ui::icon(Icon::Plus, icon_size::LG, theme.text_secondary)),
-            )
+                    .child(ui::icon(Icon::Plus, icon_size::LG, theme.text_secondary))
+            })
             .when(!shown.compact, |row| {
                 row.child(
                     div()
@@ -224,25 +210,11 @@ impl Workspace {
                         .truncate()
                         .text_size(text::LG.size)
                         .line_height(text::LG.leading)
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(FontWeight::SEMIBOLD)
                         .child("Create your first bot"),
                 )
             });
-        div()
-            .flex()
-            .flex_col()
-            .gap(space::S3)
-            .when(!shown.compact, |column| {
-                column.child(
-                    div()
-                        .pt(space::S4)
-                        .text_center()
-                        .text_color(theme.text_readable)
-                        .child("No bots yet"),
-                )
-            })
-            .child(create)
-            .into_any_element()
+        create.into_any_element()
     }
 
     fn render_group(
@@ -485,8 +457,6 @@ impl Workspace {
         } else {
             div()
                 .flex_none()
-                .text_size(text::SM.size)
-                .line_height(text::SM.leading)
                 .text_color(theme.text_readable)
                 .child(SharedString::from(sidebar::activity_label(
                     &Local::now(),
@@ -515,8 +485,8 @@ impl Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(text::LG.size)
-                                .line_height(text::LG.leading)
+                                .text_size(text::TITLE.size)
+                                .line_height(text::TITLE.leading)
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(SharedString::from(summary.bot.name.clone())),
                         )
@@ -526,6 +496,8 @@ impl Workspace {
                     div()
                         .min_w_0()
                         .truncate()
+                        .text_size(text::LG.size)
+                        .line_height(text::LG.leading)
                         .text_color(theme.text_muted)
                         .child(preview),
                 ),

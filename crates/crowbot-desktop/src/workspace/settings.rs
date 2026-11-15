@@ -66,10 +66,20 @@ const MOD_ENTER: &str = "Ctrl+Enter";
 
 impl Workspace {
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let section = self.settings.unwrap_or(Section::General);
+        self.open_settings_at(section, window, cx);
+    }
+
+    pub(super) fn open_settings_at(
+        &mut self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.loaded {
             return;
         }
-        self.settings = Some(self.settings.unwrap_or(Section::General));
+        self.settings = Some(section);
         self.ask_providers();
         if self.live() {
             self.connection.send(ClientMessage::GetDaemonInfo);

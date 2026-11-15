@@ -30,6 +30,7 @@ macro_rules! icons {
 icons! {
     ArrowDown => "arrow_down.svg",
     ArrowUp => "arrow_up.svg",
+    Bird => "bird.svg",
     Check => "check.svg",
     ChevronDown => "chevron_down.svg",
     ChevronRight => "chevron_right.svg",

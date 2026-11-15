@@ -5,7 +5,7 @@ use gpui::{
 
 use super::{Confirm, MenuTarget, Workspace};
 use crate::assets::Icon;
-use crate::theme::{Theme, control, icon as icon_size, layout, opacity, radius, size, space, text};
+use crate::theme::{Theme, control, icon as icon_size, layout, menu, radius, space, text};
 use crate::ui::{self, ButtonKind};
 
 impl Workspace {
@@ -18,44 +18,30 @@ impl Workspace {
                 .unwrap_or_default(),
             _ => "Bot list actions".to_owned(),
         };
-        let (hover, danger_hover) = (theme.hover, theme.danger_soft);
+        let (hover, danger_hover) = (theme.menu_highlight, theme.danger_soft);
         let items = self
             .menu_entries()
             .into_iter()
             .enumerate()
             .flat_map(|(index, entry)| {
-                let separator = entry.separated.then(|| {
-                    div()
-                        .flex_none()
-                        .h(size::HAIRLINE)
-                        .my(space::S1)
-                        .mx(-space::S1_5)
-                        .bg(theme.border_strong)
-                        .into_any_element()
-                });
+                let separator = entry
+                    .separated
+                    .then(|| ui::menu_separator(theme).into_any_element());
                 let action = entry.action;
                 let fill = if entry.danger { danger_hover } else { hover };
-                let item = div()
-                    .id(("menu-item", index))
+                let item = ui::menu_row_shape(("menu-item", index), false)
                     .debug_selector(move || format!("menu-item-{index}"))
                     .role(Role::MenuItem)
                     .aria_label(entry.label)
-                    .flex_none()
-                    .h(control::MD)
-                    .px(layout::MENU_ITEM_PADDING_X)
-                    .flex()
-                    .items_center()
-                    .gap(space::S2)
-                    .rounded(radius::SM)
                     .when(entry.danger, |item| item.text_color(theme.danger_text))
                     .when(highlighted == Some(index), |item| item.bg(fill))
                     .when(!entry.enabled, |item| {
-                        item.opacity(opacity::DISABLED)
+                        item.opacity(menu::DISABLED_OPACITY)
+                            .cursor_default()
                             .aria_description("Unavailable")
                     })
                     .when(entry.enabled, |item| {
-                        item.cursor_pointer()
-                            .hover(move |style| style.bg(fill))
+                        item.hover(move |style| style.bg(fill))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.perform(action, window, cx);
                             }))
@@ -65,7 +51,7 @@ impl Workspace {
                 separator.into_iter().chain(std::iter::once(item))
             })
             .collect::<Vec<_>>();
-        div()
+        ui::menu_panel(false, theme)
             .id("context-menu")
             .debug_selector(|| "context-menu".into())
             .occlude()
@@ -74,15 +60,6 @@ impl Workspace {
             .aria_label(SharedString::from(label))
             .min_w(layout::MENU_MIN_WIDTH)
             .max_w(layout::MENU_MAX_WIDTH)
-            .p(space::S1_5)
-            .flex()
-            .flex_col()
-            .rounded(radius::CARD)
-            .bg(theme.sheet)
-            .shadow(theme.menu_shadow())
-            .text_color(theme.text)
-            .text_size(text::LG.size)
-            .line_height(text::LG.leading)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.menu_key(event, window, cx);
             }))

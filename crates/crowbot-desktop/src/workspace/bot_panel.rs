@@ -625,14 +625,15 @@ impl Workspace {
                     .gap(space::S2)
                     .child(self.render_color_picker(
                         AvatarOwner::Panel,
-                        &bot.avatar.color,
+                        &bot.avatar,
+                        forms::is_automatic(&bot.avatar),
                         theme,
                         cx,
                     ))
                     .child(self.render_glyph_picker(
                         AvatarOwner::Panel,
                         &forms::initial(&bot.name),
-                        &bot.avatar.glyph,
+                        &bot.avatar,
                         theme,
                         cx,
                     ))

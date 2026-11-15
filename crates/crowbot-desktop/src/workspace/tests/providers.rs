@@ -243,6 +243,7 @@ fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &m
         cx,
     );
     assert!(daemon.sent().contains(&list_models("claude")));
+    click(cx, "creation-model-row");
     assert!(shown(cx, "creation-provider-0-chosen"));
     assert!(shown(cx, "creation-provider-1"));
     assert!(!shown(cx, "creation-provider-notice"));
@@ -258,6 +259,8 @@ fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &m
     assert_eq!(daemon.sent(), [list_models("codex")]);
     assert!(shown(cx, "creation-provider-1-chosen"));
     assert!(shown(cx, "creation-provider-notice"));
+    cx.simulate_keystrokes("escape");
+    assert!(!shown(cx, "creation-model-picker"));
     assert!(shown(cx, "creation-sign-in-chat-gpt"));
     click(cx, "creation-sign-in-device-code");
     assert_eq!(
@@ -283,6 +286,7 @@ fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &m
         )),
         cx,
     );
+    click(cx, "creation-model-row");
     click(cx, "creation-model-choice-2");
     assert_eq!(
         workspace.read_with(cx, |this, cx| this
@@ -295,9 +299,10 @@ fn the_creation_form_picks_the_provider_its_model_and_its_reasoning_level(cx: &m
     assert!(shown(cx, "creation-model-choice-2-chosen"));
     click(cx, "creation-effort-3");
     assert!(shown(cx, "creation-effort-3-chosen"));
-
+    // A click outside the picker closes it, and lands nowhere else.
     click(cx, "creation-name");
-    cx.simulate_input("Atlas");
+    assert!(!shown(cx, "creation-model-picker"));
+    type_name(cx, "Atlas");
     click(cx, "create-bot");
     let created = daemon.sent();
     let Some(ClientMessage::CreateBot { draft }) = created.last() else {
@@ -493,8 +498,9 @@ fn a_turn_that_failed_for_a_sign_in_offers_the_sign_in_of_its_provider(cx: &mut 
         )),
         cx,
     );
-    // The state of the provider is asked for, to offer its sign-in.
-    assert!(daemon.sent().contains(&ClientMessage::ListProviders));
+    // The state of the provider was asked for at the connection: the
+    // sign-in waits for it.
+    assert!(!daemon.sent().contains(&ClientMessage::ListProviders));
     assert!(!shown(cx, "turn-sign-in"));
     daemon.tell(
         ServerMessage::Providers(vec![ProviderStatus {

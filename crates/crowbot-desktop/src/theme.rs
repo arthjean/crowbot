@@ -49,6 +49,16 @@ pub struct Theme {
     pub on_status: Rgba,
     pub shadow_menu: Rgba,
     pub window_close: Rgba,
+    /// A menu or a select popup: one step above `surface`.
+    pub menu_surface: Rgba,
+    /// A row under the pointer or the keyboard in a menu.
+    pub menu_highlight: Rgba,
+    /// The chosen row of a list in a menu.
+    pub menu_selected: Rgba,
+    /// A line between groups of a menu.
+    pub menu_separator: Rgba,
+    /// The resting edge of a text field, on the `control` fill.
+    pub input_edge: Rgba,
 }
 
 impl Global for Theme {}
@@ -118,8 +128,13 @@ impl Theme {
             unread_surface: rgb(0x74_b9_ff),
             unread_text: rgb(0x07_13_1f),
             on_status: rgb(0x07_13_0c),
-            shadow_menu: black(0.45),
+            shadow_menu: black(0.8),
             window_close: rgb(0xe8_11_20),
+            menu_surface: rgb(0x2a_2a_2a),
+            menu_highlight: white(0.06),
+            menu_selected: white(0.1),
+            menu_separator: white(0.08),
+            input_edge: white(0.045),
         }
     }
 
@@ -169,8 +184,13 @@ impl Theme {
             unread_surface: rgb(0x74_b9_ff),
             unread_text: rgb(0x07_13_1f),
             on_status: rgb(0x07_13_0c),
-            shadow_menu: alpha_of(rgb(0x00_00_00), 0.),
+            shadow_menu: alpha_of(rgb(0x00_00_00), 0.55),
             window_close: rgb(0xe8_11_20),
+            menu_surface: rgb(0xff_ff_ff),
+            menu_highlight: ink(0.06),
+            menu_selected: ink(0.1),
+            menu_separator: ink(0.08),
+            input_edge: ink(0.1),
         }
     }
 
@@ -185,9 +205,9 @@ impl Theme {
             },
             BoxShadow {
                 color: self.shadow_menu.into(),
-                offset: point(px(0.), space::S3),
-                blur_radius: space::S8,
-                spread_radius: px(0.),
+                offset: point(px(0.), menu::SHADOW_DROP),
+                blur_radius: menu::SHADOW_BLUR,
+                spread_radius: -menu::SHADOW_DROP,
                 inset: false,
             },
         ]
@@ -255,6 +275,10 @@ pub mod text {
         size: px(14.),
         leading: px(20.),
     };
+    pub const TITLE: Step = Step {
+        size: px(15.),
+        leading: px(20.),
+    };
     pub const XL: Step = Step {
         size: px(16.),
         leading: px(22.),
@@ -266,6 +290,16 @@ pub mod text {
     pub const XXXL: Step = Step {
         size: px(24.),
         leading: px(30.),
+    };
+    /// The text of a form field, as the creation form shows it.
+    pub const FIELD: Step = Step {
+        size: px(16.),
+        leading: px(22.),
+    };
+    /// The text of a form area: one more step of leading than a field.
+    pub const AREA: Step = Step {
+        size: px(16.),
+        leading: px(24.),
     };
     pub const CODE: Step = Step {
         size: px(12.),
@@ -296,6 +330,31 @@ pub mod radius {
     pub const CARD: Pixels = px(14.);
     pub const XL: Pixels = px(20.);
     pub const BUBBLE: Pixels = px(22.);
+}
+
+/// The menu contract: every menu, select popup, and picker shares it.
+pub mod menu {
+    use super::{Pixels, px};
+
+    /// A plain menu: radius 8 around 4 of padding holds rows of radius 4.
+    pub const RADIUS: Pixels = px(8.);
+    pub const PADDING: Pixels = px(4.);
+    /// A wide picker: radius 14 around 6 of padding holds rows and panels
+    /// of radius 8.
+    pub const WIDE_RADIUS: Pixels = px(14.);
+    pub const WIDE_PADDING: Pixels = px(6.);
+    pub const ROW_HEIGHT: Pixels = px(28.);
+    pub const ROW_RADIUS: Pixels = px(4.);
+    pub const WIDE_ROW_RADIUS: Pixels = px(8.);
+    pub const ROW_INSET: Pixels = px(8.);
+    pub const ROW_GAP: Pixels = px(8.);
+    pub const CHECK: Pixels = px(14.);
+    pub const SEPARATOR_MARGIN: Pixels = px(4.);
+    pub const MAX_HEIGHT: Pixels = px(400.);
+    pub const SHADOW_DROP: Pixels = px(18.);
+    pub const SHADOW_BLUR: Pixels = px(44.);
+    pub const REVEAL_DROP: Pixels = px(4.);
+    pub const DISABLED_OPACITY: f32 = 0.64;
 }
 
 pub mod control {
@@ -329,12 +388,29 @@ pub mod duration {
     pub const DRAFT_SAVE: Duration = Duration::from_millis(400);
     pub const FIELD_SAVE: Duration = Duration::from_millis(600);
     pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+    pub const MENU_REVEAL: Duration = Duration::from_millis(140);
     pub const FLASH: Duration = Duration::from_millis(1600);
     pub const QUIT_FLUSH: Duration = Duration::from_millis(60);
+    /// The edge fades of the suggestion row.
+    pub const FADE: Duration = Duration::from_millis(160);
+    /// One frame at 60 Hz: the unit of the momentum of a dragged row.
+    pub const FRAME: Duration = Duration::from_micros(16_667);
+}
+
+/// The physics of the suggestion row: a drag hands its speed, in pixels per
+/// millisecond, to a glide that loses `FRICTION` of it each 60 Hz frame.
+pub mod motion {
+    pub const FRICTION: f32 = 0.88;
+    pub const MIN_SPEED: f32 = 0.01;
+    pub const MAX_SPEED: f32 = 1.75;
+    /// How much of the last speed a new pointer sample keeps.
+    pub const SPEED_MEMORY: f32 = 0.65;
 }
 
 pub mod opacity {
-    pub const DISABLED: f32 = 0.45;
+    pub const DISABLED: f32 = 0.42;
+    /// The primary button under the pointer: its fill over the canvas.
+    pub const PRIMARY_HOVER: f32 = 0.82;
     pub const SHINE_LOW: f32 = 0.55;
     pub const HIDDEN: f32 = 0.;
     pub const SHOWN: f32 = 1.;
@@ -380,6 +456,10 @@ pub mod size {
     pub const AVATAR_CREATION_GLYPH: Pixels = px(32.);
     pub const AVATAR_TEMPLATE: Pixels = px(42.);
     pub const AVATAR_TEMPLATE_GLYPH: Pixels = px(18.);
+    pub const AVATAR_FACE: Pixels = px(24.);
+    pub const AVATAR_FACE_GLYPH: Pixels = px(13.);
+    /// The live avatar of the creation form rises this far above its box.
+    pub const AVATAR_CREATION_LIFT: Pixels = px(8.);
     pub const AVATAR_PANEL: Pixels = px(62.);
     pub const AVATAR_PANEL_GLYPH: Pixels = px(26.);
     pub const AVATAR_RESULT: Pixels = px(20.);
@@ -387,14 +467,19 @@ pub mod size {
     pub const SWATCH_BUTTON: Pixels = px(28.);
     pub const SWATCH: Pixels = px(18.);
     pub const GLYPH_CELL: Pixels = px(33.);
-    pub const GLYPH_CELL_TEXT: Pixels = px(16.);
     pub const STATE_DOT: Pixels = px(8.);
+    pub const FOCUS_RING: Pixels = px(3.);
+    pub const RING: Pixels = px(2.);
+    pub const PROVIDER_RING: Pixels = px(28.);
+    pub const RAIL_SEPARATOR: Pixels = px(24.);
 }
 
 pub mod layout {
     use super::{Pixels, px};
 
     pub const TOP_ROW: Pixels = px(38.);
+    pub const RAIL_WIDTH: Pixels = px(52.);
+    pub const RAIL_LOGO: Pixels = px(20.);
     pub const SIDEBAR_DEFAULT: f32 = 280.;
     pub const SIDEBAR_MIN: f32 = 128.;
     pub const SIDEBAR_MAX: f32 = 400.;
@@ -412,7 +497,6 @@ pub mod layout {
     pub const CAPTION_BUTTON: Pixels = px(46.);
     pub const MAC_TRAFFIC_LIGHTS: Pixels = px(78.);
     pub const TOPBAR_PADDING_START: Pixels = px(10.);
-    pub const TOPBAR_PADDING_END: Pixels = px(3.);
     pub const SEARCH_PADDING_TOP: Pixels = px(11.);
     pub const SEARCH_FIELD_PADDING: Pixels = px(9.);
     pub const ROW_HEIGHT: Pixels = px(62.);
@@ -433,7 +517,6 @@ pub mod layout {
     pub const SIDE_PANEL_HEADER: Pixels = px(39.);
     pub const MENU_MIN_WIDTH: Pixels = px(192.);
     pub const MENU_MAX_WIDTH: Pixels = px(288.);
-    pub const MENU_ITEM_PADDING_X: Pixels = px(10.);
     pub const DIALOG_WIDTH: Pixels = px(460.);
     pub const NOTICE_WIDTH: Pixels = px(520.);
     pub const TOAST_WIDTH: Pixels = px(360.);
@@ -467,15 +550,30 @@ pub mod layout {
     pub const COMPOSER_BOTTOM: Pixels = px(20.);
     pub const STATUS_ROW: Pixels = px(20.);
     pub const COMPOSER_MAX_ROWS: f32 = 8.;
-    pub const FIELD_HEIGHT: Pixels = px(38.);
-    pub const FIELD_PADDING_Y: Pixels = px(8.);
-    pub const FIELD_LABEL_INDENT: Pixels = px(8.);
+    pub const FIELD_HEIGHT: Pixels = px(32.);
+    pub const FIELD_PADDING_Y: Pixels = px(5.);
+    /// The vertical padding of a form field, which holds `text::FIELD`.
+    pub const FORM_FIELD_PADDING_Y: Pixels = px(4.);
     pub const CREATION_WIDTH: Pixels = px(420.);
     pub const CREATE_MIN_WIDTH: Pixels = px(132.);
     pub const PURPOSE_MIN_ROWS: f32 = 2.;
-    pub const PURPOSE_MAX_ROWS: f32 = 10.;
+    pub const PURPOSE_MAX_ROWS: f32 = 9.;
+    pub const MODEL_ROW: Pixels = px(44.);
+    pub const PICKER_PROVIDERS: Pixels = px(136.);
     pub const TEMPLATE_WIDTH: Pixels = px(256.);
     pub const TEMPLATE_HEIGHT: Pixels = px(112.);
+    /// The suggestion row fades over this width at an edge it can scroll past.
+    pub const TEMPLATE_FADE: Pixels = px(48.);
+    /// A press on the suggestion row turns into a drag past this distance.
+    pub const DRAG_THRESHOLD: Pixels = px(8.);
+    /// A row this close to an end has reached it.
+    pub const SCROLL_SLACK: Pixels = px(1.);
+    /// A glide that moves the row less than this in a frame has stopped.
+    pub const SCROLL_STILL: Pixels = px(0.1);
+    /// The swatches of an avatar color stand in rows of this many.
+    pub const SWATCH_COLUMNS: usize = 9;
+    /// The creation form keeps this much room on each side in a narrow pane.
+    pub const CREATION_MARGIN: Pixels = px(24.);
     pub const PANEL_PADDING_X: Pixels = px(15.);
     pub const PANEL_PADDING_BOTTOM: Pixels = px(28.);
     pub const PANEL_ROW: Pixels = px(40.);
@@ -651,7 +749,7 @@ mod tests {
         assert_eq!(compared, 84);
     }
 
-    const VIEWS: [&str; 18] = [
+    const VIEWS: [&str; 19] = [
         "main.rs",
         "composer.rs",
         "ui.rs",
@@ -670,6 +768,7 @@ mod tests {
         "workspace/bot_panel.rs",
         "workspace/settings.rs",
         "workspace/palette.rs",
+        "workspace/rail.rs",
     ];
 
     fn literal_values(source: &str) -> Vec<String> {

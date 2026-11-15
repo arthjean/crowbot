@@ -98,24 +98,38 @@ impl Workspace {
                     .absolute()
                     .inset_0()
             }));
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .h(layout::TOP_ROW)
+                    .flex()
+                    .child(self.render_sidebar_topbar(shown, theme, cx))
+                    .child(if creating {
+                        self.render_creation_header(theme, cx)
+                    } else {
+                        self.render_header(theme, window, cx)
+                    })
+                    .children(self.render_caption_buttons(theme, window, cx)),
+            )
+            .child(
+                card(theme)
+                    .flex_col()
+                    .children(self.render_link_notice(theme, cx))
+                    .child(panes),
+            );
         root.child(
             div()
-                .flex_none()
-                .h(layout::TOP_ROW)
+                .flex_1()
+                .min_h_0()
                 .flex()
-                .child(self.render_sidebar_topbar(shown, theme, cx))
-                .child(if creating {
-                    self.render_creation_header(theme, cx)
-                } else {
-                    self.render_header(theme, window, cx)
-                })
-                .children(self.render_caption_buttons(theme, window, cx)),
-        )
-        .child(
-            card(theme)
-                .flex_col()
-                .children(self.render_link_notice(theme, cx))
-                .child(panes),
+                .child(self.render_rail(theme, cx))
+                .child(main),
         )
     }
 

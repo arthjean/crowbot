@@ -1,4 +1,4 @@
-use crowbot_protocol::{Bot, BotState, BotSummary};
+use crowbot_protocol::{Avatar, Bot, BotState, BotSummary};
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Hsla,
     Pixels, Role, SharedString, Stateful, Svg, Transformation, Window, div, percentage, prelude::*,
@@ -8,7 +8,8 @@ use gpui::{
 use crate::assets::Icon;
 use crate::bots;
 use crate::theme::{
-    Theme, control, duration, font, icon as icon_size, layout, radius, size, space, text,
+    Theme, control, duration, font, icon as icon_size, layout, menu, opacity, radius, size, space,
+    text,
 };
 
 const ICON_BUTTON_GROUP: &str = "icon-button";
@@ -67,6 +68,8 @@ pub enum ButtonKind {
     Ghost,
     Danger,
     Disabled,
+    /// The primary action while it cannot run yet: the primary look, faded.
+    PrimaryDisabled,
 }
 
 pub fn button(
@@ -82,7 +85,10 @@ pub fn button(
         .id(id.clone())
         .debug_selector(move || id.to_string())
         .focusable()
-        .tab_stop(kind != ButtonKind::Disabled)
+        .tab_stop(!matches!(
+            kind,
+            ButtonKind::Disabled | ButtonKind::PrimaryDisabled
+        ))
         .role(Role::Button)
         .aria_label(label.clone())
         .flex_none()
@@ -102,7 +108,7 @@ pub fn button(
     let transparent = gpui::transparent_black();
     match kind {
         ButtonKind::Primary => {
-            let hover = theme.text_secondary;
+            let hover = Hsla::from(theme.inverse_surface).opacity(opacity::PRIMARY_HOVER);
             base.bg(theme.inverse_surface)
                 .border_color(theme.inverse_surface)
                 .text_color(theme.inverse_text)
@@ -136,6 +142,11 @@ pub fn button(
             .bg(theme.hover)
             .border_color(transparent)
             .text_color(theme.text_muted),
+        ButtonKind::PrimaryDisabled => base
+            .bg(theme.inverse_surface)
+            .border_color(theme.inverse_surface)
+            .text_color(theme.inverse_text)
+            .opacity(opacity::DISABLED),
     }
 }
 
@@ -208,11 +219,16 @@ pub fn small_icon_button(
 }
 
 pub fn avatar(bot: &Bot, diameter: Pixels, glyph: Pixels, theme: &Theme) -> Div {
+    avatar_of(&bot.avatar, diameter, glyph, theme)
+}
+
+/// An avatar that belongs to no bot yet, such as a choice in a picker.
+pub fn avatar_of(avatar: &Avatar, diameter: Pixels, glyph: Pixels, theme: &Theme) -> Div {
     div()
         .flex_none()
         .size(diameter)
         .rounded_full()
-        .bg(bots::avatar_color(&bot.avatar.color).unwrap_or(theme.accent))
+        .bg(bots::avatar_color(&avatar.color).unwrap_or(theme.accent))
         .flex()
         .items_center()
         .justify_center()
@@ -220,7 +236,7 @@ pub fn avatar(bot: &Bot, diameter: Pixels, glyph: Pixels, theme: &Theme) -> Div 
         .line_height(diameter)
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.on_accent)
-        .child(SharedString::from(bot.avatar.glyph.clone()))
+        .child(SharedString::from(avatar.glyph.clone()))
 }
 
 fn badge_shell(ring: impl Into<Hsla>) -> Div {
@@ -339,6 +355,119 @@ pub fn count_badge(count: usize, fill: impl Into<gpui::Fill>, color: impl Into<H
         .line_height(text::SM.leading)
         .font_weight(FontWeight::SEMIBOLD)
         .child(SharedString::from(count.to_string()))
+}
+
+/// The surface of a menu, a select popup, or a picker: one step above the
+/// panel, a hairline edge, and the panel shadow. A wide picker takes the
+/// larger radius, so its rows and inner panels stay concentric.
+pub fn menu_panel(wide: bool, theme: &Theme) -> Div {
+    let (corner, padding) = if wide {
+        (menu::WIDE_RADIUS, menu::WIDE_PADDING)
+    } else {
+        (menu::RADIUS, menu::PADDING)
+    };
+    div()
+        .flex()
+        .flex_col()
+        .p(padding)
+        .rounded(corner)
+        .border_1()
+        .border_color(theme.dialog_ring)
+        .bg(theme.menu_surface)
+        .shadow(theme.menu_shadow())
+        .text_color(theme.text)
+        .text_size(text::LG.size)
+        .line_height(text::LG.leading)
+}
+
+/// A row of a menu: 28 tall, inset 8, its corner concentric in the panel,
+/// with no fill of its own.
+pub fn menu_row_shape(id: impl Into<ElementId>, wide: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .h(menu::ROW_HEIGHT)
+        .px(menu::ROW_INSET)
+        .flex()
+        .items_center()
+        .gap(menu::ROW_GAP)
+        .rounded(if wide {
+            menu::WIDE_ROW_RADIUS
+        } else {
+            menu::ROW_RADIUS
+        })
+        .cursor_pointer()
+}
+
+/// A row of a list in a menu. The chosen row keeps its tint; every other
+/// row takes the highlight under the pointer.
+pub fn menu_row(
+    id: impl Into<ElementId>,
+    selected: bool,
+    wide: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let highlight = theme.menu_highlight;
+    menu_row_shape(id, wide)
+        .when(selected, |row| row.bg(theme.menu_selected))
+        .when(!selected, |row| row.hover(move |style| style.bg(highlight)))
+}
+
+/// The mark of the chosen row, at the trailing edge.
+pub fn menu_check(theme: &Theme) -> Svg {
+    icon(Icon::Check, menu::CHECK, theme.text)
+}
+
+/// The name of a group of rows: muted, on a row of its own.
+pub fn menu_heading(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .h(menu::ROW_HEIGHT)
+        .px(menu::ROW_INSET)
+        .flex()
+        .items_center()
+        .text_size(text::SM.size)
+        .line_height(text::SM.leading)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child(label.into())
+}
+
+pub fn menu_separator(theme: &Theme) -> Div {
+    div()
+        .flex_none()
+        .h(size::HAIRLINE)
+        .mx(menu::ROW_INSET)
+        .my(menu::SEPARATOR_MARGIN)
+        .bg(theme.menu_separator)
+}
+
+/// A menu fades in while it drops into place, once, when it opens. Reduced
+/// motion shows it at rest.
+pub fn menu_reveal(id: impl Into<ElementId>, panel: Stateful<Div>, cx: &App) -> AnyElement {
+    if cx.reduce_motion() {
+        return panel.into_any_element();
+    }
+    panel
+        .with_animation(
+            id,
+            Animation::new(duration::MENU_REVEAL).with_easing(gpui::ease_out_quint()),
+            |panel, delta| panel.opacity(delta).mt(-menu::REVEAL_DROP * (1. - delta)),
+        )
+        .into_any_element()
+}
+
+/// A text field: a hairline edge on the control fill. Focus turns the edge to
+/// the neutral focus color, with no ring; an error turns it to danger.
+pub fn input_skin<E: Styled>(field: E, focused: bool, invalid: bool, theme: &Theme) -> E {
+    let field = field.rounded(radius::MD).border_1().bg(theme.control);
+    if invalid {
+        field.border_color(theme.danger)
+    } else if focused {
+        field.border_color(theme.border_focus)
+    } else {
+        field.border_color(theme.input_edge)
+    }
 }
 
 pub fn divider(theme: &Theme) -> Div {

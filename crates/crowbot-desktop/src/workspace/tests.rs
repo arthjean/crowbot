@@ -106,6 +106,18 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
+/// Clicks the name of the creation form, which opens with no field focused,
+/// and replaces what it holds with `text`.
+fn type_name(cx: &mut VisualTestContext, text: &str) {
+    click(cx, "creation-name");
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    });
+    cx.simulate_input(text);
+}
+
 fn press_enter(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
@@ -150,7 +162,11 @@ fn the_loading_cover_stays_until_the_first_bot_list_arrives(cx: &mut TestAppCont
     daemon.link(ConnectionEvent::Connected, cx);
     assert_eq!(
         daemon.sent(),
-        [ClientMessage::GetPreferences, ClientMessage::ListBots]
+        [
+            ClientMessage::GetPreferences,
+            ClientMessage::ListBots,
+            ClientMessage::ListProviders
+        ]
     );
     assert_eq!(screen(cx), Screen::Loading);
     assert!(shown(cx, "loading"));
@@ -173,7 +189,7 @@ fn the_empty_list_opens_bot_creation(cx: &mut TestAppContext) {
     click(cx, "create-first-bot");
     assert_eq!(daemon.sent(), [], "no bot is made before the form is sent");
     assert!(shown(cx, "creation"));
-    cx.simulate_input("Atlas");
+    type_name(cx, "Atlas");
     workspace.read_with(cx, |this, cx| {
         assert_eq!(this.creation_name.read(cx).text(), "Atlas");
     });
@@ -265,6 +281,7 @@ fn a_dropped_link_leaves_the_panes_inert_and_a_reconnect_reloads_without_duplica
             ClientMessage::OpenConversation {
                 conversation_id: 10
             },
+            ClientMessage::ListProviders,
         ]
     );
     daemon.tell(
@@ -539,7 +556,8 @@ fn the_empty_area_menu_creates_a_bot_and_marks_all_read(cx: &mut TestAppContext)
 
     right_click(cx, empty);
     click(cx, "menu-item-0");
-    assert_eq!(daemon.sent(), [ClientMessage::ListProviders]);
+    // The providers were asked for at the connection, for the rail.
+    assert_eq!(daemon.sent(), []);
     assert!(shown(cx, "creation"));
     assert!(shown(cx, "cancel-creation"));
 }
