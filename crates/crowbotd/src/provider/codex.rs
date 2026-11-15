@@ -19,11 +19,13 @@ const CONFIG: &str = "# Written by Crow Bot before each start. Changes here do n
 /// config, which a bot could write to reach the next session or another bot.
 /// That is hooks, rules that let commands run without asking, a managed
 /// config, plugins (which bring hooks and servers), skills, prompts, agents,
-/// instructions, and memories. The rest is Codex's own state, which a resumed
+/// instructions, memories, and a `.env` file, whose variables Codex loads
+/// into its own environment. The rest is Codex's own state, which a resumed
 /// session needs: the sessions, the databases, the sandbox, and the sign-in
 /// (`auth.json`), which the daemon never touches. A list of what to keep would
 /// remove that state too.
-const REMOVED: [&str; 13] = [
+const REMOVED: [&str; 15] = [
+    ".env",
     "hooks.json",
     "hooks",
     "rules",
@@ -34,6 +36,7 @@ const REMOVED: [&str; 13] = [
     "agents",
     "AGENTS.md",
     "AGENTS.override.md",
+    "instructions.md",
     "memories",
     "memories_v2",
     "vendor_imports",

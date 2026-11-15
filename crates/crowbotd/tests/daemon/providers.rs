@@ -344,6 +344,8 @@ async fn the_users_own_settings_for_a_provider_do_not_reach_a_bot() {
     // let that folder's own `.codex/config.toml` apply, hooks, rules that
     // allow commands, and instructions.
     let planted = [
+        ".env",
+        "instructions.md",
         "hooks.json",
         "AGENTS.md",
         "AGENTS.override.md",
