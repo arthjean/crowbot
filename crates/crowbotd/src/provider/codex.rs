@@ -15,9 +15,29 @@ const SESSION_MODE: &str = "read-only";
 /// it changes nothing for the next session or for another bot.
 const CONFIG: &str = "# Written by Crow Bot before each start. Changes here do not last.\n";
 
-/// What the home must not hold at a start: hooks, rules that let commands run
-/// without asking, and instructions. The sign-in (`auth.json`) stays.
-const REMOVED: [&str; 4] = ["hooks.json", "rules", "AGENTS.md", "AGENTS.override.md"];
+/// What the home must not hold at a start: every layer Codex reads beside its
+/// config, which a bot could write to reach the next session or another bot.
+/// That is hooks, rules that let commands run without asking, a managed
+/// config, plugins (which bring hooks and servers), skills, prompts, agents,
+/// instructions, and memories. The rest is Codex's own state, which a resumed
+/// session needs: the sessions, the databases, the sandbox, and the sign-in
+/// (`auth.json`), which the daemon never touches. A list of what to keep would
+/// remove that state too.
+const REMOVED: [&str; 13] = [
+    "hooks.json",
+    "hooks",
+    "rules",
+    "managed_config.toml",
+    "plugins",
+    "skills",
+    "prompts",
+    "agents",
+    "AGENTS.md",
+    "AGENTS.override.md",
+    "memories",
+    "memories_v2",
+    "vendor_imports",
+];
 
 /// The provider of a ChatGPT plan: its agent is Codex. Codex runs with a
 /// home of its own, which the daemon owns: the allowed

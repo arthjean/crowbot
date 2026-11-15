@@ -347,17 +347,22 @@ async fn the_users_own_settings_for_a_provider_do_not_reach_a_bot() {
         "hooks.json",
         "AGENTS.md",
         "AGENTS.override.md",
+        "managed_config.toml",
         "rules/allow.rules",
+        "skills/any/SKILL.md",
+        "plugins/any/hooks/hooks.json",
     ];
     std::fs::write(
         codex_home.join("config.toml"),
         "notify = [\"calc\"]\n[projects.\"C:/bots/any\"]\ntrust_level = \"trusted\"\n",
     )
     .unwrap();
-    std::fs::create_dir_all(codex_home.join("rules")).unwrap();
     for path in planted {
-        std::fs::write(codex_home.join(path), "planted").unwrap();
+        let path = codex_home.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "planted").unwrap();
     }
+    std::fs::create_dir_all(codex_home.join("sessions")).unwrap();
     std::fs::write(codex_home.join("auth.json"), "kept").unwrap();
     let (_, conversation) = conversation_on(&mut client, CODEX).await;
     client.ask(conversation, "say again").await;
@@ -367,6 +372,8 @@ async fn the_users_own_settings_for_a_provider_do_not_reach_a_bot() {
     for path in planted {
         assert!(!codex_home.join(path).exists(), "{path} is still there");
     }
+    // Codex's own state stays, so a session can be resumed.
+    assert!(codex_home.join("sessions").is_dir());
     // The sign-in stays: the daemon never touches it.
     assert_eq!(
         std::fs::read_to_string(codex_home.join("auth.json")).unwrap(),
