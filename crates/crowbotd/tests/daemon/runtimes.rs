@@ -331,6 +331,60 @@ async fn a_runtime_changed_after_its_install_is_downloaded_again_before_it_runs(
 }
 
 #[tokio::test]
+async fn a_changed_runtime_that_cannot_be_removed_does_not_run() {
+    let publisher = Publisher::start(Duration::ZERO);
+    let mut daemon = daemon(&publisher);
+    let mut client = daemon.client().await;
+    let conversation = claude_bot(&mut client).await;
+    assert_eq!(
+        turn(&mut client, conversation, "say caw").await.reply,
+        "caw"
+    );
+    drop(client);
+    daemon.kill();
+
+    // A program that still runs, and differs from the pinned one by a byte.
+    let folder = installed(&daemon);
+    let mut changed = runtime();
+    changed.push(0);
+    std::fs::write(folder.join(program()), changed).unwrap();
+    let heartbeat = daemon.data_dir().join("heartbeat");
+    std::fs::remove_file(&heartbeat).ok();
+    // The marker cannot be removed: on Windows another process holds it with
+    // no share for removal, and on Unix its folder takes no change.
+    #[cfg(windows)]
+    let _held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(folder.join("installed.json"))
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    daemon.spawn();
+    let mut client = daemon.client().await;
+    client.open(conversation).await;
+
+    let next = turn(&mut client, conversation, "say again").await;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(
+        matches!(next.end, Event::TurnFailed { .. }),
+        "{:?}",
+        next.end
+    );
+    assert_eq!(daemon.heartbeat(), None, "the changed runtime ran");
+}
+
+#[tokio::test]
 async fn a_download_larger_than_its_pinned_size_stops_and_nothing_of_it_runs() {
     let publisher = Publisher::start(Duration::ZERO);
     let runtime = runtime();

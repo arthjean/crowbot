@@ -207,22 +207,7 @@ impl Runtimes {
         let spec = self
             .spec(provider)
             .ok_or_else(|| "no runtime is pinned".to_owned())?;
-        let folder = self.folder(provider, &spec);
-        let marker = read_marker(&folder, &spec).ok_or_else(|| "it is not installed".to_owned())?;
-        let found = files_of(&folder)?;
-        let changed = marker
-            .files
-            .iter()
-            .find(|(path, sha256)| found.get(*path) != Some(*sha256))
-            .map(|(path, _)| path)
-            .or_else(|| found.keys().find(|path| !marker.files.contains_key(*path)));
-        match changed {
-            None => Ok(()),
-            Some(path) => {
-                std::fs::remove_file(folder.join(INSTALLED)).ok();
-                Err(format!("{path} changed after the install"))
-            }
-        }
+        check_folder(&self.folder(provider, &spec), &spec)
     }
 
     /// Installs the runtime of the provider when it is not there yet. Two
@@ -238,10 +223,16 @@ impl Runtimes {
             installing.entry(provider.to_owned()).or_default().clone()
         };
         let _held = gate.lock().await;
-        if let Some(installed) = self.installed(provider) {
-            return Ok(installed);
-        }
         let folder = self.folder(provider, &spec);
+        // A marker alone is not trusted: the runtime may have failed its
+        // check, with a marker that could not be removed.
+        if let Some(installed) = self.installed(provider) {
+            let (checked, pinned) = (folder.clone(), spec.clone());
+            let check = tokio::task::spawn_blocking(move || check_folder(&checked, &pinned)).await;
+            if matches!(check, Ok(Ok(()))) {
+                return Ok(installed);
+            }
+        }
         let staging = folder.with_extension("partial");
         let result = install(&spec, &staging, &folder, &progress).await;
         if result.is_err() {
@@ -473,6 +464,33 @@ fn launch(folder: &Path, spec: &RuntimeSpec) -> Result<Installed, String> {
             .map(|(name, value)| Ok((name.clone(), expand(value)?)))
             .collect::<Result<_, String>>()?,
     })
+}
+
+/// Checks that the files of a runtime folder are the ones its marker lists,
+/// none changed, removed, or added. A folder that fails loses its marker, so
+/// the runtime is no longer installed; a marker that cannot be removed does
+/// not make it trusted, since a download checks the folder again.
+fn check_folder(folder: &Path, spec: &RuntimeSpec) -> Result<(), String> {
+    let marker = read_marker(folder, spec).ok_or_else(|| "it is not installed".to_owned())?;
+    let found = files_of(folder)?;
+    let changed = marker
+        .files
+        .iter()
+        .find(|(path, sha256)| found.get(*path) != Some(*sha256))
+        .map(|(path, _)| path)
+        .or_else(|| found.keys().find(|path| !marker.files.contains_key(*path)));
+    match changed {
+        None => Ok(()),
+        Some(path) => {
+            if let Err(error) = std::fs::remove_file(folder.join(INSTALLED)) {
+                eprintln!(
+                    "[crowbotd] cannot remove the marker of {}: {error}",
+                    folder.display()
+                );
+            }
+            Err(format!("{path} changed after the install"))
+        }
+    }
 }
 
 /// The marker of an installed runtime, when it was written for this spec.

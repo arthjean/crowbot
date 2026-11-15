@@ -514,6 +514,21 @@ async fn the_claude_adapter_tells_its_sign_in_state() {
         ProviderState::Ready | ProviderState::SignedOut
     ));
     assert!(status.can_sign_in);
+    // The adapter ran from its folder and wrote nothing there: a second check
+    // finds the files it was installed with.
+    client
+        .send(ClientMessage::CheckProvider {
+            provider: "claude".to_owned(),
+        })
+        .await;
+    let checked = loop {
+        if let ServerMessage::ProviderChanged(checked) = client.next_within_minutes().await
+            && settled(&checked)
+        {
+            break checked;
+        }
+    };
+    assert_eq!(checked.state, status.state, "{checked:?}");
 }
 
 // US-028: About.
