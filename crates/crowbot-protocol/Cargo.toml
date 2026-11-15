@@ -11,12 +11,15 @@ publish.workspace = true
 workspace = true
 
 [features]
-transport = ["dep:tokio", "dep:windows-sys"]
+transport = ["dep:tokio", "dep:windows-sys", "dep:libc"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "time"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", optional = true, features = [

@@ -142,6 +142,9 @@ mod unix {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use crowbot_protocol::Endpoint;
+    use crowbot_protocol::transport::Listener;
+
     use crate::support;
 
     #[test]
@@ -175,5 +178,36 @@ mod unix {
         assert!(said.contains("listening on"), "{said}");
         assert_eq!(mode, 0o700, "{said}");
         assert!(said.contains("private"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_is_replaced_under_the_lock() {
+        let dir = support::test_dir();
+        let path = dir.join("crowbotd.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists(), "the test left no stale socket");
+        let endpoint = Endpoint::new(path.to_string_lossy().into_owned());
+        let listener = Listener::bind(&endpoint);
+        assert!(listener.is_ok());
+        drop(listener);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A daemon that holds the lock of a socket may have bound it and not
+    /// listen yet: a second one must not remove that socket.
+    #[tokio::test]
+    async fn a_held_socket_lock_keeps_the_socket_file() {
+        let dir = support::test_dir();
+        let path = dir.join("crowbotd.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let lock = std::fs::File::create(dir.join("crowbotd.sock.lock")).unwrap();
+        lock.lock().unwrap();
+        let endpoint = Endpoint::new(path.to_string_lossy().into_owned());
+        let refused = Listener::bind(&endpoint).err().map(|error| error.kind());
+        let kept = path.exists();
+        drop(lock);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(refused, Some(std::io::ErrorKind::AddrInUse));
+        assert!(kept, "the socket of the lock holder was removed");
     }
 }
