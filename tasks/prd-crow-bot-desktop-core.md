@@ -740,6 +740,7 @@ Crow Bot runs Codex and Grok next to Claude, chooses models from what each provi
 - [ ] Given a provider whose session cannot be put in a mode where the daemon receives approvals, when a session starts, then the turn fails with a message that names the provider and the missing mode, and no tool runs
 - [ ] Given the user's own settings for that provider (allowed commands, bypass modes), when a bot session starts, then they do not apply to the bot
 - [ ] Given a provider is signed out, when a turn starts, then the turn fails with the provider's name and the sign-in control, and the bot stays usable
+- [ ] Given a provider whose agent offers several sign-in methods, when the user starts a sign-in, then the client lists the methods by name and starts the one the user picks (EP-005 starts the first `terminal` method without asking)
 - [ ] No ACP type appears outside `crates/crowbotd/src/provider`
 
 #### US-031: Models and reasoning effort from the provider

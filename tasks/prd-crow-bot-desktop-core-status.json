@@ -41,10 +41,10 @@
     {
       "id": "EP-005",
       "title": "Setup and settings",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 5,
-      "stories_done": 0
+      "stories_done": 5
     },
     {
       "id": "EP-006",
@@ -389,19 +389,19 @@
       "id": "US-025",
       "title": "Validate assumption: provider sign-in status and sign-in through ACP",
       "epic": "EP-005",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-15",
+      "reviewed_at": "2026-11-15"
     },
     {
       "id": "US-026",
       "title": "First run and bot creation",
       "epic": "EP-005",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
@@ -409,15 +409,15 @@
         "US-012",
         "US-025"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-15",
+      "reviewed_at": "2026-11-15"
     },
     {
       "id": "US-027",
       "title": "Bot settings panel",
       "epic": "EP-005",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
@@ -425,39 +425,39 @@
         "US-008",
         "US-015"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-15",
+      "reviewed_at": "2026-11-15"
     },
     {
       "id": "US-028",
       "title": "Application settings",
       "epic": "EP-005",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "size": "M",
       "blocked_by": [
         "US-011",
         "US-025"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-15",
+      "reviewed_at": "2026-11-15"
     },
     {
       "id": "US-029",
       "title": "Global search",
       "epic": "EP-005",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P2",
       "size": "M",
       "blocked_by": [
         "US-009",
         "US-013"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-14",
+      "completed_at": "2026-11-15",
+      "reviewed_at": "2026-11-15"
     },
     {
       "id": "US-030",
