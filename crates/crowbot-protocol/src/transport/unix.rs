@@ -23,7 +23,10 @@ impl Listener {
     /// never removed, so that every daemon locks the same file.
     pub fn bind(endpoint: &Endpoint) -> io::Result<Self> {
         let path = Path::new(endpoint.address());
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
