@@ -30,7 +30,10 @@ The daemon listens on a local endpoint and serves Crow Bot clients until it is s
 A bot created with no folder gets one of its own under --bots-dir (~/CrowBot/Bots).
 The agent runtimes the daemon installs, and the files providers keep for bots, go
 under --data-dir (the folder of the database). --runtime-manifest replaces the pinned
-runtimes by the ones a JSON file lists, for a mirror.";
+runtimes by the ones a JSON file lists, for a mirror.
+
+Exit status: 1 when the daemon cannot start, 2 for a wrong argument, 3 when another
+crowbotd uses the database, 4 when another program holds the endpoint.";
 
 struct Args {
     db: Option<PathBuf>,
