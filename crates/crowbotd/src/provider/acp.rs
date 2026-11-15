@@ -190,6 +190,9 @@ const STATUS_PATIENCE: Duration = Duration::from_secs(8);
 /// How long an agent gets to accept the sign-in it already holds.
 const SESSION_AUTH_PATIENCE: Duration = Duration::from_secs(30);
 const PROBE_DETAIL_BYTES: usize = 300;
+
+/// The longest failure text a turn keeps from an agent's error.
+const FAILURE_BYTES: usize = 4 << 10;
 const STATUS_UPDATES: [&str; 2] = ["_auth/status_update", "auth/status_update"];
 
 /// The agent's own sign-in, as a command to run: the agent command followed by
@@ -987,12 +990,29 @@ fn failure_cause(error: &Error) -> Option<FailureCause> {
     }
 }
 
+/// The text of an agent's error that a person reads and the database keeps:
+/// its message and the detail it gave as text. The rest of what an agent
+/// sends with an error (a request, its headers, a stack trace) is left out.
 fn failure_message(error: &Error) -> String {
-    if error_kind(error).is_some() && !error.message.is_empty() {
-        error.message.clone()
-    } else {
-        error.to_string()
+    let detail = match &error.data {
+        Some(Value::String(text)) => Some(text.as_str()),
+        Some(Value::Object(data)) => data.get("message").and_then(Value::as_str),
+        _ => None,
     }
+    .map(str::trim)
+    .filter(|detail| !detail.is_empty());
+    let message = error.message.trim();
+    let code = error.code.to_string();
+    // A message that only names its code says nothing a detail does not.
+    let generic = message.is_empty() || message == code;
+    let mut text = match detail {
+        Some(detail) if generic => detail.to_owned(),
+        Some(detail) if !message.contains(detail) => format!("{message}: {detail}"),
+        _ if message.is_empty() => code,
+        _ => message.to_owned(),
+    };
+    cut_text(&mut text, FAILURE_BYTES);
+    text
 }
 
 fn failure(message: &str) -> Error {
@@ -1847,5 +1867,37 @@ mod tests {
         let other = SessionFailure::from(failure("the agent cannot resume a session"));
         assert!(other.message.contains("the agent cannot resume a session"));
         assert_eq!(other.cause, None);
+    }
+
+    #[test]
+    fn a_failure_keeps_the_message_and_the_text_detail_and_nothing_else() {
+        // The daemon's own failures read as their text alone.
+        assert_eq!(
+            failure_message(&failure("Codex cannot start")),
+            "Codex cannot start"
+        );
+        // A detail in text follows a message that says more than its code.
+        let detailed = Error::new(-32603, "Request failed").data(json!("model not found"));
+        assert_eq!(
+            failure_message(&detailed),
+            "Request failed: model not found"
+        );
+        // What else an agent sends with an error is not kept: request bodies,
+        // headers, stack traces.
+        let leaky = Error::new(-32603, "Internal error").data(json!({
+            "message": "upstream returned 500",
+            "request": { "headers": { "authorization": "Bearer secret-token" } },
+            "stack": "at fetch (/home/user/agent.js:1:1)"
+        }));
+        assert_eq!(failure_message(&leaky), "upstream returned 500");
+        let bare = Error::new(-32603, "Internal error").data(json!({ "errorKind": "x" }));
+        assert_eq!(failure_message(&bare), "Internal error");
+        assert_eq!(
+            failure_message(&Error::new(-32000, "")),
+            "Authentication required"
+        );
+        // A long detail is cut.
+        let long = failure(&"a".repeat(64 << 10));
+        assert_eq!(failure_message(&long).len(), FAILURE_BYTES);
     }
 }
