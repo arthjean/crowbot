@@ -1742,6 +1742,84 @@ fn a_query_with_no_match_says_so(cx: &mut TestAppContext) {
     assert_eq!(daemon.sent(), []);
 }
 
+#[gpui::test]
+fn the_search_palette_keeps_its_measures_and_fits_a_short_window(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = with_chat(cx);
+    cx.simulate_resize(size(px(1080.), px(760.)));
+    search_keys(cx);
+    // 576 wide, centered, a tenth of the window under its top.
+    let panel = bounds(cx, "search-palette");
+    assert_eq!(
+        (panel.left(), panel.top(), panel.size.width),
+        (px(252.), px(76.), px(576.))
+    );
+    assert_eq!(bounds(cx, "search-hint").top(), px(76. + 1. + 48. + 6.));
+
+    let request = search_for(&mut daemon, cx, "harbor");
+    daemon.tell(ServerMessage::SearchResults(results(request, "harbor")), cx);
+    // Rows 6 in from the edge of the panel, under the field of 48 and a
+    // heading of 28; one line makes a row of 32, two lines a row of 48.
+    assert_eq!(
+        bounds(cx, "search-result-0"),
+        Bounds {
+            origin: point(px(259.), px(159.)),
+            size: size(px(562.), px(32.)),
+        }
+    );
+    assert_eq!(
+        bounds(cx, "search-result-1").top(),
+        px(159. + 32. + 6. + 28.),
+        "groups stand 6 apart"
+    );
+    assert_eq!(bounds(cx, "search-result-2").size.height, px(48.));
+    // The text of the field starts where the titles of the rows start.
+    assert_eq!(bounds(cx, "search-query").left(), px(259. + 8. + 20. + 8.));
+    let (panel, keys) = (bounds(cx, "search-palette"), bounds(cx, "search-keys"));
+    assert_eq!(keys.size.height, px(41.));
+    assert_eq!(keys.bottom() + px(1.), panel.bottom());
+
+    // The pointer takes the highlight of the keys when it moves onto a row,
+    // and gives it back to the keys while it stays still.
+    let active = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |this, _| this.palette.as_ref().unwrap().active)
+    };
+    let onto = bounds(cx, "search-result-2").center();
+    cx.simulate_mouse_move(onto, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(active(cx), 2);
+    cx.simulate_keystrokes("up");
+    cx.simulate_mouse_move(onto, None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(active(cx), 1);
+
+    // A window too short for the palette shrinks its list, which follows
+    // the highlight; the key hints stay in the window.
+    cx.simulate_resize(size(px(640.), px(420.)));
+    let (panel, keys) = (bounds(cx, "search-palette"), bounds(cx, "search-keys"));
+    assert_eq!(panel.top(), px(46.), "under the title band");
+    assert_eq!(panel.bottom(), px(420. - 42.));
+    assert_eq!(keys.bottom() + px(1.), panel.bottom());
+    cx.simulate_keystrokes("down down");
+    assert_eq!(active(cx), 3);
+    let list = bounds(cx, "search-results");
+    assert_eq!(
+        bounds(cx, "search-result-3").bottom() + px(6.),
+        list.bottom(),
+        "the last result keeps the padding of the list under it"
+    );
+    assert!(
+        bounds(cx, "search-result-0").top() < list.top() + px(6. + 28.),
+        "the list scrolled"
+    );
+    cx.simulate_keystrokes("down");
+    assert_eq!(active(cx), 0);
+    assert_eq!(
+        bounds(cx, "search-result-0").top(),
+        list.top() + px(6. + 28.),
+        "the first result brings its heading back"
+    );
+}
+
 fn settle(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
     for _ in 0..3 {
         workspace.update(cx, |_, cx| cx.notify());

@@ -4,15 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crowbot_protocol::{ClientMessage, MessageAuthor, SEARCH_MESSAGE_TERM_LENGTH, SearchResults};
 use gpui::{
     AnyElement, Context, Div, FocusHandle, Focusable, FollowMode, FontWeight, HighlightStyle,
-    KeyDownEvent, ListOffset, Pixels, Role, SharedString, Stateful, StyledText, Task, Window, div,
-    prelude::*,
+    KeyDownEvent, ListOffset, MouseMoveEvent, Pixels, Point, Role, ScrollHandle, SharedString,
+    Stateful, StyledText, Task, Window, div, prelude::*, relative,
 };
 
 use super::{HEAD, Workspace};
 use crate::assets::Icon;
 use crate::bots;
 use crate::markdown::Selection;
-use crate::theme::{Theme, duration, icon as icon_size, layout, radius, size, space, text};
+use crate::theme::{Theme, duration, icon as icon_size, layout, palette, size, space, text};
 use crate::ui;
 
 /// How many frames a revealed message gets to lay out its text before the
@@ -27,6 +27,10 @@ pub(super) struct Palette {
     waiting: bool,
     search: Option<Task<()>>,
     restore_focus: Option<FocusHandle>,
+    scroll: ScrollHandle,
+    /// Where the pointer last was: a result takes the highlight when the
+    /// pointer moves onto it, not when the list moves under a still pointer.
+    pointer: Option<Point<Pixels>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +84,21 @@ pub(super) fn matches(text: &str, query: &str) -> Vec<Range<usize>> {
     merged
 }
 
+/// The place of a result among the children of the list, which holds a
+/// heading before each group.
+fn child_of(hits: &[Hit], index: usize) -> usize {
+    let mut headings = 0;
+    let mut group = None;
+    for hit in hits.iter().take(index + 1) {
+        let kind = std::mem::discriminant(hit);
+        if group != Some(kind) {
+            group = Some(kind);
+            headings += 1;
+        }
+    }
+    index + headings
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -100,6 +119,7 @@ impl Workspace {
         self.menu = None;
         self.palette = Some(Palette {
             restore_focus: window.focused(cx),
+            pointer: Some(window.mouse_position()),
             ..Palette::default()
         });
         self.palette_query
@@ -194,7 +214,8 @@ impl Workspace {
     }
 
     pub(super) fn palette_step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let count = self.hits().len();
+        let hits = self.hits();
+        let count = hits.len();
         if let Some(palette) = self.palette.as_mut()
             && count > 0
         {
@@ -203,6 +224,28 @@ impl Workspace {
             } else {
                 (palette.active + count - 1) % count
             };
+            // The list keeps its padding at both ends: the first result
+            // brings its heading back, the last one the end of the list.
+            if palette.active == 0 {
+                palette.scroll.set_offset(Point::default());
+            } else if palette.active + 1 == count {
+                palette.scroll.scroll_to_bottom();
+            } else {
+                palette
+                    .scroll
+                    .scroll_to_item(child_of(&hits, palette.active));
+            }
+            cx.notify();
+        }
+    }
+
+    /// The pointer moved over a result: it takes the highlight of the keys.
+    fn palette_point(&mut self, index: usize, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        if palette.pointer.replace(position) != Some(position) && palette.active != index {
+            palette.active = index;
             cx.notify();
         }
     }
@@ -342,7 +385,6 @@ impl Workspace {
         label: String,
         theme: &Theme,
     ) -> Stateful<Div> {
-        let hover = theme.hover;
         div()
             .id(("search-result", index))
             .debug_selector(move || format!("search-result-{index}"))
@@ -353,31 +395,27 @@ impl Workspace {
                 label
             }))
             .flex_none()
-            .h(layout::PALETTE_ROW)
             .px(space::S2)
+            .py(palette::ROW_PADDING_Y)
             .flex()
             .items_center()
             .gap(space::S2)
-            .rounded(radius::SM)
+            .rounded(palette::ROW_RADIUS)
             .cursor_pointer()
-            .when(active, |row| row.bg(theme.control_active))
-            .when(!active, |row| row.hover(move |style| style.bg(hover)))
+            .when(active, |row| row.bg(theme.menu_highlight))
     }
 
-    fn group_heading(&self, title: &'static str, count: usize, theme: &Theme) -> Div {
+    fn group_heading(&self, title: &'static str, first: bool, theme: &Theme) -> Div {
         div()
             .flex_none()
-            .h(layout::PALETTE_HEADING)
+            .when(!first, |heading| heading.mt(space::S1_5))
             .px(space::S2)
-            .flex()
-            .items_center()
-            .justify_between()
+            .py(palette::ROW_PADDING_Y)
             .text_size(text::SM.size)
             .line_height(text::SM.leading)
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_muted)
             .child(title)
-            .child(SharedString::from(count.to_string()))
     }
 
     fn render_results(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -388,15 +426,22 @@ impl Workspace {
             return Vec::new();
         };
         let now = now_ms();
-        let muted = |text: SharedString| {
+        let small = || {
             div()
-                .flex_none()
-                .max_w(layout::HEADER_NAME_MAX)
-                .truncate()
                 .text_size(text::SM.size)
                 .line_height(text::SM.leading)
                 .text_color(theme.text_muted)
-                .child(text)
+        };
+        // The avatar or the icon of a result, beside its first line.
+        let lead = |mark: AnyElement| {
+            div()
+                .flex_none()
+                .self_start()
+                .size(palette::LEAD)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(mark)
         };
         let marked = |shown: &str| {
             let style = HighlightStyle {
@@ -410,105 +455,111 @@ impl Workspace {
                     .map(move |range| (range, style)),
             )
         };
+        // The title of a result, then what tells it from its neighbors.
+        let headline = |title: StyledText, context: String| {
+            div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(space::S1_5)
+                .text_size(text::LG.size)
+                .line_height(text::LG.leading)
+                .child(div().min_w_0().truncate().child(title))
+                .children((!context.is_empty()).then(|| {
+                    small()
+                        .flex_none()
+                        .max_w(relative(palette::CONTEXT_SHARE))
+                        .truncate()
+                        .child(SharedString::from(context))
+                }))
+        };
+        let time = |at_ms: i64| {
+            small()
+                .flex_none()
+                .min_w(palette::TIME_MIN)
+                .text_right()
+                .child(SharedString::from(bots::ago(now, at_ms)))
+        };
         let hits = self.hits();
         let mut rows = Vec::new();
         let mut index = 0;
         let open = |row: Stateful<Div>, index: usize, cx: &mut Context<Self>| {
             let hit = hits[index];
-            row.on_click(cx.listener(move |this, _, window, cx| this.open_hit(hit, window, cx)))
-                .into_any_element()
+            row.on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.palette_point(index, event.position, cx);
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_hit(hit, window, cx)))
+            .into_any_element()
         };
 
         let bots: Vec<_> = results.bots.iter().filter_map(|id| self.bot(*id)).collect();
         if !bots.is_empty() {
-            rows.push(
-                self.group_heading("Bots", bots.len(), theme)
-                    .into_any_element(),
-            );
+            let heading = self.group_heading("Bots", rows.is_empty(), theme);
+            rows.push(heading.into_any_element());
         }
         for summary in bots {
             let bot = &summary.bot;
+            let avatar = ui::avatar(bot, palette::LEAD, palette::LEAD_GLYPH, theme);
             let row = self
                 .result_row(index, palette.active == index, bot.name.clone(), theme)
-                .child(ui::avatar(
-                    bot,
-                    size::AVATAR_RESULT,
-                    size::AVATAR_RESULT_GLYPH,
-                    theme,
-                ))
+                .child(lead(avatar.into_any_element()))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .text_color(theme.text_secondary)
-                        .child(marked(&bot.name)),
-                )
-                .children(
-                    (!bot.title.is_empty()).then(|| muted(SharedString::from(bot.title.clone()))),
+                        .child(headline(marked(&bot.name), bot.title.clone())),
                 );
             rows.push(open(row, index, cx));
             index += 1;
         }
 
         if !results.conversations.is_empty() {
-            rows.push(
-                self.group_heading("Conversations", results.conversations.len(), theme)
-                    .into_any_element(),
-            );
+            let heading = self.group_heading("Conversations", rows.is_empty(), theme);
+            rows.push(heading.into_any_element());
         }
         for hit in &results.conversations {
-            let title = hit.title.clone();
             let owner = self
                 .bot(hit.bot_id)
                 .map(|summary| summary.bot.name.clone())
                 .unwrap_or_default();
+            let icon = ui::icon(Icon::MessageSquare, icon_size::MD, theme.text_muted);
             let row = self
                 .result_row(
                     index,
                     palette.active == index,
-                    format!("{title}, {owner}"),
+                    format!("{}, {owner}", hit.title),
                     theme,
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .size(size::AVATAR_RESULT)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(ui::icon(
-                            Icon::MessageSquare,
-                            icon_size::MD,
-                            theme.text_muted,
-                        )),
-                )
+                .child(lead(icon.into_any_element()))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .text_color(theme.text_secondary)
-                        .child(marked(&title)),
+                        .child(headline(marked(&hit.title), owner)),
                 )
-                .child(muted(owner.into()))
-                .child(muted(bots::ago(now, hit.last_activity_ms).into()));
+                .child(time(hit.last_activity_ms));
             rows.push(open(row, index, cx));
             index += 1;
         }
 
         if !results.messages.is_empty() {
-            rows.push(
-                self.group_heading("Messages", results.messages.len(), theme)
-                    .into_any_element(),
-            );
+            let heading = self.group_heading("Messages", rows.is_empty(), theme);
+            rows.push(heading.into_any_element());
         }
         for hit in &results.messages {
             let owner = self.bot(hit.bot_id).map(|summary| &summary.bot);
             let name = owner.map(|bot| bot.name.clone()).unwrap_or_default();
-            let author = match hit.author {
-                MessageAuthor::User => "You".to_owned(),
-                MessageAuthor::Bot => name.clone(),
+            let (author, context) = match hit.author {
+                MessageAuthor::User if name.is_empty() => ("You".to_owned(), String::new()),
+                MessageAuthor::User => ("You".to_owned(), format!("to {name}")),
+                MessageAuthor::Bot => (name, String::new()),
+            };
+            let mark = match owner {
+                Some(bot) => {
+                    ui::avatar(bot, palette::LEAD, palette::LEAD_GLYPH, theme).into_any_element()
+                }
+                None => ui::icon(Icon::MessageSquare, icon_size::MD, theme.text_muted)
+                    .into_any_element(),
             };
             let row = self
                 .result_row(
@@ -517,25 +568,20 @@ impl Workspace {
                     format!("{author}: {}", hit.snippet),
                     theme,
                 )
-                .children(owner.map(|bot| {
-                    ui::avatar(bot, size::AVATAR_RESULT, size::AVATAR_RESULT_GLYPH, theme)
-                }))
+                .child(lead(mark))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .text_color(theme.text_muted)
-                        .child(marked(&hit.snippet)),
+                        .flex()
+                        .flex_col()
+                        .child(headline(
+                            StyledText::new(SharedString::from(author)),
+                            context,
+                        ))
+                        .child(small().truncate().child(marked(&hit.snippet))),
                 )
-                .child(muted(
-                    match hit.author {
-                        MessageAuthor::User => format!("You to {name}"),
-                        MessageAuthor::Bot => name,
-                    }
-                    .into(),
-                ))
-                .child(muted(bots::ago(now, hit.at_ms).into()));
+                .child(time(hit.at_ms));
             rows.push(open(row, index, cx));
             index += 1;
         }
@@ -545,10 +591,12 @@ impl Workspace {
     pub(super) fn render_palette(
         &self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let palette = self.palette.as_ref()?;
         let rows = self.render_results(theme, cx);
+        let has_results = !rows.is_empty();
         let query = self.palette_query.read(cx).text().trim().to_owned();
         let status: Option<(&'static str, SharedString)> = match &palette.results {
             _ if query.is_empty() => Some((
@@ -569,19 +617,33 @@ impl Workspace {
             None => Some(("search-waiting", "Searching…".into())),
             Some(_) => None,
         };
-        let hint = |keys: &'static str, action: &'static str| {
+        let key = |cap: AnyElement| {
             div()
+                .flex_none()
+                .h(palette::KEY)
+                .min_w(palette::KEY)
+                .px(space::S1)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(palette::KEY_RADIUS)
+                .bg(theme.badge)
+                .text_size(text::SM.size)
+                .line_height(text::SM.leading)
+                .text_color(theme.text_secondary)
+                .child(cap)
+        };
+        let arrow = |glyph: Icon| {
+            key(ui::icon(glyph, icon_size::XS, theme.text_secondary).into_any_element())
+        };
+        let word = |cap: &'static str| key(cap.into_any_element());
+        let hint = |keys: Vec<Div>, action: &'static str| {
+            div()
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(space::S1)
-                .child(
-                    div()
-                        .px(space::S1)
-                        .rounded(radius::SM)
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .child(keys),
-                )
+                .children(keys)
                 .child(action)
         };
         let panel = div()
@@ -590,15 +652,18 @@ impl Workspace {
             .occlude()
             .role(Role::Dialog)
             .aria_label("Search")
-            .w(layout::PALETTE_WIDTH)
+            .w(palette::WIDTH)
             .max_w_full()
+            .max_h(palette::MAX_HEIGHT)
+            .min_h_0()
             .flex()
             .flex_col()
-            .rounded(radius::LG)
+            .rounded(palette::RADIUS)
             .bg(theme.sheet)
             .border_1()
             .border_color(theme.dialog_ring)
-            .shadow(theme.menu_shadow())
+            // One edge only: the ring of the menu shadow would double it.
+            .shadow(vec![theme.drop_shadow()])
             .overflow_hidden()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
@@ -609,14 +674,20 @@ impl Workspace {
             .child(
                 div()
                     .flex_none()
-                    .h(layout::PALETTE_INPUT)
-                    .px(space::S4)
+                    .h(palette::INPUT)
+                    .px(palette::PADDING + space::S2)
                     .flex()
                     .items_center()
-                    .gap(space::S3)
-                    .border_b_1()
-                    .border_color(theme.border_strong)
-                    .child(ui::icon(Icon::Search, icon_size::MD, theme.text_muted))
+                    .gap(space::S2)
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(palette::LEAD)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(ui::icon(Icon::Search, icon_size::MD, theme.text_muted)),
+                    )
                     .child(
                         div()
                             .debug_selector(|| "search-query".into())
@@ -631,9 +702,10 @@ impl Workspace {
                     .debug_selector(|| "search-results".into())
                     .role(Role::List)
                     .aria_label("Search results")
-                    .max_h(layout::PALETTE_RESULTS)
+                    .min_h_0()
                     .overflow_y_scroll()
-                    .p(space::S1_5)
+                    .track_scroll(&palette.scroll)
+                    .p(palette::PADDING)
                     .flex()
                     .flex_col()
                     .children(status.map(|(id, message)| {
@@ -642,9 +714,12 @@ impl Workspace {
                             .debug_selector(move || id.into())
                             .role(Role::Status)
                             .aria_label(message.clone())
+                            .flex_none()
                             .px(space::S2)
-                            .py(space::S4)
+                            .py(palette::STATUS_PADDING_Y)
                             .text_center()
+                            .text_size(text::LG.size)
+                            .line_height(text::LG.leading)
                             .text_color(theme.text_muted)
                             .child(message)
                     }))
@@ -652,34 +727,46 @@ impl Workspace {
             )
             .child(
                 div()
+                    .debug_selector(|| "search-keys".into())
                     .flex_none()
-                    .h(layout::PALETTE_ROW)
-                    .px(space::S4)
+                    .px(palette::FOOTER_PADDING_X)
+                    .py(palette::FOOTER_PADDING_Y)
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(space::S4)
+                    .gap_x(space::S3)
+                    .gap_y(space::S1_5)
+                    // The fill reaches the corners of the panel, inside its
+                    // 1 px edge.
+                    .rounded_b(palette::RADIUS - size::HAIRLINE)
                     .border_t_1()
-                    .border_color(theme.border_strong)
-                    .text_size(text::SM.size)
-                    .line_height(text::SM.leading)
+                    .border_color(theme.menu_separator)
+                    .bg(theme.palette_footer)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_muted)
-                    .child(hint("↑↓", "to move"))
-                    .child(hint("Enter", "to open"))
-                    .child(hint("Esc", "to close")),
+                    .child(hint(
+                        vec![arrow(Icon::ArrowUp), arrow(Icon::ArrowDown)],
+                        "Navigate",
+                    ))
+                    .children(has_results.then(|| hint(vec![word("Enter")], "Open")))
+                    .child(hint(vec![word("Esc")], "Close")),
             );
+        // A tenth of the window stays free over the palette, as under it,
+        // and it never covers the title band.
+        let room = window.viewport_size().height * palette::WINDOW_SHARE;
         Some(
             div()
                 .id("search-overlay")
                 .occlude()
                 .absolute()
                 .inset_0()
-                .pt(layout::PALETTE_TOP)
-                .px(space::S6)
-                .pb(space::S6)
+                .pt(room.max(layout::TOP_ROW + space::S2))
+                .px(space::S4)
+                .pb(room.max(space::S4))
                 .flex()
-                .justify_center()
-                .items_start()
-                .bg(theme.overlay)
+                .flex_col()
+                .items_center()
+                .bg(theme.palette_scrim)
                 .on_click(cx.listener(|this, _, window, cx| this.close_palette(window, cx)))
                 .child(panel)
                 .into_any_element(),
@@ -703,5 +790,32 @@ mod tests {
         assert_eq!(matches("résumé du résumé", "du"), vec![9..11]);
         assert!(matches("nothing here", "zeppelin").is_empty());
         assert!(matches("anything", "   ").is_empty());
+    }
+
+    #[test]
+    fn a_result_is_counted_among_the_rows_after_the_headings_of_its_groups() {
+        let conversation = |conversation_id| Hit::Conversation {
+            bot_id: 1,
+            conversation_id,
+        };
+        let message = |event_id| Hit::Message {
+            bot_id: 1,
+            conversation_id: 10,
+            event_id,
+        };
+        let hits = [
+            Hit::Bot(1),
+            Hit::Bot(2),
+            conversation(10),
+            message(7),
+            message(8),
+        ];
+        assert_eq!(child_of(&hits, 0), 1);
+        assert_eq!(child_of(&hits, 1), 2);
+        assert_eq!(child_of(&hits, 2), 4);
+        assert_eq!(child_of(&hits, 3), 6);
+        assert_eq!(child_of(&hits, 4), 7);
+        // A list with no bot starts with the heading of its conversations.
+        assert_eq!(child_of(&hits[2..], 1), 3);
     }
 }

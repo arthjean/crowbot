@@ -51,6 +51,7 @@ that opens only when its settings are needed.
 | --- | --- | --- |
 | OpenBot | The shell measurements: the 52 px rail, the 280 px sidebar with 62 px rows and 46 px avatars, the inset card of radius 14, the creation form column of 420 px, the palette of dark and light tokens | Ideas and numbers only. Its license is noncommercial: never copy or translate its code or text |
 | Paneflow | The component contracts: the menu and picker surfaces, concentric radii, the text field skin and focus halo, the select trigger lift, the menu reveal, the rule that GPUI clips to rectangles | Paneflow is GPL-3.0, like this client: its code MAY be adapted here, never into the daemon or the protocol crate |
+| T3 Code | The anatomy of the search palette (5.11): a field with no edge, groups of rows with a lead column, a title beside its context, a time at the trailing edge, a tinted row of key hints, a veil over the window; and the stroke of the icons (4.6) | T3 Code is MIT. Its structure and measures only: the colors, the radii, and the shadow stay the tokens of this document |
 
 ### 2.3 Three words
 
@@ -107,7 +108,7 @@ never hex values.
 | `canvas` | The card, pages, dialogs | `#1a1a1a` | `#f5f5f6` |
 | `surface` | A selected sidebar row, cards inside a page | `#212121` | `#ffffff` |
 | `control`, `control_hover`, `control_active` | Resting controls and their states | `#212121`, `#242424`, `#2a2a2a` | `#ffffff`, `#f0f0f2`, `#e8e8eb` |
-| `sheet` | Tooltips, toasts, the jump button | `#141414` | `#ffffff` |
+| `sheet` | Tooltips, toasts, the jump button, the search palette | `#141414` | `#ffffff` |
 | `menu_surface` | Menus, select popups, pickers: one step above `surface` | `#2a2a2a` | `#ffffff` |
 | `menu_highlight` | A menu row under the pointer or the keyboard | text at 0.06 | ink at 0.06 |
 | `menu_selected` | The chosen row of a list in a menu | text at 0.10 | ink at 0.10 |
@@ -117,7 +118,9 @@ never hex values.
 | `picker_surface`, `picker_rail` | The model picker, and its column of provider tabs | `#212121`, `#101010` | `#ffffff`, `#f4f4f5` |
 | `picker_tab`, `picker_tab_edge` | The provider tab shown in the model picker | text at 0.08, 0.11 | ink at 0.06, 0.10 |
 | `radio_edge` | The ring of a model that is not chosen | text at 0.22 | ink at 0.22 |
-| `badge` | A small pill beside a name, such as `default` | text at 0.07 | ink at 0.06 |
+| `badge` | A small pill beside a name, such as `default`, and a key hint | text at 0.07 | ink at 0.06 |
+| `palette_scrim` | The veil over the window behind the search palette | `frame` at 0.64 | `frame` at 0.60 |
+| `palette_footer` | The row of key hints of the search palette, over `sheet` | text at 0.025 | ink at 0.025 |
 | `round_button`, `round_button_hover`, `round_button_edge` | A round icon button, such as Search and New bot over the bot list | `#262626`, `#2e2e2e`, text at 0.08 | `#f0f0f2`, `#e8e8eb`, ink at 0.08 |
 | `border`, `border_strong` | Hairlines | text at 0.035, 0.045 | ink at 0.07, 0.10 |
 | `hover` | Hover wash on chrome | text at 0.06 | ink at 0.05 |
@@ -137,6 +140,7 @@ surface joins those tests.
 | Surface | Shadow |
 | --- | --- |
 | Menus, pickers, dialogs, toasts (`menu_shadow`) | A 1 px `dialog_ring` edge, then 0 18, blur 44, spread -18, black at 0.80 in dark and 0.55 in light |
+| The search palette (`drop_shadow`) | The drop of the menu shadow alone: its 1 px `dialog_ring` border is its only edge |
 | A chosen avatar picture | A 2 px spread of `accent_soft` outside its `accent_text` edge |
 
 No other surface carries a shadow. Depth comes from the surface steps
@@ -146,7 +150,7 @@ No other surface carries a shadow. Depth comes from the surface steps
 
 | Element | Radius | Notes |
 | --- | --- | --- |
-| Card, wide picker (`menu::WIDE_RADIUS`) | 14 | A wide picker pads 6, so its rows and inner panels take 8 |
+| Card, wide picker (`menu::WIDE_RADIUS`), search palette (`palette::RADIUS`) | 14 | A wide picker and the palette pad 6, so their rows and inner panels take 8 |
 | Template cards, toasts, the cards and the logo tile of Settings | 12 (`radius::LG`) | A clickable row at an end of a Settings card keeps that 12 on its outer corners |
 | Plain menu (`menu::RADIUS`) | 8 | Pads 4, so its rows take 4 |
 | Sidebar rows, text fields, the model trigger, primary and wide buttons | 8 (`radius::MD`) | |
@@ -228,6 +232,7 @@ on. A provider with no logo shows two letters of its name.
 | Suggestion row fades (`duration::FADE`) | 160 ms, ease-out quint | Each edge fades in while the row can scroll past it; shown at rest when motion is reduced |
 | Suggestion row glide (`motion`) | Per frame | A drag past 8 px moves the row; on release it keeps the speed of the drag (at most 1.75 px/ms) and loses 12 % of it per 60 Hz frame until it stops or meets an end; no glide when motion is reduced |
 | Hover | Instant | Rows and buttons |
+| Search palette | Instant | It opens and closes with no animation: it is opened many times a day |
 
 Motion explains a state change. Nothing animates for decoration.
 
@@ -462,6 +467,50 @@ conversation, and the title band of the bot. The rail stays.
   `warning_text` on `warning_soft`, runtime missing `danger_text` on
   `danger_soft`, and a state with no color `text_secondary` on `badge`.
   The word carries the state: the color only repeats it.
+
+### 5.11 Search palette (`workspace/palette.rs`, tokens in `theme::palette`)
+
+Ctrl+K, or the Search button over the bot list, opens the palette over the
+shell. Its anatomy is the command palette of T3 Code, drawn with the tokens
+of this document.
+
+- Veil: `palette_scrim` over the whole window. GPUI has no blur of what is
+  behind an element, so the veil is a flat wash. A press on it closes the
+  palette.
+- Panel: 576 wide, 420 tall at most, on `sheet` at radius 14 with one 1 px
+  `dialog_ring` border and the drop of the menu shadow, without its ring: a
+  ring around a border makes an edge of 2. A tenth of the window height stays
+  free over it and under it, and it never covers the title band; in a
+  window too short for it, the list shrinks.
+- Field: a row of 48 with no edge, no fill, and no line under it. A 16
+  search icon in `text_muted` stands in a 20 lead box, 14 from the edge of
+  the panel; the text is `text::LG`, 8 after it.
+- List: padded 6, it scrolls. A group is a heading (`text::SM` Medium,
+  `text_muted`, padded 8 by 6), then its rows; groups stand 6 apart. The
+  groups are Bots, Conversations, Messages, in that order.
+- Row: padded 8 by 6, radius 8, gap 8. A 20 lead box on the first line (the
+  avatar of the bot, or a 16 icon in `text_muted`), then the title in
+  `text::LG` and `text`, then, 6 after it, its context in `text::SM` and
+  `text_muted`, on 45 % of the row at most. A bot shows its name and its
+  title; a conversation its title and its bot; a message its author
+  (`You`, then `to <bot>`) over one line of the message in `text::SM` and
+  `text_muted`. A conversation and a message end with their time, in
+  `text::SM` and `text_muted`, right-aligned in 48 at least. The words of
+  the query are SemiBold in `text`.
+- Highlight: one row holds `menu_highlight`, for the keys and the pointer
+  alike. Up and Down move it, wrap at the ends, and scroll it into view;
+  the pointer takes it when it moves onto a row, not when the list moves
+  under it. Enter or a click opens the row. No row has a hover of its own.
+- Status: with no query, while the daemon searches, and when nothing
+  matches, one centered line in `text::LG` and `text_muted`, padded 40
+  above and below.
+- Key hints: a row padded 16 by 10 on `palette_footer`, with a
+  `menu_separator` line over it and the radius of the panel less its edge
+  on its lower corners (4.3, rule 2). Each hint is its keys, then, 4 after
+  them, its action in `text::MD` Medium and `text_muted`; hints stand 12
+  apart. A key is 20 tall and 20 wide at least, radius 4, on `badge`, in
+  `text::SM` and `text_secondary`; an arrow key is a 12 icon. The hints are
+  Navigate, Open (only while a row can be opened), and Close.
 
 ## 6. What not to do
 

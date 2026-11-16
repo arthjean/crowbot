@@ -77,6 +77,10 @@ pub struct Theme {
     pub round_button: Rgba,
     pub round_button_hover: Rgba,
     pub round_button_edge: Rgba,
+    /// The search palette: the veil over the window behind it, and the fill
+    /// of its row of key hints.
+    pub palette_scrim: Rgba,
+    pub palette_footer: Rgba,
 }
 
 impl Global for Theme {}
@@ -164,6 +168,8 @@ impl Theme {
             round_button: rgb(0x26_26_26),
             round_button_hover: rgb(0x2e_2e_2e),
             round_button_edge: white(0.08),
+            palette_scrim: alpha_of(rgb(0x0d_0d_0d), 0.64),
+            palette_footer: white(0.025),
         }
     }
 
@@ -231,6 +237,8 @@ impl Theme {
             round_button: rgb(0xf0_f0_f2),
             round_button_hover: rgb(0xe8_e8_eb),
             round_button_edge: ink(0.08),
+            palette_scrim: alpha_of(rgb(0xe8_e8_eb), 0.6),
+            palette_footer: ink(0.025),
         }
     }
 
@@ -243,14 +251,20 @@ impl Theme {
                 spread_radius: size::HAIRLINE,
                 inset: false,
             },
-            BoxShadow {
-                color: self.shadow_menu.into(),
-                offset: point(px(0.), menu::SHADOW_DROP),
-                blur_radius: menu::SHADOW_BLUR,
-                spread_radius: -menu::SHADOW_DROP,
-                inset: false,
-            },
+            self.drop_shadow(),
         ]
+    }
+
+    /// The drop of the menu shadow alone, for a surface whose only edge is
+    /// its own 1 px border, such as the search palette.
+    pub fn drop_shadow(&self) -> BoxShadow {
+        BoxShadow {
+            color: self.shadow_menu.into(),
+            offset: point(px(0.), menu::SHADOW_DROP),
+            blur_radius: menu::SHADOW_BLUR,
+            spread_radius: -menu::SHADOW_DROP,
+            inset: false,
+        }
     }
 }
 
@@ -442,6 +456,36 @@ pub mod picker {
     pub const MARK_OFF_SHOWN: f32 = 0.6;
 }
 
+/// The search palette: a field with no edge over groups of results, then a
+/// row of key hints.
+pub mod palette {
+    use super::{Pixels, px};
+
+    pub const WIDTH: Pixels = px(576.);
+    pub const MAX_HEIGHT: Pixels = px(420.);
+    /// The palette starts this share of the window height below its top, and
+    /// keeps the same share free under it.
+    pub const WINDOW_SHARE: f32 = 0.1;
+    /// Radius 14 around 6 of padding holds rows of radius 8.
+    pub const RADIUS: Pixels = px(14.);
+    pub const PADDING: Pixels = px(6.);
+    pub const ROW_RADIUS: Pixels = px(8.);
+    pub const INPUT: Pixels = px(48.);
+    /// The search icon, an avatar, or the icon of a result: the text of the
+    /// field and of every row starts after it.
+    pub const LEAD: Pixels = px(20.);
+    pub const LEAD_GLYPH: Pixels = px(11.);
+    pub const ROW_PADDING_Y: Pixels = px(6.);
+    /// The most of a row that the text beside its title may take.
+    pub const CONTEXT_SHARE: f32 = 0.45;
+    pub const TIME_MIN: Pixels = px(48.);
+    pub const STATUS_PADDING_Y: Pixels = px(40.);
+    pub const FOOTER_PADDING_X: Pixels = px(16.);
+    pub const FOOTER_PADDING_Y: Pixels = px(10.);
+    pub const KEY: Pixels = px(20.);
+    pub const KEY_RADIUS: Pixels = px(4.);
+}
+
 /// The settings page: a column of sections at the width of the sidebar,
 /// beside groups of rows in a centered column.
 pub mod settings {
@@ -579,8 +623,6 @@ pub mod size {
     pub const AVATAR_CREATION_LIFT: Pixels = px(8.);
     pub const AVATAR_PANEL: Pixels = px(62.);
     pub const AVATAR_PANEL_GLYPH: Pixels = px(26.);
-    pub const AVATAR_RESULT: Pixels = px(20.);
-    pub const AVATAR_RESULT_GLYPH: Pixels = px(11.);
     pub const SWATCH_BUTTON: Pixels = px(28.);
     pub const SWATCH: Pixels = px(18.);
     pub const GLYPH_CELL: Pixels = px(33.);
@@ -698,12 +740,6 @@ pub mod layout {
     pub const PANEL_ROW: Pixels = px(40.);
     pub const INSTRUCTIONS_MIN_ROWS: f32 = 3.;
     pub const INSTRUCTIONS_MAX_ROWS: f32 = 12.;
-    pub const PALETTE_TOP: Pixels = px(112.);
-    pub const PALETTE_WIDTH: Pixels = px(640.);
-    pub const PALETTE_INPUT: Pixels = px(48.);
-    pub const PALETTE_RESULTS: Pixels = px(400.);
-    pub const PALETTE_ROW: Pixels = px(36.);
-    pub const PALETTE_HEADING: Pixels = px(28.);
 }
 
 #[cfg(test)]
@@ -1053,6 +1089,15 @@ mod tests {",
                     hex(fill)
                 );
             }
+            // The search palette: its rows, the row the keys are on, and
+            // its key hints.
+            let palette_row = over(theme.menu_highlight, theme.sheet);
+            let palette_footer = over(theme.palette_footer, theme.sheet);
+            let key_cap = over(theme.badge, palette_footer);
+            assert!(contrast(theme.text, palette_row) >= 4.5);
+            assert!(contrast(theme.text_muted, palette_row) >= 4.5);
+            assert!(contrast(theme.text_muted, palette_footer) >= 4.5);
+            assert!(contrast(theme.text_secondary, key_cap) >= 4.5);
             // A row of the settings page, and its controls.
             assert!(contrast(theme.text_muted, theme.surface_raised) >= 4.5);
             assert!(contrast(theme.text, theme.surface_raised) >= 4.5);

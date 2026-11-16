@@ -2300,7 +2300,11 @@ impl Render for Workspace {
                     .then(|| self.render_settings_select(&theme, window, cx))
                     .flatten(),
             )
-            .children(shell.then(|| self.render_palette(&theme, cx)).flatten())
+            .children(
+                shell
+                    .then(|| self.render_palette(&theme, window, cx))
+                    .flatten(),
+            )
             .children(self.render_toast(&theme, cx))
             .into_any_element();
         match &self.frames {
