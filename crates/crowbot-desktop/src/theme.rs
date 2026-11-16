@@ -36,6 +36,7 @@ pub struct Theme {
     pub on_accent: Rgba,
     pub success: Rgba,
     pub success_text: Rgba,
+    pub success_soft: Rgba,
     pub warning: Rgba,
     pub warning_text: Rgba,
     pub warning_soft: Rgba,
@@ -134,6 +135,7 @@ impl Theme {
             on_accent: rgb(0xff_ff_ff),
             success: rgb(0x31_cf_76),
             success_text: rgb(0x31_cf_76),
+            success_soft: alpha_of(rgb(0x31_cf_76), 0.12),
             warning: rgb(0xff_94_12),
             warning_text: rgb(0xff_94_12),
             warning_soft: alpha_of(rgb(0xff_94_12), 0.12),
@@ -200,6 +202,7 @@ impl Theme {
             on_accent: rgb(0xff_ff_ff),
             success: rgb(0x1f_a8_5a),
             success_text: rgb(0x18_7a_41),
+            success_soft: alpha_of(rgb(0x1f_a8_5a), 0.08),
             warning: rgb(0xf0_8a_00),
             warning_text: rgb(0x9c_52_00),
             warning_soft: alpha_of(rgb(0xf0_8a_00), 0.14),
@@ -439,6 +442,38 @@ pub mod picker {
     pub const MARK_OFF_SHOWN: f32 = 0.6;
 }
 
+/// The settings page: a column of sections at the width of the sidebar,
+/// beside groups of rows in a centered column.
+pub mod settings {
+    use super::{Pixels, px};
+
+    /// The section column is as wide as the sidebar, and never narrower.
+    pub const NAV_MIN: f32 = 220.;
+    pub const NAV_PADDING_X: Pixels = px(12.);
+    pub const NAV_PADDING_TOP: Pixels = px(16.);
+    /// The title and the text of a search result start this far in from the
+    /// edge of the section rows.
+    pub const NAV_TEXT_INSET: Pixels = px(8.);
+    pub const NAV_ROW: Pixels = px(32.);
+    pub const NAV_ROW_GAP: Pixels = px(4.);
+    pub const RESULT_PADDING_Y: Pixels = px(6.);
+    /// The path in the title band starts this far after the section column.
+    pub const PATH_INSET: Pixels = px(8.);
+    /// The widest line of the groups.
+    pub const COLUMN: Pixels = px(720.);
+    /// A content pane narrower than this pads less, and one narrower than
+    /// `STACK_BELOW` puts the control of a row under its text.
+    pub const COMPACT_BELOW: f32 = 520.;
+    pub const STACK_BELOW: f32 = 460.;
+    pub const ROW_MIN: Pixels = px(64.);
+    pub const SELECT_WIDTH: Pixels = px(168.);
+    pub const LOGO_TILE: Pixels = px(48.);
+    pub const LOGO: Pixels = px(24.);
+    pub const ROW_LOGO: Pixels = px(20.);
+    pub const BADGE_HEIGHT: Pixels = px(22.);
+    pub const BADGE_DOT: Pixels = px(6.);
+}
+
 pub mod control {
     use super::{Pixels, px};
 
@@ -549,7 +584,6 @@ pub mod size {
     pub const SWATCH_BUTTON: Pixels = px(28.);
     pub const SWATCH: Pixels = px(18.);
     pub const GLYPH_CELL: Pixels = px(33.);
-    pub const STATE_DOT: Pixels = px(8.);
     pub const RING: Pixels = px(2.);
     pub const PROVIDER_RING: Pixels = px(28.);
     /// A round icon button, such as search and new bot over the bot list.
@@ -664,10 +698,6 @@ pub mod layout {
     pub const PANEL_ROW: Pixels = px(40.);
     pub const INSTRUCTIONS_MIN_ROWS: f32 = 3.;
     pub const INSTRUCTIONS_MAX_ROWS: f32 = 12.;
-    pub const SETTINGS_WIDTH: Pixels = px(760.);
-    pub const SETTINGS_HEIGHT: Pixels = px(520.);
-    pub const SETTINGS_NAV: Pixels = px(196.);
-    pub const SETTINGS_ROW: Pixels = px(64.);
     pub const PALETTE_TOP: Pixels = px(112.);
     pub const PALETTE_WIDTH: Pixels = px(640.);
     pub const PALETTE_INPUT: Pixels = px(48.);
@@ -1009,6 +1039,23 @@ mod tests {",
                 contrast(theme.danger_text, over(theme.danger_soft, theme.canvas)) >= 4.5,
                 "danger text on its soft fill"
             );
+            // The state badge of a provider, on the settings page.
+            for (text, fill) in [
+                (theme.success_text, theme.success_soft),
+                (theme.warning_text, theme.warning_soft),
+                (theme.danger_text, theme.danger_soft),
+                (theme.text_secondary, theme.badge),
+            ] {
+                assert!(
+                    contrast(text, over(fill, theme.canvas)) >= 4.5,
+                    "{} on the badge {}",
+                    hex(text),
+                    hex(fill)
+                );
+            }
+            // A row of the settings page, and its controls.
+            assert!(contrast(theme.text_muted, theme.surface_raised) >= 4.5);
+            assert!(contrast(theme.text, theme.surface_raised) >= 4.5);
         }
     }
 

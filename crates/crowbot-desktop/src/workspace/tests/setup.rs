@@ -1,5 +1,5 @@
 //! Setup and settings: the creation form, the settings panel of a bot, the
-//! settings dialog, and the search.
+//! settings page, and the search.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -1004,7 +1004,7 @@ fn a_change_to_the_level_the_model_or_the_instructions_shows_in_the_header_and_t
     assert_eq!(text_of(&workspace, cx, |this| &this.panel_name), "Wren");
 }
 
-// US-028: the settings dialog.
+// US-028: the settings page.
 
 fn info() -> DaemonInfo {
     DaemonInfo {
@@ -1014,39 +1014,64 @@ fn info() -> DaemonInfo {
     }
 }
 
+/// Opens the menu of a select and takes one of its rows.
+fn choose(cx: &mut VisualTestContext, select: &'static str, row: &'static str) {
+    click(cx, select);
+    click(cx, row);
+}
+
 #[gpui::test]
-fn the_settings_dialog_has_general_providers_and_about(cx: &mut TestAppContext) {
+fn the_settings_page_has_general_providers_and_about(cx: &mut TestAppContext) {
     let (workspace, mut daemon, cx) = open(cx);
     daemon.connect(two_bots(), cx);
     daemon.sent();
-    assert!(!shown(cx, "settings-dialog"));
+    assert!(!shown(cx, "settings-page"));
 
     click(cx, "open-settings");
-    assert!(shown(cx, "settings-dialog"));
+    assert!(shown(cx, "settings-page"));
+    assert!(
+        !shown(cx, "sidebar") && !shown(cx, "conversation-header"),
+        "the page takes the place of the bots and of the conversation"
+    );
     assert_eq!(daemon.sent(), [ClientMessage::GetDaemonInfo]);
     let sections = tops(
         cx,
         &["settings-general", "settings-providers", "settings-about"],
     );
     assert!(sections.windows(2).all(|pair| pair[0] < pair[1]));
-    for control in [
-        "appearance-system",
-        "appearance-light",
-        "appearance-dark",
-        "send-enter",
-        "send-mod-enter",
-    ] {
+    for control in ["settings-theme", "settings-send"] {
         assert!(shown(cx, control), "{control}");
     }
+    // The section column is as wide as the sidebar, and the groups share
+    // one column beside it.
+    let (nav, body) = (bounds(cx, "settings-sections"), bounds(cx, "settings-body"));
+    assert!(nav.right() <= body.left());
+    assert_eq!(
+        bounds(cx, "settings-theme").right(),
+        bounds(cx, "settings-send").right()
+    );
 
     click(cx, "settings-providers");
     assert!(shown(cx, "providers-loading"));
-    assert!(!shown(cx, "appearance-system"));
+    assert!(!shown(cx, "settings-theme"));
     daemon.tell(
         ServerMessage::Providers(vec![provider(ProviderState::Ready)]),
         cx,
     );
+    // A provider is a row of the list, and has a page of its own.
+    assert!(shown(cx, "provider-0"));
+    assert!(!shown(cx, "provider-0-state"));
+    click(cx, "provider-0");
     assert!(shown(cx, "provider-0-state"));
+    assert!(shown(cx, "settings-path-parent"));
+    click(cx, "settings-path-parent");
+    assert!(shown(cx, "provider-0") && !shown(cx, "provider-0-state"));
+    click(cx, "provider-0");
+    click(cx, "close-settings");
+    assert!(
+        shown(cx, "provider-0") && !shown(cx, "provider-0-state"),
+        "Back goes one level up, to the list"
+    );
 
     click(cx, "settings-about");
     daemon.tell(ServerMessage::DaemonInfo(info()), cx);
@@ -1065,19 +1090,25 @@ fn the_settings_dialog_has_general_providers_and_about(cx: &mut TestAppContext) 
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!shown(cx, "settings-dialog"));
+    assert!(!shown(cx, "settings-page"));
+    assert!(shown(cx, "sidebar"));
     cx.simulate_keystrokes(if cfg!(target_os = "macos") {
         "cmd-,"
     } else {
         "ctrl-,"
     });
     cx.run_until_parked();
-    assert!(
-        shown(cx, "appearance-system"),
-        "the dialog opens on General"
-    );
+    assert!(shown(cx, "settings-theme"), "the page opens on General");
     click(cx, "close-settings");
-    assert!(!shown(cx, "settings-dialog"));
+    assert!(!shown(cx, "settings-page"));
+
+    // The rail shows which page is open, and goes back to the bots.
+    click(cx, "open-settings");
+    click(cx, "open-bots");
+    assert!(!shown(cx, "settings-page"));
+    // The ring of a provider opens the page of that provider.
+    click(cx, "rail-provider-claude");
+    assert!(shown(cx, "provider-0-state"));
 }
 
 #[gpui::test]
@@ -1088,8 +1119,9 @@ fn a_preference_change_applies_at_once_and_follows_the_other_clients(cx: &mut Te
     daemon.sent();
     let theme = |cx: &mut VisualTestContext| cx.update(|_, cx| Theme::of(cx));
 
-    click(cx, "appearance-dark");
+    choose(cx, "settings-theme", "settings-theme-2");
     assert_eq!(theme(cx), Theme::dark());
+    assert!(!shown(cx, "settings-select-menu"));
     assert_eq!(
         daemon.sent(),
         [ClientMessage::SetPreferences {
@@ -1099,13 +1131,13 @@ fn a_preference_change_applies_at_once_and_follows_the_other_clients(cx: &mut Te
             },
         }]
     );
-    click(cx, "appearance-dark");
+    choose(cx, "settings-theme", "settings-theme-2");
     assert_eq!(daemon.sent(), [], "the same value is not sent again");
-    click(cx, "appearance-light");
+    choose(cx, "settings-theme", "settings-theme-1");
     assert_eq!(theme(cx), Theme::light());
     daemon.sent();
 
-    click(cx, "send-mod-enter");
+    choose(cx, "settings-send", "settings-send-1");
     assert_eq!(
         daemon.sent(),
         [ClientMessage::SetPreferences {
@@ -1138,6 +1170,99 @@ fn a_preference_change_applies_at_once_and_follows_the_other_clients(cx: &mut Te
 }
 
 #[gpui::test]
+fn a_select_opens_under_its_row_and_answers_to_the_keyboard(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "open-settings");
+    daemon.sent();
+    let appearance =
+        |cx: &mut VisualTestContext| workspace.read_with(cx, |this, _| this.preferences.appearance);
+    assert_eq!(appearance(cx), Appearance::System);
+
+    // The menu hangs under the select, on its trailing edge.
+    click(cx, "settings-theme");
+    let (select, menu) = (
+        bounds(cx, "settings-theme"),
+        bounds(cx, "settings-select-menu"),
+    );
+    assert!(menu.top() >= select.bottom(), "{menu:?} under {select:?}");
+    assert_eq!(menu.right(), select.right());
+
+    // A press outside closes the menu and changes nothing.
+    click(cx, "settings-sections");
+    assert!(!shown(cx, "settings-select-menu"));
+    assert_eq!(daemon.sent(), []);
+    assert!(shown(cx, "settings-page"));
+
+    // Escape closes the menu first, and leaves the page open.
+    click(cx, "settings-theme");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!shown(cx, "settings-select-menu"));
+    assert!(shown(cx, "settings-page"));
+
+    // The arrows move through the values, and Enter takes the one they are on.
+    click(cx, "settings-theme");
+    cx.simulate_keystrokes("down down");
+    press_enter(cx);
+    assert!(!shown(cx, "settings-select-menu"));
+    assert_eq!(appearance(cx), Appearance::Dark);
+    press_enter(cx);
+    cx.simulate_keystrokes("up up up");
+    press_enter(cx);
+    assert_eq!(appearance(cx), Appearance::System, "Up stops at the first");
+}
+
+#[gpui::test]
+fn the_search_lists_the_settings_that_match_and_opens_the_one_picked(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "open-settings");
+    daemon.tell(
+        ServerMessage::Providers(vec![provider(ProviderState::SignedOut)]),
+        cx,
+    );
+
+    click(cx, "settings-search");
+    cx.simulate_input("claude");
+    cx.run_until_parked();
+    assert!(
+        !shown(cx, "settings-general"),
+        "the results take the place of the sections"
+    );
+    assert!(shown(cx, "settings-result-0") && !shown(cx, "settings-result-1"));
+    press_enter(cx);
+    assert!(
+        shown(cx, "provider-0-sign-in"),
+        "the page of the provider opens"
+    );
+    assert!(
+        shown(cx, "settings-providers"),
+        "the search is cleared, and the sections are back"
+    );
+
+    click(cx, "settings-search");
+    cx.simulate_input("zzz");
+    cx.run_until_parked();
+    assert!(shown(cx, "settings-no-results"));
+    // Escape clears the search first, then closes the page.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(shown(cx, "settings-page") && shown(cx, "settings-general"));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!shown(cx, "settings-page"));
+
+    // A result picked with the pointer opens its section.
+    click(cx, "open-settings");
+    click(cx, "settings-search");
+    cx.simulate_input("database");
+    cx.run_until_parked();
+    click(cx, "settings-result-0");
+    assert!(shown(cx, "about-database"));
+}
+
+#[gpui::test]
 fn each_provider_shows_its_state_and_the_control_that_fixes_it(cx: &mut TestAppContext) {
     let (_workspace, mut daemon, cx) = open(cx);
     daemon.connect(two_bots(), cx);
@@ -1152,6 +1277,8 @@ fn each_provider_shows_its_state_and_the_control_that_fixes_it(cx: &mut TestAppC
     );
     daemon.sent();
     assert!(shown(cx, "provider-0"));
+    click(cx, "provider-0");
+    assert!(shown(cx, "provider-0-state"));
     assert!(!shown(cx, "provider-0-sign-in"));
 
     daemon.tell(
@@ -1212,6 +1339,108 @@ fn each_provider_shows_its_state_and_the_control_that_fixes_it(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn the_providers_are_listed_by_whether_they_can_run_a_bot(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    click(cx, "open-settings");
+    click(cx, "settings-providers");
+    let named = |id: &str, name: &str, state| ProviderStatus {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        ..provider(state)
+    };
+    daemon.tell(
+        ServerMessage::Providers(vec![
+            named("claude", "Claude", ProviderState::SignedOut),
+            named("codex", "ChatGPT", ProviderState::Ready),
+            named("grok", "Grok", ProviderState::NotInstalled),
+        ]),
+        cx,
+    );
+    // The provider that is ready comes first, under its own heading.
+    let rows = tops(cx, &["provider-1", "provider-0", "provider-2"]);
+    assert!(rows.windows(2).all(|pair| pair[0] < pair[1]), "{rows:?}");
+    let (first, second) = (bounds(cx, "provider-1"), bounds(cx, "provider-0"));
+    assert!(
+        second.top() - first.bottom() > px(24.),
+        "the two groups stand apart"
+    );
+    assert_eq!(first.left(), second.left());
+    assert_eq!(first.right(), second.right());
+    assert_eq!(first.size.height, px(64.));
+
+    // Every provider is ready: one group is left.
+    daemon.tell(
+        ServerMessage::Providers(vec![
+            named("claude", "Claude", ProviderState::Ready),
+            named("codex", "ChatGPT", ProviderState::Ready),
+        ]),
+        cx,
+    );
+    let (first, second) = (bounds(cx, "provider-0"), bounds(cx, "provider-1"));
+    assert_eq!(second.top() - first.bottom(), px(1.), "one line between");
+}
+
+#[gpui::test]
+fn a_narrow_window_keeps_every_control_of_the_settings_in_reach(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    cx.simulate_resize(size(layout::WINDOW_MIN_WIDTH, layout::WINDOW_MIN_HEIGHT));
+    click(cx, "open-settings");
+    daemon.tell(
+        ServerMessage::Providers(vec![provider(ProviderState::SignedOut)]),
+        cx,
+    );
+    let body = bounds(cx, "settings-body");
+    for control in ["settings-theme", "settings-send"] {
+        let select = bounds(cx, control);
+        assert!(
+            select.left() >= body.left() && select.right() <= body.right(),
+            "{control} is cut: {select:?} in {body:?}"
+        );
+    }
+    click(cx, "settings-providers");
+    click(cx, "provider-0");
+    let sign_in = bounds(cx, "provider-0-sign-in");
+    assert!(sign_in.left() >= body.left() && sign_in.right() <= body.right());
+}
+
+#[gpui::test]
+fn the_settings_page_keeps_its_measures(cx: &mut TestAppContext) {
+    let (_workspace, mut daemon, cx) = open(cx);
+    daemon.connect(two_bots(), cx);
+    cx.simulate_resize(size(px(1186.), px(770.)));
+    click(cx, "open-settings");
+    let at = |x: f32, y: f32, width: f32, height: f32| Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(width), px(height)),
+    };
+    // The title band: Back over the section column, then the section shown.
+    assert_eq!(bounds(cx, "close-settings"), at(62., 5., 28., 28.));
+    assert_eq!(bounds(cx, "settings-title").left(), px(340.));
+    // The section column: 12 in from each side of the 280 of the sidebar,
+    // the search 53 under the edge of the card, the sections 44 under it.
+    assert_eq!(bounds(cx, "settings-search"), at(65., 91., 255., 32.));
+    assert_eq!(bounds(cx, "settings-general"), at(65., 135., 255., 32.));
+    assert_eq!(bounds(cx, "settings-providers").top(), px(171.));
+    // The groups: a column of 720, centered, 51 under the edge of the card,
+    // with rows of 64 and a select of 168 by 32, 16 in from the card.
+    assert_eq!(bounds(cx, "settings-theme"), at(933., 105., 168., 32.));
+    assert_eq!(bounds(cx, "settings-send").top(), px(105. + 64. + 50.));
+    let body = bounds(cx, "settings-body");
+    assert_eq!(
+        bounds(cx, "settings-theme").right() + px(16. + 24. + 40.),
+        body.right(),
+        "the column is centered in {body:?}"
+    );
+    // A window wider than the column leaves the same room on each side of it.
+    cx.simulate_resize(size(px(1600.), px(770.)));
+    let (body, select) = (bounds(cx, "settings-body"), bounds(cx, "settings-theme"));
+    let trailing = body.right() - select.right() - px(16.);
+    assert_eq!(select.right() + px(16.) - px(720.) - body.left(), trailing);
+}
+
+#[gpui::test]
 fn an_unreachable_daemon_disables_the_settings_and_says_why(cx: &mut TestAppContext) {
     let (workspace, mut daemon, cx) = open(cx);
     daemon.connect(two_bots(), cx);
@@ -1220,7 +1449,7 @@ fn an_unreachable_daemon_disables_the_settings_and_says_why(cx: &mut TestAppCont
         ServerMessage::Providers(vec![provider(ProviderState::SignedOut)]),
         cx,
     );
-    assert!(!shown(cx, "settings-notice"));
+    assert!(!shown(cx, "connection-notice"));
     daemon.sent();
     let theme = cx.update(|_, cx| Theme::of(cx));
 
@@ -1228,17 +1457,22 @@ fn an_unreachable_daemon_disables_the_settings_and_says_why(cx: &mut TestAppCont
         ConnectionEvent::Disconnected("the pipe closed".to_owned()),
         cx,
     );
-    assert!(shown(cx, "settings-dialog"));
-    assert!(shown(cx, "settings-notice"));
-    assert!(bounds(cx, "settings-notice").top() < bounds(cx, "appearance-dark").top());
-    click(cx, "appearance-dark");
-    click(cx, "send-mod-enter");
+    assert!(shown(cx, "settings-page"));
+    assert!(shown(cx, "connection-notice"));
+    assert!(bounds(cx, "connection-notice").bottom() <= bounds(cx, "settings-theme").top());
+    click(cx, "settings-theme");
+    assert!(
+        !shown(cx, "settings-select-menu"),
+        "a select does not open while the daemon is away"
+    );
     assert_eq!(cx.update(|_, cx| Theme::of(cx)), theme);
     assert_eq!(
         workspace.read_with(cx, |this, _| this.preferences.clone()),
         Preferences::default()
     );
+    // The sections can still be read.
     click(cx, "settings-providers");
+    click(cx, "provider-0");
     click(cx, "provider-0-sign-in");
     click(cx, "provider-0-check");
     assert_eq!(
@@ -1248,7 +1482,7 @@ fn an_unreachable_daemon_disables_the_settings_and_says_why(cx: &mut TestAppCont
     );
 
     daemon.link(ConnectionEvent::Connected, cx);
-    assert!(!shown(cx, "settings-notice"));
+    assert!(!shown(cx, "connection-notice"));
     let sent = daemon.sent();
     assert!(sent.contains(&ClientMessage::ListProviders), "{sent:?}");
     assert!(sent.contains(&ClientMessage::GetDaemonInfo), "{sent:?}");

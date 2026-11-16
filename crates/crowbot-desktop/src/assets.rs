@@ -29,8 +29,10 @@ macro_rules! icons {
 
 icons! {
     ArrowDown => "arrow_down.svg",
+    ArrowLeft => "arrow_left.svg",
     ArrowUp => "arrow_up.svg",
     Bird => "bird.svg",
+    Bot => "bot.svg",
     Check => "check.svg",
     ChevronDown => "chevron_down.svg",
     ChevronUpDown => "chevrons_up_down.svg",

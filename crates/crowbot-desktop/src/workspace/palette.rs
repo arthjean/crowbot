@@ -217,6 +217,9 @@ impl Workspace {
     fn open_hit(&mut self, hit: Hit, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.palette_query.read(cx).text().trim().to_owned();
         self.palette = None;
+        // A result is a bot or a conversation: the settings page gives way.
+        self.settings = None;
+        self.executable_edit = None;
         let (bot_id, conversation_id) = match hit {
             Hit::Bot(bot_id) => {
                 self.creation = None;

@@ -1,12 +1,12 @@
 use crowbot_protocol::PROTOCOL_VERSION;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Role, SharedString, Stateful, Window, WindowControlArea,
-    div, prelude::*,
+    AnyElement, Context, Div, FontWeight, KeyDownEvent, Role, SharedString, Stateful, Window,
+    WindowControlArea, div, prelude::*,
 };
 
 use super::{Link, Screen, Workspace};
 use crate::assets::Icon;
-use crate::theme::{Theme, icon as icon_size, layout, radius, space, text};
+use crate::theme::{Theme, icon as icon_size, layout, radius, settings, space, text};
 use crate::ui::{self, ButtonKind};
 
 pub(super) fn update_advice(daemon_protocol: u32) -> &'static str {
@@ -60,51 +60,75 @@ impl Workspace {
             width - shown.width - f32::from(layout::SIDE_PANEL) >= layout::CONVERSATION_MIN;
         let live = self.live();
         self.guard_focus(live, window, cx);
-        let composing =
-            self.history.is_none() && self.selected_bot.is_some() && self.load_error.is_none();
-        let creating = self.creation.is_some();
-        let pane = div()
-            .id("conversation")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col();
-        let pane = if creating {
-            pane.child(self.render_creation(theme, window, cx))
-        } else {
-            pane.child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_transcript(theme, cx)),
-            )
-            .children(composing.then(|| self.render_composer(theme, window, cx)))
-        };
-        let panes = div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .child(self.render_sidebar(shown, theme, cx))
-            .child(pane)
-            .child(self.render_resizer(shown, theme, cx))
-            .children(self.render_bot_panel(docked, theme, window, cx))
-            .children((!live).then(|| {
-                div()
-                    .id("inert")
-                    .debug_selector(|| "inert".into())
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-            }));
+        // The settings are a page: they take the place of the bots, the
+        // conversation, and the title band of the bot.
+        let nav_width = shown.width.max(settings::NAV_MIN);
+        let settings_page = self.render_settings_page(nav_width, width, theme, window, cx);
         let main = div()
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
             .flex_col()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.settings_key(event, window, cx);
+            }));
+        let main = if let Some(page) = settings_page {
+            main.child(
+                div()
+                    .flex_none()
+                    .h(layout::TOP_ROW)
+                    .flex()
+                    .child(self.render_settings_topbar(nav_width, theme, cx))
+                    .child(self.render_settings_path(theme, cx))
+                    .children(self.render_caption_buttons(theme, window, cx)),
+            )
             .child(
+                card(theme)
+                    .flex_col()
+                    .children(self.render_link_notice(theme, cx))
+                    .child(page),
+            )
+        } else {
+            let composing =
+                self.history.is_none() && self.selected_bot.is_some() && self.load_error.is_none();
+            let creating = self.creation.is_some();
+            let pane = div()
+                .id("conversation")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col();
+            let pane = if creating {
+                pane.child(self.render_creation(theme, window, cx))
+            } else {
+                pane.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_transcript(theme, cx)),
+                )
+                .children(composing.then(|| self.render_composer(theme, window, cx)))
+            };
+            let panes = div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(self.render_sidebar(shown, theme, cx))
+                .child(pane)
+                .child(self.render_resizer(shown, theme, cx))
+                .children(self.render_bot_panel(docked, theme, window, cx))
+                .children((!live).then(|| {
+                    div()
+                        .id("inert")
+                        .debug_selector(|| "inert".into())
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                }));
+            main.child(
                 div()
                     .flex_none()
                     .h(layout::TOP_ROW)
@@ -122,7 +146,8 @@ impl Workspace {
                     .flex_col()
                     .children(self.render_link_notice(theme, cx))
                     .child(panes),
-            );
+            )
+        };
         root.child(
             div()
                 .flex_1()

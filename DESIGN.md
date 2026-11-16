@@ -88,7 +88,7 @@ the one the bot runs on. No decoration stands in for data.
 | Region | Role | Geometry |
 | --- | --- | --- |
 | Window | Client-drawn title band on Windows, traffic lights on macOS | Default 1080 by 760, minimum 640 by 420; title band 38 tall (`layout::TOP_ROW`); caption buttons 46 wide |
-| Rail | One ring per provider, Settings | 52 wide on the frame color; logo row 38; buttons 36 with 20 px icons at radius 12, gap 6, bottom padding 12; a 24 by 1 separator above Settings |
+| Rail | The pages (Bots, Settings) and one ring per provider | 52 wide on the frame color; logo row 38; buttons 36 with 20 px icons at radius 12, gap 6, bottom padding 12; a 24 by 1 separator above Settings |
 | Sidebar | The bots, grouped: Pinned tiles, Needs you, Unread, Bots, Hidden | Default 280, 128 to 400, compact 88 below a 110 px drag; a 16 px resize handle on its right edge; no fill of its own, the card shows through |
 | Card | Holds the sidebar, the conversation, and the docked panel | Inset 4 from the right and bottom edges, radius 14, `canvas` fill, 1 px `border` edge, on the `frame` color |
 | Conversation | Transcript and composer | Column 760; keeps 424 beside the sidebar before the sidebar shrinks |
@@ -124,6 +124,7 @@ never hex values.
 | `text`, `text_secondary`, `text_muted`, `text_dim` | Primary, labels, secondary, disabled marks | `#ffffff`, `#dcdcdc`, `#979797`, `#6a6a6a` | `#141414`, `#3a3a3c`, `#6b6b70`, `#8e8e93` |
 | `accent` | Focus edge, selection, links | `#007cf7` | `#007cf7` |
 | `success`, `warning`, `danger` | Provider and bot states | `#31cf76`, `#ff9412`, `#fd2f3b` | `#1fa85a`, `#f08a00`, `#e8222d` |
+| `success_soft`, `warning_soft`, `danger_soft` | The fill of a state badge, under the matching `_text` color | each state color at 0.12, 0.12, 0.16 | at 0.08, 0.14, 0.12 |
 | `inverse_surface`, `inverse_text` | The primary button | `#f0f0f0` on `#141414` | `#1c1c1e` on `#ffffff` |
 
 Text roles hold 4.5:1 on every surface they sit on, and focus marks 3:1; the
@@ -145,8 +146,8 @@ No other surface carries a shadow. Depth comes from the surface steps
 
 | Element | Radius | Notes |
 | --- | --- | --- |
-| Card, settings dialog, wide picker (`menu::WIDE_RADIUS`) | 14 | A wide picker pads 6, so its rows and inner panels take 8 |
-| Template cards, toasts | 12 (`radius::LG`) | |
+| Card, wide picker (`menu::WIDE_RADIUS`) | 14 | A wide picker pads 6, so its rows and inner panels take 8 |
+| Template cards, toasts, the cards and the logo tile of Settings | 12 (`radius::LG`) | A clickable row at an end of a Settings card keeps that 12 on its outer corners |
 | Plain menu (`menu::RADIUS`) | 8 | Pads 4, so its rows take 4 |
 | Sidebar rows, text fields, the model trigger, primary and wide buttons | 8 (`radius::MD`) | |
 | Menu rows in a plain menu (`menu::ROW_RADIUS`) | 4 | |
@@ -232,13 +233,14 @@ Motion explains a state change. Nothing animates for decoration.
 ### 5.1 Rail (`workspace/rail.rs`)
 
 App-wide controls only: what belongs to one bot never goes there. Top: the
-logo row, which drags the window. Bottom: one button per provider, a 28 px
-ring of 2 px in the provider's state color (`forms::provider_color`: success
-ready, warning signed out, danger runtime missing, `text_dim` not installed or
-unknown) around its 14 px logo;
-its tooltip and accessible name say `<name>: <state>`, and it opens Settings at
-Providers. Then the separator and Settings. A page item joins the rail only
-when a second page exists.
+logo row, which drags the window, then Bots, the page of the bots. Bottom: one
+button per provider, a 28 px ring of 2 px in the provider's state color
+(`forms::provider_color`: success ready, warning signed out, danger runtime
+missing, `text_dim` not installed or unknown) around its 14 px logo; its
+tooltip and accessible name say `<name>: <state>`, and it opens the page of
+that provider in Settings. Then the separator and Settings. The page shown
+keeps the `control_hover` fill and its icon in `text`, and its accessible name
+ends with ", selected". A page item joins the rail only when its page exists.
 
 ### 5.2 Title band
 
@@ -384,7 +386,9 @@ Escape or a press outside closes the menu and returns focus.
 `inverse_text`, one per action group, at 0.82 under the pointer
 (`opacity::PRIMARY_HOVER`); a primary that cannot run yet keeps its look at
 0.42 (`ButtonKind::PrimaryDisabled`). Outline: `control` with a
-`border_strong` edge. Ghost: no fill until hover. Danger: `danger_soft` with
+`border_strong` edge. Raised: the outline button of a card, `surface_raised`
+with a `border_strong` edge and `control_active` under the pointer, because
+`control` is the fill of the card itself. Ghost: no fill until hover. Danger: `danger_soft` with
 `danger_text`. The primary action of a form is 36 tall, padding 16, radius 8,
 14 Medium, at least 132 wide. Icon buttons are 28 with a 16 px icon at
 radius 6 and always carry a tooltip.
@@ -394,6 +398,67 @@ radius 6 and always carry a tooltip.
 Dialogs sit on `canvas` at radius 14 or 20 with the `dialog_ring` edge and the
 menu shadow over the overlay. Toasts sit on `sheet` at radius 12. Tooltips sit
 on `surface_raised` at radius 6 with a `border_strong` edge, 12 SemiBold.
+
+### 5.10 Settings (`workspace/settings.rs`, tokens in `theme::settings`)
+
+Settings are a page, not a dialog: they take the place of the sidebar, the
+conversation, and the title band of the bot. The rail stays.
+
+- Title band: over the section column, one Back button (`ui::icon_button`,
+  an arrow, 10 from the edge of the column) that goes one level up: from the
+  page of a provider to the list, and from a section to the bots. Then, 8
+  after the column, the section shown in `text::LG` SemiBold, or the path
+  to the page of a provider: the parent in `text_muted` (a button), a 14
+  chevron, the provider in SemiBold. No Close button stands beside the
+  caption buttons. Escape closes, in this order: an open select, the
+  executable field, the search, the page.
+- Section column: as wide as the sidebar (220 at least), padded 12 on the
+  sides and 16 above, with a `border` line on its trailing edge. "Settings"
+  in `text::XXL` SemiBold, 8 in. 12 under it, the search: a text field
+  (5.4) of 32 with a full radius and a 14 search icon. 12 under it, the
+  sections: rows of 32, 4 apart, radius 8, padded 12, a 16 icon then the
+  name in `text::LG`. The section shown takes `control_hover`, Medium, and
+  `text`; the others are `text_secondary` with a `text_muted` icon, and take
+  `hover` and `text` under the pointer.
+- Search: a query replaces the sections with the rows, the sections, and the
+  providers that hold each of its words; a title that starts with the query
+  comes first. A result is two lines, its section (14 icon, `text::SM`,
+  `text_muted`) over its title. Up and Down move through the results and
+  Enter opens the one they are on, which clears the query. With no result,
+  the column says `No setting matches “<query>”.`
+- Content: a centered column of 720 at most, padded 24 (16 in a pane under
+  520), that scrolls. A group is a heading (`text::MD` Medium,
+  `text_secondary`), then, 8 under it, a card: `surface`, radius 12, no
+  edge. Groups stand 24 apart. Rows are 64 at least, padded 16 by 12, with
+  a `border` line between two rows, inset 16. A row holds a title
+  (`text::TITLE` Medium) over a description (`text::MD`, `text_muted`, 2
+  under), and its control at the trailing edge. In a pane under 460 the
+  control goes under the text.
+- Select: 168 by 32, radius 8, `surface_raised` with a `border_strong`
+  edge, the value in `text::MD` Medium and a 14 up-down chevron;
+  `control_active` under the pointer and while open, `border_focus` on
+  keyboard focus. Its values open 4 under it in a plain `ui::menu_panel`
+  of the same width, aligned on its trailing edge, the chosen one with a
+  check. The arrows open the menu and move through it, Home and End go to
+  its ends, Enter or Space takes the row, Escape or a press outside closes
+  it. While the daemon is away a select is faded and inert.
+- Providers: the providers that are ready under "Connected", the others
+  under "Not connected". A row is a button: a 20 logo, the name over the
+  account or what stops the provider, a state badge unless it is ready,
+  and a 16 chevron. It takes `control_hover` under the pointer and opens
+  the page of the provider.
+- Page of a provider: a 48 tile (`surface_raised`, `border_strong` edge,
+  radius 12) with the 24 logo, the name in `text::XXL` SemiBold beside the
+  state badge, one line that says what stops the provider or that it is
+  ready, and "Check again" at the trailing edge. Then "Account" (the
+  sign-in and its controls) and "Runtime" (the version with its download,
+  and the executable). Buttons on a card are Raised (5.8); the sign-in is
+  the primary.
+- State badge: 22 tall, a full radius, padded 8, a 6 dot then the state in
+  `text::SM` Medium. Ready is `success_text` on `success_soft`, signed out
+  `warning_text` on `warning_soft`, runtime missing `danger_text` on
+  `danger_soft`, and a state with no color `text_secondary` on `badge`.
+  The word carries the state: the color only repeats it.
 
 ## 6. What not to do
 

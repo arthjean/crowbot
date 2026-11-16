@@ -707,92 +707,106 @@ impl Workspace {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let live = self.live();
+        let mut controls = self.sign_in_controls(status, prefix, false, theme, cx);
+        if !status.signing_in {
+            controls.extend(self.runtime_controls(status, prefix, false, theme, cx));
+            controls.push(self.check_control(status, prefix, false, theme, cx));
+        }
+        controls
+    }
+
+    /// A control of a provider, faded while the daemon is away.
+    fn provider_button(&self, button: Stateful<Div>) -> Stateful<Div> {
+        if self.live() {
+            button
+        } else {
+            button.opacity(opacity::DISABLED)
+        }
+    }
+
+    /// The sign-in of a provider: one button per way to sign in, or, while a
+    /// sign-in runs, the page to finish it on and a way to cancel it. On a
+    /// card (`raised`), the row that holds the controls says what the
+    /// sign-in waits for, so the controls come alone.
+    pub(super) fn sign_in_controls(
+        &self,
+        status: &ProviderStatus,
+        prefix: &'static str,
+        raised: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let provider = status.id.clone();
         let name = &status.name;
-        // Several providers show the same controls: each one is spoken with
-        // the name of its provider.
-        let spoken = |label: String| SharedString::from(label);
-        let selector = move |name: &str| format!("{prefix}-{name}");
-        let dimmed = |button: Stateful<Div>| {
-            if live {
-                button
-            } else {
-                button.opacity(opacity::DISABLED)
-            }
+        let outline = if raised {
+            ButtonKind::Raised
+        } else {
+            ButtonKind::Outline
         };
         let mut controls = Vec::new();
         if status.signing_in {
-            let id = provider.clone();
-            let cancel = selector("cancel-sign-in");
-            controls.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::S1_5)
-                    .text_color(theme.text_muted)
-                    .child(ui::spinner(
-                        (prefix, 1_usize),
-                        icon_size::SM,
-                        theme.text_muted,
-                    ))
-                    .child("Finish signing in in your browser.")
-                    .into_any_element(),
-            );
-            // The page asks the person to check that it shows the code of
-            // this sign-in: the row shows it too.
-            if let Some(code) = status.sign_in_url.as_deref().and_then(sign_in_code) {
-                let shown = selector("sign-in-code");
+            if !raised {
                 controls.push(
                     div()
-                        .id((prefix, 4_usize))
-                        .debug_selector(move || shown.clone())
-                        .role(Role::Status)
-                        .aria_label(spoken(format!("Sign-in code of {name}: {code}")))
                         .flex()
                         .items_center()
                         .gap(space::S1_5)
-                        .child(div().text_color(theme.text_muted).child("Code"))
-                        .child(
-                            div()
-                                .font(font::mono())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(code),
-                        )
+                        .text_color(theme.text_muted)
+                        .child(ui::spinner(
+                            (prefix, 1_usize),
+                            icon_size::SM,
+                            theme.text_muted,
+                        ))
+                        .child("Finish signing in in your browser.")
+                        .into_any_element(),
+                );
+                // The page asks the person to check that it shows the code
+                // of this sign-in: the row shows it too.
+                if let Some(code) = status.sign_in_url.as_deref().and_then(sign_in_code) {
+                    controls.push(
+                        div()
+                            .id((prefix, 4_usize))
+                            .debug_selector(move || format!("{prefix}-sign-in-code"))
+                            .role(Role::Status)
+                            .aria_label(SharedString::from(format!(
+                                "Sign-in code of {name}: {code}"
+                            )))
+                            .flex()
+                            .items_center()
+                            .gap(space::S1_5)
+                            .child(div().text_color(theme.text_muted).child("Code"))
+                            .child(
+                                div()
+                                    .font(font::mono())
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(code),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+            if let Some(page) = status.sign_in_url.clone() {
+                controls.push(
+                    ui::button((prefix, 3_usize), "Open the page", outline, theme)
+                        .debug_selector(move || format!("{prefix}-sign-in-page"))
+                        .aria_label(SharedString::from(format!(
+                            "Open the sign-in page of {name}"
+                        )))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_link(&page, cx)))
                         .into_any_element(),
                 );
             }
-            if let Some(page) = status.sign_in_url.clone() {
-                let open = selector("sign-in-page");
-                controls.push(
-                    ui::button(
-                        (prefix, 3_usize),
-                        "Open the page",
-                        ButtonKind::Outline,
-                        theme,
-                    )
-                    .debug_selector(move || open.clone())
-                    .aria_label(spoken(format!("Open the sign-in page of {name}")))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_link(&page, cx)))
-                    .into_any_element(),
-                );
-            }
             controls.push(
-                dimmed(ui::button(
-                    (prefix, 2_usize),
-                    "Cancel",
-                    ButtonKind::Outline,
-                    theme,
-                ))
-                .debug_selector(move || cancel.clone())
-                .aria_label(spoken(format!("Cancel the sign-in to {name}")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.provider_request(crowbot_protocol::ClientMessage::CancelSignIn {
-                        provider: id.clone(),
-                    });
-                    cx.notify();
-                }))
-                .into_any_element(),
+                self.provider_button(ui::button((prefix, 2_usize), "Cancel", outline, theme))
+                    .debug_selector(move || format!("{prefix}-cancel-sign-in"))
+                    .aria_label(SharedString::from(format!("Cancel the sign-in to {name}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.provider_request(ClientMessage::CancelSignIn {
+                            provider: provider.clone(),
+                        });
+                        cx.notify();
+                    }))
+                    .into_any_element(),
             );
             return controls;
         }
@@ -811,22 +825,22 @@ impl Workspace {
             for (index, (method, label)) in methods.into_iter().enumerate() {
                 let id = provider.clone();
                 let sign_in = match &method {
-                    Some(method) => selector(&format!("sign-in-{method}")),
-                    None => selector("sign-in"),
+                    Some(method) => format!("{prefix}-sign-in-{method}"),
+                    None => format!("{prefix}-sign-in"),
                 };
                 let kind = if index == 0 {
                     ButtonKind::Primary
                 } else {
-                    ButtonKind::Outline
+                    outline
                 };
                 let said = match &method {
                     Some(_) => format!("{name}: {label}"),
                     None => format!("Sign in to {name}"),
                 };
                 controls.push(
-                    dimmed(ui::button((prefix, 10 + index), label, kind, theme))
+                    self.provider_button(ui::button((prefix, 10 + index), label, kind, theme))
                         .debug_selector(move || sign_in.clone())
-                        .aria_label(spoken(said))
+                        .aria_label(SharedString::from(said))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.provider_request(ClientMessage::SignIn {
                                 provider: id.clone(),
@@ -838,13 +852,33 @@ impl Workspace {
                 );
             }
         }
+        controls
+    }
+
+    /// The runtime of a provider: its download while it runs, the button
+    /// that starts it, and the page that tells how to get a runtime Crow Bot
+    /// does not install.
+    pub(super) fn runtime_controls(
+        &self,
+        status: &ProviderStatus,
+        prefix: &'static str,
+        raised: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let name = &status.name;
+        let outline = if raised {
+            ButtonKind::Raised
+        } else {
+            ButtonKind::Outline
+        };
+        let mut controls = Vec::new();
         if let Some(install) = status.install {
-            let download = selector("download");
             let progress = download_text(&status.name, install);
             controls.push(
                 div()
                     .id((prefix, 7_usize))
-                    .debug_selector(move || download.clone())
+                    .debug_selector(move || format!("{prefix}-download"))
                     .role(Role::Status)
                     .aria_label(progress.clone())
                     .h(control::MD)
@@ -861,83 +895,84 @@ impl Workspace {
                     .into_any_element(),
             );
         } else if status.state == ProviderState::NotInstalled {
-            let id = provider.clone();
-            let install = selector("install");
+            let id = status.id.clone();
             controls.push(
-                dimmed(ui::button(
-                    (prefix, 9_usize),
-                    "Install now",
-                    ButtonKind::Outline,
-                    theme,
-                ))
-                .debug_selector(move || install.clone())
-                .aria_label(spoken(format!("Install the {name} runtime now")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.provider_request(ClientMessage::InstallRuntime {
-                        provider: id.clone(),
-                    });
-                    cx.notify();
-                }))
-                .into_any_element(),
+                self.provider_button(ui::button((prefix, 9_usize), "Install now", outline, theme))
+                    .debug_selector(move || format!("{prefix}-install"))
+                    .aria_label(SharedString::from(format!(
+                        "Install the {name} runtime now"
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.provider_request(ClientMessage::InstallRuntime {
+                            provider: id.clone(),
+                        });
+                        cx.notify();
+                    }))
+                    .into_any_element(),
             );
         }
         if let Some(url) = status.help_url.clone() {
-            let runtime = selector("get-runtime");
             controls.push(
-                ui::button(
-                    (prefix, 4_usize),
-                    "Get the runtime",
-                    ButtonKind::Outline,
-                    theme,
-                )
-                .debug_selector(move || runtime.clone())
-                .child(ui::icon(
-                    Icon::ExternalLink,
-                    icon_size::SM,
-                    theme.text_muted,
-                ))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_link(&url, cx)))
-                .into_any_element(),
-            );
-        }
-        let check = selector("check");
-        if status.checking {
-            controls.push(
-                div()
-                    .debug_selector(move || check.clone())
-                    .h(control::MD)
-                    .flex()
-                    .items_center()
-                    .gap(space::S1_5)
-                    .text_color(theme.text_muted)
-                    .child(ui::spinner(
-                        (prefix, 5_usize),
+                ui::button((prefix, 4_usize), "Get the runtime", outline, theme)
+                    .debug_selector(move || format!("{prefix}-get-runtime"))
+                    .aria_label(SharedString::from(format!("Get the {name} runtime")))
+                    .child(ui::icon(
+                        Icon::ExternalLink,
                         icon_size::SM,
                         theme.text_muted,
                     ))
-                    .child("Checking…")
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_link(&url, cx)))
                     .into_any_element(),
-            );
-        } else {
-            controls.push(
-                dimmed(ui::button(
-                    (prefix, 6_usize),
-                    "Check again",
-                    ButtonKind::Ghost,
-                    theme,
-                ))
-                .debug_selector(move || check.clone())
-                .aria_label(spoken(format!("Check {name} again")))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.provider_request(crowbot_protocol::ClientMessage::CheckProvider {
-                        provider: provider.clone(),
-                    });
-                    cx.notify();
-                }))
-                .into_any_element(),
             );
         }
         controls
+    }
+
+    /// A new check of the state of a provider, or the check that runs.
+    pub(super) fn check_control(
+        &self,
+        status: &ProviderStatus,
+        prefix: &'static str,
+        raised: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = &status.name;
+        if status.checking {
+            return div()
+                .id((prefix, 5_usize))
+                .debug_selector(move || format!("{prefix}-check"))
+                .role(Role::Status)
+                .aria_label(SharedString::from(format!("Checking {name}…")))
+                .h(control::MD)
+                .flex()
+                .items_center()
+                .gap(space::S1_5)
+                .text_color(theme.text_muted)
+                .child(ui::spinner(
+                    (prefix, 25_usize),
+                    icon_size::SM,
+                    theme.text_muted,
+                ))
+                .child("Checking…")
+                .into_any_element();
+        }
+        let provider = status.id.clone();
+        let kind = if raised {
+            ButtonKind::Raised
+        } else {
+            ButtonKind::Ghost
+        };
+        self.provider_button(ui::button((prefix, 6_usize), "Check again", kind, theme))
+            .debug_selector(move || format!("{prefix}-check"))
+            .aria_label(SharedString::from(format!("Check {name} again")))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.provider_request(ClientMessage::CheckProvider {
+                    provider: provider.clone(),
+                });
+                cx.notify();
+            }))
+            .into_any_element()
     }
 }
 

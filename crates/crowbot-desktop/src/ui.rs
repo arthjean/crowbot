@@ -65,6 +65,8 @@ pub fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) 
 pub enum ButtonKind {
     Primary,
     Outline,
+    /// An outline button on a card: one step above the `surface` fill.
+    Raised,
     Ghost,
     Danger,
     Disabled,
@@ -119,6 +121,14 @@ pub fn button(
             let hover = theme.control_hover;
             base.border_color(theme.border_strong)
                 .bg(theme.control)
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+        }
+        ButtonKind::Raised => {
+            let hover = theme.control_active;
+            base.border_color(theme.border_strong)
+                .bg(theme.surface_raised)
                 .text_color(theme.text)
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover))

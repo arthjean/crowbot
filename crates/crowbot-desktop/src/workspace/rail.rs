@@ -6,7 +6,6 @@ use gpui::{
 
 use super::Workspace;
 use super::forms;
-use super::settings::Section;
 use crate::assets::Icon;
 use crate::theme::{Theme, control, icon as icon_size, layout, radius, size, space, text};
 use crate::ui;
@@ -78,13 +77,30 @@ fn rail_button(
         .tooltip(ui::tooltip(label))
 }
 
-fn rail_icon(id: &'static str, glyph: Icon, label: &'static str, theme: &Theme) -> Stateful<Div> {
+/// A page of the window on the rail. The page shown keeps the fill a button
+/// takes under the pointer, and its icon in the text color.
+fn rail_icon(
+    id: &'static str,
+    glyph: Icon,
+    label: &'static str,
+    shown: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
     let hover_text = theme.text;
     rail_button(id, label, theme)
         .debug_selector(move || id.into())
+        .when(shown, |button| {
+            button
+                .bg(theme.control_hover)
+                .aria_label(SharedString::from(format!("{label}, selected")))
+        })
         .child(
-            ui::icon(glyph, icon_size::LG, theme.text_muted)
-                .group_hover(RAIL_BUTTON_GROUP, move |style| style.text_color(hover_text)),
+            ui::icon(
+                glyph,
+                icon_size::LG,
+                if shown { theme.text } else { theme.text_muted },
+            )
+            .group_hover(RAIL_BUTTON_GROUP, move |style| style.text_color(hover_text)),
         )
 }
 
@@ -112,10 +128,11 @@ impl Workspace {
                 let (state, _) = forms::provider_state(status, theme);
                 let label = SharedString::from(format!("{}: {state}", status.name));
                 let id = status.id.clone();
+                let opened = status.id.clone();
                 rail_button(("rail-provider", index), label, theme)
                     .debug_selector(move || format!("rail-provider-{id}"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings_at(Section::Providers, window, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_provider_settings(&opened, window, cx);
                     }))
                     .child(
                         div()
@@ -134,8 +151,17 @@ impl Workspace {
                     )
             })
             .collect();
-        let settings = rail_icon("open-settings", Icon::Settings, "Settings", theme)
-            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
+        let in_settings = self.settings.is_some();
+        let bots = rail_icon("open-bots", Icon::Bot, "Bots", !in_settings, theme)
+            .on_click(cx.listener(|this, _, window, cx| this.close_settings(window, cx)));
+        let settings = rail_icon(
+            "open-settings",
+            Icon::Settings,
+            "Settings",
+            in_settings,
+            theme,
+        )
+        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         div()
             .id("rail")
             .debug_selector(|| "rail".into())
@@ -150,6 +176,7 @@ impl Workspace {
             .items_center()
             .gap(space::S1_5)
             .child(logo)
+            .child(bots)
             .child(
                 div()
                     .id("rail-spacer")

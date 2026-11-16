@@ -367,6 +367,7 @@ fn a_provider_shows_its_runtime_its_download_and_takes_an_executable_of_the_user
         cx,
     );
     daemon.sent();
+    click(cx, "provider-0");
     assert!(shown(cx, "provider-0-runtime"));
     assert!(!shown(cx, "provider-0-download"));
     click(cx, "provider-0-install");
@@ -543,55 +544,40 @@ fn a_turn_that_failed_for_a_sign_in_offers_the_sign_in_of_its_provider(cx: &mut 
 }
 
 #[gpui::test]
-fn the_providers_scroll_until_the_last_one_is_reachable(cx: &mut TestAppContext) {
+fn the_page_of_a_provider_scrolls_until_its_last_row_is_reachable(cx: &mut TestAppContext) {
     let (_workspace, mut daemon, cx) = open(cx);
     daemon.connect(two_bots(), cx);
+    cx.simulate_resize(size(px(1000.), px(320.)));
     click(cx, "open-settings");
     click(cx, "settings-providers");
-    let runtime = |id: &str, name: &str, label: &str| ProviderStatus {
-        runtime: Some(label.to_owned()),
-        detail: Some(format!(
-            "Crow Bot downloads {label} when a bot first needs it."
-        )),
-        ..status(id, name, ProviderState::NotInstalled)
-    };
     daemon.tell(
-        ServerMessage::Providers(vec![
-            runtime("claude", "Claude", "claude-agent-acp 0.107.0 (218 MB)"),
-            runtime(
-                "codex",
-                "ChatGPT",
-                "codex-acp 2.6.0-codex-0.166.0-bun-1.4.4 (225 MB)",
-            ),
-            runtime("grok", "Grok", "grok 1.0.77 (69 MB)"),
-        ]),
+        ServerMessage::Providers(vec![ProviderStatus {
+            runtime: Some("grok 1.0.77 (69 MB)".to_owned()),
+            ..status("grok", "Grok", ProviderState::NotInstalled)
+        }]),
         cx,
     );
     daemon.sent();
-    let dialog = bounds(cx, "settings-dialog");
-    let install = bounds(cx, "provider-2-install");
+    click(cx, "provider-0");
+    let body = bounds(cx, "settings-body");
+    let own = bounds(cx, "provider-0-own-executable");
     assert!(
-        install.bottom() > dialog.bottom(),
-        "the last provider fits without a scroll: {install:?} in {dialog:?}"
+        own.bottom() > body.bottom(),
+        "the last row fits without a scroll: {own:?} in {body:?}"
     );
     cx.simulate_event(ScrollEvent {
-        position: dialog.center(),
+        position: body.center(),
         delta: ScrollDelta::Pixels(point(px(0.), px(-2000.))),
         ..ScrollEvent::default()
     });
     cx.run_until_parked();
-    let install = bounds(cx, "provider-2-install");
+    let own = bounds(cx, "provider-0-own-executable");
     assert!(
-        install.bottom() <= dialog.bottom() && install.top() >= dialog.top(),
-        "the install button of Grok stays out of reach: {install:?} in {dialog:?}"
+        own.bottom() <= body.bottom() && own.top() >= body.top(),
+        "the last row stays out of reach: {own:?} in {body:?}"
     );
-    click(cx, "provider-2-install");
-    assert_eq!(
-        daemon.sent(),
-        [ClientMessage::InstallRuntime {
-            provider: "grok".to_owned()
-        }]
-    );
+    click(cx, "provider-0-own-executable");
+    assert!(shown(cx, "provider-executable"));
 }
 
 #[gpui::test]
@@ -611,6 +597,7 @@ fn the_window_that_starts_a_sign_in_opens_the_page_the_provider_names(cx: &mut T
         ..signed_out.clone()
     };
     daemon.tell(ServerMessage::Providers(vec![signed_out.clone()]), cx);
+    click(cx, "provider-0");
 
     // A sign-in that another window started shows the page, and opens nothing.
     daemon.tell(ServerMessage::ProviderChanged(named.clone()), cx);
@@ -708,5 +695,5 @@ fn the_reasoning_levels_follow_the_model_and_the_gear_opens_the_provider_setting
 
     click(cx, "creation-provider-settings");
     assert!(!shown(cx, "creation-model-picker"));
-    assert!(shown(cx, "settings-dialog"));
+    assert!(shown(cx, "settings-page"));
 }

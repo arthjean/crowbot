@@ -36,7 +36,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use self::bot_panel::{BotPanel, PanelField};
 use self::creation::Creation;
 use self::palette::{Palette, RevealTarget};
-use self::settings::{EXECUTABLE_LENGTH, ExecutableEdit, Section};
+use self::settings::{EXECUTABLE_LENGTH, ExecutableEdit, SETTINGS_QUERY_LENGTH, SettingsPage};
 use crate::bots;
 use crate::composer::{self, Composer, ComposerEvent, InputStyle};
 use crate::connection::{Connection, ConnectionEvent};
@@ -306,8 +306,11 @@ pub struct Workspace {
     /// The bot updates that wait for the daemon's answer, oldest first, each
     /// with the bot and the field of the settings panel that sent it.
     updates: VecDeque<Option<(i64, PanelField)>>,
-    settings: Option<Section>,
+    settings: Option<SettingsPage>,
     settings_focus: FocusHandle,
+    settings_query: Entity<Composer>,
+    /// The search result of the settings page that Enter opens.
+    settings_hit: usize,
     providers: Vec<ProviderStatus>,
     providers_asked: bool,
     /// What each provider offers, as the daemon last told it.
@@ -402,6 +405,12 @@ impl Workspace {
             SEARCH_QUERY_LENGTH,
             cx,
         );
+        let settings_query = field(
+            "Search settings",
+            "Search settings",
+            SETTINGS_QUERY_LENGTH,
+            cx,
+        );
         let mut subscriptions = vec![
             cx.subscribe_in(
                 &composer,
@@ -462,6 +471,18 @@ impl Workspace {
                 },
             ),
             cx.observe(&palette_query, |this, _, cx| this.palette_typed(cx)),
+            cx.subscribe_in(
+                &settings_query,
+                window,
+                |this, _, event: &ComposerEvent, window, cx| match event {
+                    ComposerEvent::Submit => this.open_active_setting(window, cx),
+                    ComposerEvent::Step(forward) => this.settings_step(*forward, cx),
+                },
+            ),
+            cx.observe(&settings_query, |this, _, cx| {
+                this.settings_hit = 0;
+                cx.notify();
+            }),
         ];
         for (input, field) in [
             (&panel_name, PanelField::Name),
@@ -539,6 +560,8 @@ impl Workspace {
             updates: VecDeque::new(),
             settings: None,
             settings_focus: cx.focus_handle(),
+            settings_query,
+            settings_hit: 0,
             providers: Vec::new(),
             providers_asked: false,
             models: HashMap::new(),
@@ -2274,7 +2297,7 @@ impl Render for Workspace {
             .children(self.render_confirm_dialog(&theme, cx))
             .children(
                 shell
-                    .then(|| self.render_settings_dialog(&theme, window, cx))
+                    .then(|| self.render_settings_select(&theme, window, cx))
                     .flatten(),
             )
             .children(shell.then(|| self.render_palette(&theme, cx)).flatten())
@@ -2294,14 +2317,13 @@ impl Workspace {
         } else if self.palette.is_some() {
             window.focus(&self.palette_query.focus_handle(cx), cx);
         } else if self.settings.is_some() {
-            // The dialog keeps the focus: a step that leaves it comes back in.
+            // The settings page takes the focus while the daemon is away
+            // too: its sections can still be read.
+            self.close_settings_select(cx);
             if forward {
                 window.focus_next(cx);
             } else {
                 window.focus_prev(cx);
-            }
-            if !self.settings_focus.contains_focused(window, cx) {
-                window.focus(&self.settings_focus, cx);
             }
         } else if !self.live() {
             if matches!(self.link, Link::Failed(_) | Link::Incompatible { .. }) {
