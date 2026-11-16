@@ -34,6 +34,11 @@ pub struct Theme {
     pub accent_soft: Rgba,
     pub accent_strong: Rgba,
     pub on_accent: Rgba,
+    /// The white of a mascot's eyes, the same in both appearances.
+    pub mascot_eye: Rgba,
+    pub mascot_pupil: Rgba,
+    /// The beak of a mascot: a shade over the color of its head.
+    pub mascot_beak: Rgba,
     pub success: Rgba,
     pub success_text: Rgba,
     pub success_soft: Rgba,
@@ -137,6 +142,9 @@ impl Theme {
             accent_soft: alpha_of(rgb(0x00_7c_f7), 0.16),
             accent_strong: alpha_of(rgb(0x00_7c_f7), 0.34),
             on_accent: rgb(0xff_ff_ff),
+            mascot_eye: rgb(0xff_ff_ff),
+            mascot_pupil: rgb(0x17_17_1a),
+            mascot_beak: alpha_of(rgb(0x00_00_00), mascot::BEAK_SHADE),
             success: rgb(0x31_cf_76),
             success_text: rgb(0x31_cf_76),
             success_soft: alpha_of(rgb(0x31_cf_76), 0.12),
@@ -206,6 +214,9 @@ impl Theme {
             accent_soft: alpha_of(rgb(0x00_7c_f7), 0.12),
             accent_strong: alpha_of(rgb(0x00_7c_f7), 0.26),
             on_accent: rgb(0xff_ff_ff),
+            mascot_eye: rgb(0xff_ff_ff),
+            mascot_pupil: rgb(0x17_17_1a),
+            mascot_beak: alpha_of(rgb(0x00_00_00), mascot::BEAK_SHADE),
             success: rgb(0x1f_a8_5a),
             success_text: rgb(0x18_7a_41),
             success_soft: alpha_of(rgb(0x1f_a8_5a), 0.08),
@@ -341,10 +352,6 @@ pub mod text {
         size: px(18.),
         leading: px(24.),
     };
-    pub const XXXL: Step = Step {
-        size: px(24.),
-        leading: px(30.),
-    };
     /// The text of a form field, as the creation form shows it.
     pub const FIELD: Step = Step {
         size: px(16.),
@@ -474,7 +481,6 @@ pub mod palette {
     /// The search icon, an avatar, or the icon of a result: the text of the
     /// field and of every row starts after it.
     pub const LEAD: Pixels = px(20.);
-    pub const LEAD_GLYPH: Pixels = px(11.);
     pub const ROW_PADDING_Y: Pixels = px(6.);
     /// The most of a row that the text beside its title may take.
     pub const CONTEXT_SHARE: f32 = 0.45;
@@ -577,6 +583,72 @@ pub mod opacity {
     pub const SHOWN: f32 = 1.;
 }
 
+pub mod mascot {
+    use std::time::Duration;
+
+    use super::{Pixels, px};
+
+    /// How dark the beak is over the head.
+    pub const BEAK_SHADE: f32 = 0.42;
+    /// Below this size a mascot draws its eyes larger, so that they still read.
+    pub const SMALL: Pixels = px(24.);
+    /// The side of the box the layers are drawn on.
+    pub const BOX: f32 = 100.;
+    /// A mascot that waits for an answer tilts its head: the angle in degrees,
+    /// and the point of the box it turns about.
+    pub const TILT: f32 = -10.;
+    pub const TILT_CENTER: (f32, f32) = (50., 60.);
+    /// How high a dot of a mascot that works hops, on the box.
+    pub const DOT_HOP: f32 = 5.;
+
+    // The life of a mascot: what moves while nothing changes.
+
+    /// The point of the box a head sways about: its base.
+    pub const NECK: (f32, f32) = (50., 90.);
+    /// How far a head sways to each side of its pose, in degrees: at rest,
+    /// at work, while it waits, and after a failure.
+    pub const SWAY_REST: f32 = 2.5;
+    pub const SWAY_WORKING: f32 = 1.5;
+    pub const SWAY_WAITING: f32 = 2.;
+    pub const SWAY_FAILED: f32 = 0.8;
+    /// How far the pupils of a mascot at rest look to the side its head leans
+    /// to, on the box.
+    pub const GAZE: f32 = 1.2;
+    /// How high a mascot with something new bobs, on the box.
+    pub const BOB: f32 = 2.5;
+    /// A mascot that waits sways this many times faster, and one with
+    /// something new bobs this many times faster.
+    pub const WAITING_PACE: u32 = 2;
+    pub const BOB_PACE: u32 = 4;
+    /// The top and the bottom of the lids that close in a blink, on the box.
+    /// The lids hang from their top, well above the eyes, so the first half
+    /// of their way down passes over the head and shows nothing: a blink is
+    /// short, and the half blink that follows it only lowers the lids a
+    /// little.
+    pub const LID_TOP: f32 = 28.;
+    /// The bottom is drawn in the layer: only the tests of the blink read it.
+    #[cfg(test)]
+    pub const LID_BOTTOM: f32 = 65.;
+    /// The height of an open lid, as a share of its height when closed.
+    pub const LID_OPEN: f32 = 0.02;
+    /// The frames per second the life of the mascots asks for: its motion is
+    /// slow, so it needs no more.
+    pub const FPS: f32 = 30.;
+
+    /// How long a sway to one side, to the other, and back lasts for the
+    /// mascot `id`: 6.1 to 9.7 s. Each bot has its own, so that the bots of a
+    /// list do not move together.
+    pub fn sway_period(id: usize) -> Duration {
+        Duration::from_millis(6100 + (id as u64 * 997) % 3600)
+    }
+
+    /// How long passes from a blink of the mascot `id` to the next: 3.1 to
+    /// 4.9 s. A blink, a half blink, then open eyes for the rest of it.
+    pub fn blink_period(id: usize) -> Duration {
+        Duration::from_millis(3100 + (id as u64 * 619) % 1800)
+    }
+}
+
 pub mod size {
     use super::{Pixels, px};
 
@@ -587,12 +659,7 @@ pub mod size {
     pub const AVATAR_TILE: Pixels = px(56.);
     pub const AVATAR_TILE_COMPACT: Pixels = px(48.);
     pub const AVATAR_HEADER: Pixels = px(18.);
-    pub const AVATAR_HEADER_GLYPH: Pixels = px(10.);
     pub const AVATAR_RING: Pixels = px(2.);
-    pub const BADGE: Pixels = px(18.);
-    pub const BADGE_WORKING_WIDTH: Pixels = px(30.);
-    pub const BADGE_DOT: Pixels = px(5.);
-    pub const BADGE_HOP: Pixels = px(3.);
     pub const BADGE_OFFSET_X: Pixels = px(5.);
     pub const BADGE_OFFSET_Y: Pixels = px(3.);
     pub const BADGE_ICON: Pixels = px(10.);
@@ -605,27 +672,22 @@ pub mod size {
     pub const BADGE_PILL: Pixels = px(22.);
     pub const DIVIDER_HEIGHT: Pixels = px(20.);
     pub const AVATAR_MESSAGE: Pixels = px(32.);
-    pub const AVATAR_MESSAGE_GLYPH: Pixels = px(14.);
     pub const AVATAR_EMPTY: Pixels = px(64.);
-    pub const AVATAR_EMPTY_GLYPH: Pixels = px(28.);
     pub const QUOTE_BAR: Pixels = px(2.);
     pub const CHECKBOX: Pixels = px(14.);
     pub const JUMP: Pixels = px(44.);
     pub const SEND: Pixels = px(28.);
     pub const ACTION_ICON: Pixels = px(17.);
     pub const AVATAR_CREATION: Pixels = px(72.);
-    pub const AVATAR_CREATION_GLYPH: Pixels = px(32.);
     pub const AVATAR_TEMPLATE: Pixels = px(42.);
-    pub const AVATAR_TEMPLATE_GLYPH: Pixels = px(18.);
-    pub const AVATAR_FACE: Pixels = px(24.);
-    pub const AVATAR_FACE_GLYPH: Pixels = px(13.);
+    /// A mascot in a cell of the head picker.
+    pub const AVATAR_FACE: Pixels = px(32.);
     /// The live avatar of the creation form rises this far above its box.
     pub const AVATAR_CREATION_LIFT: Pixels = px(8.);
     pub const AVATAR_PANEL: Pixels = px(62.);
-    pub const AVATAR_PANEL_GLYPH: Pixels = px(26.);
     pub const SWATCH_BUTTON: Pixels = px(28.);
     pub const SWATCH: Pixels = px(18.);
-    pub const GLYPH_CELL: Pixels = px(33.);
+    pub const FACE_CELL: Pixels = px(40.);
     pub const RING: Pixels = px(2.);
     pub const PROVIDER_RING: Pixels = px(28.);
     /// A round icon button, such as search and new bot over the bot list.
@@ -900,10 +962,11 @@ mod tests {
         assert_eq!(compared, 84);
     }
 
-    const VIEWS: [&str; 19] = [
+    const VIEWS: [&str; 20] = [
         "main.rs",
         "composer.rs",
         "ui.rs",
+        "mascot.rs",
         "markdown/element.rs",
         "workspace.rs",
         "workspace/bot_list.rs",

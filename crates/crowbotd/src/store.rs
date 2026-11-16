@@ -17,7 +17,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -154,6 +154,12 @@ CREATE TABLE bot_models (
     effort TEXT,
     PRIMARY KEY (bot_id, provider)
 );
+";
+
+/// A bot is drawn as a mascot, with a head the user picks. The column
+/// `avatar_glyph` of a bot stays as it was: the daemon no longer reads it.
+const SCHEMA_V8: &str = "
+ALTER TABLE bots ADD COLUMN avatar_shape TEXT NOT NULL DEFAULT 'smooth';
 ";
 
 const UNFINISHED_TURNS: &str = "
@@ -300,6 +306,10 @@ impl Store {
         if version < 7 {
             transaction.execute_batch(SCHEMA_V7)?;
             self.adopt_sessions()?;
+        }
+        if version < 8 {
+            transaction.execute_batch(SCHEMA_V8)?;
+            self.assign_mascots()?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -931,7 +941,7 @@ mod tests {
                 instructions: String::new(),
                 avatar: crowbot_protocol::Avatar {
                     color: "#3b82f6".to_owned(),
-                    glyph: "A".to_owned(),
+                    shape: Default::default(),
                 },
                 provider: "claude".to_owned(),
                 model: None,
@@ -1463,6 +1473,46 @@ mod tests {
         assert_eq!(store.draft(id).unwrap(), "");
         store.set_draft(42, "nowhere").unwrap();
         assert_eq!(store.draft(42).unwrap(), "");
+    }
+
+    #[test]
+    fn a_version_7_database_gives_each_bot_a_mascot_and_keeps_its_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        for schema in [
+            SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7,
+        ] {
+            connection.execute_batch(schema).unwrap();
+        }
+        connection.pragma_update(None, "user_version", 7).unwrap();
+        connection
+            .execute_batch(
+                r##"INSERT INTO bots (name, avatar_color, avatar_glyph, provider, workspace, created_at_ms)
+                    VALUES ('Atlas', '#3b82f6', 'A', 'claude', '/work', 5),
+                        ('Owl', '#10b981', 'O', 'claude', '/work', 6),
+                        ('Fox', '#e8483f', 'F', 'claude', '/work', 7);"##,
+            )
+            .unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        assert_eq!(version(&store), SCHEMA_VERSION);
+        let bots = store.bots().unwrap();
+        let faces: Vec<_> = bots.iter().map(|row| row.bot.avatar.shape).collect();
+        assert_eq!(
+            faces,
+            [
+                crowbot_protocol::mascot_at(0),
+                crowbot_protocol::mascot_at(1),
+                crowbot_protocol::mascot_at(2)
+            ]
+        );
+        assert_eq!(bots[1].bot.avatar.color, "#10b981");
+        // The picture a bot had stays in the database.
+        let glyph: String = store
+            .connection
+            .query_row("SELECT avatar_glyph FROM bots WHERE id = 2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(glyph, "O");
     }
 
     #[test]

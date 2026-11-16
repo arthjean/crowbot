@@ -270,7 +270,7 @@ mod tests {
                 instructions: "Answer in one line.".to_owned(),
                 avatar: Avatar {
                     color: "#10b981".to_owned(),
-                    glyph: "A".to_owned(),
+                    shape: Default::default(),
                 },
                 provider: "claude".to_owned(),
                 model: None,

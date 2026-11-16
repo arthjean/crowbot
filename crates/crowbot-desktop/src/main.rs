@@ -7,6 +7,7 @@ mod connection;
 mod frames;
 mod layout;
 mod markdown;
+mod mascot;
 mod menu;
 mod reveal;
 mod sidebar;

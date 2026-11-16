@@ -499,7 +499,7 @@ impl Workspace {
         }
         for summary in bots {
             let bot = &summary.bot;
-            let avatar = ui::avatar(bot, palette::LEAD, palette::LEAD_GLYPH, theme);
+            let avatar = ui::avatar(bot, palette::LEAD, theme);
             let row = self
                 .result_row(index, palette.active == index, bot.name.clone(), theme)
                 .child(lead(avatar.into_any_element()))
@@ -555,9 +555,7 @@ impl Workspace {
                 MessageAuthor::Bot => (name, String::new()),
             };
             let mark = match owner {
-                Some(bot) => {
-                    ui::avatar(bot, palette::LEAD, palette::LEAD_GLYPH, theme).into_any_element()
-                }
+                Some(bot) => ui::avatar(bot, palette::LEAD, theme).into_any_element(),
                 None => ui::icon(Icon::MessageSquare, icon_size::MD, theme.text_muted)
                     .into_any_element(),
             };

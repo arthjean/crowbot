@@ -439,7 +439,7 @@ impl Workspace {
         };
         let bot = self.selected_bot().map(|summary| &summary.bot);
         let avatar = bot.filter(|_| starts).map(|bot| {
-            ui::avatar(bot, size::AVATAR_MESSAGE, size::AVATAR_MESSAGE_GLYPH, theme)
+            ui::avatar(bot, size::AVATAR_MESSAGE, theme)
                 .debug_selector(move || format!("row-avatar-{key}"))
         });
         let name = bot.filter(|_| starts).map(|bot| {

@@ -595,12 +595,7 @@ impl Workspace {
                         this.panel.avatar_open = !this.panel.avatar_open;
                         cx.notify();
                     }))
-                    .child(ui::avatar(
-                        &bot,
-                        size::AVATAR_PANEL,
-                        size::AVATAR_PANEL_GLYPH,
-                        theme,
-                    ))
+                    .child(ui::living_avatar(&bot, size::AVATAR_PANEL, theme, cx))
                     .child(
                         div()
                             .absolute()
@@ -630,13 +625,7 @@ impl Workspace {
                         theme,
                         cx,
                     ))
-                    .child(self.render_glyph_picker(
-                        AvatarOwner::Panel,
-                        &forms::initial(&bot.name),
-                        &bot.avatar,
-                        theme,
-                        cx,
-                    ))
+                    .child(self.render_shape_picker(AvatarOwner::Panel, &bot.avatar, theme, cx))
             }));
 
         let levels = self.effort_choices(&bot.provider, bot.effort.as_deref());

@@ -28,12 +28,66 @@ pub enum PermissionLevel {
     FullAccess,
 }
 
+/// The head of a bot's mascot: its outline, with or without feathers on top.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MascotShape {
+    /// A round head with nothing on it.
+    #[default]
+    Smooth,
+    /// Three feathers that stand on the head.
+    Crest,
+    /// Three sharp points.
+    Spikes,
+    /// One lock swept to the side.
+    Curl,
+    /// One feather that leans back.
+    Plume,
+    /// A head with a flat top.
+    Flat,
+}
+
+impl MascotShape {
+    pub const ALL: [Self; 6] = [
+        Self::Smooth,
+        Self::Crest,
+        Self::Spikes,
+        Self::Curl,
+        Self::Plume,
+        Self::Flat,
+    ];
+
+    /// The name of the shape in a message and in the database.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Smooth => "smooth",
+            Self::Crest => "crest",
+            Self::Spikes => "spikes",
+            Self::Curl => "curl",
+            Self::Plume => "plume",
+            Self::Flat => "flat",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|shape| shape.name() == name)
+    }
+}
+
+/// The head of the mascot at a place in a list, such as the bots in the order
+/// they were made: two places next to each other get different heads.
+pub fn mascot_at(place: u64) -> MascotShape {
+    MascotShape::ALL[(place % MascotShape::ALL.len() as u64) as usize]
+}
+
+/// What a bot looks like: a mascot, the head of a crow seen from the front, in
+/// the bot's color.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Avatar {
     /// A color as `#rrggbb`.
     pub color: String,
-    /// A letter or an emoji.
-    pub glyph: String,
+    #[serde(default)]
+    pub shape: MascotShape,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +269,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bot.effort, None);
+    }
+
+    #[test]
+    fn an_avatar_written_before_mascots_reads_with_the_first_head() {
+        let avatar: Avatar = serde_json::from_str(r##"{"color":"#3b82f6","glyph":"A"}"##).unwrap();
+        assert_eq!(avatar.shape, MascotShape::Smooth);
+        let chosen: Avatar =
+            serde_json::from_str(r##"{"color":"#3b82f6","shape":"curl"}"##).unwrap();
+        assert_eq!(chosen.shape, MascotShape::Curl);
+        let wire = serde_json::to_string(&chosen).unwrap();
+        assert_eq!(wire, r##"{"color":"#3b82f6","shape":"curl"}"##);
+    }
+
+    #[test]
+    fn a_shape_is_read_back_from_its_name() {
+        for shape in MascotShape::ALL {
+            assert_eq!(MascotShape::from_name(shape.name()), Some(shape));
+            assert_eq!(
+                serde_json::to_string(&shape).unwrap(),
+                format!("\"{}\"", shape.name())
+            );
+        }
+        assert_eq!(MascotShape::from_name("hat"), None);
+        assert_eq!(MascotShape::from_name(""), None);
+    }
+
+    #[test]
+    fn places_next_to_each_other_get_different_heads_and_every_head_comes_in_turn() {
+        let heads: Vec<_> = (0..6).map(mascot_at).collect();
+        assert_eq!(heads, MascotShape::ALL);
+        for place in 0..24 {
+            assert_ne!(mascot_at(place), mascot_at(place + 1));
+        }
+        assert_eq!(mascot_at(6), mascot_at(0));
     }
 
     #[test]

@@ -11,7 +11,8 @@ mod wire;
 
 pub use bot::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH, BOT_MODEL_LENGTH, BOT_NAME_LENGTH,
-    BOT_TITLE_LENGTH, Bot, BotDraft, BotPatch, BotState, BotSummary, PermissionLevel,
+    BOT_TITLE_LENGTH, Bot, BotDraft, BotPatch, BotState, BotSummary, MascotShape, PermissionLevel,
+    mascot_at,
 };
 pub use endpoint::Endpoint;
 pub use event::{

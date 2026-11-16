@@ -19,6 +19,7 @@ re-derive the system from the render code.
 | `AGENTS.md` | Architecture, hard rules, engineering gates |
 | `src/theme.rs` | Every color, size, radius, duration, and opacity, in both themes |
 | `src/ui.rs` | The shared primitives: icons, buttons, tooltips, avatars, the menu surface and rows, the text field skin |
+| `src/mascot.rs` | The mascot of a bot: its layers and what its eyes show |
 | `src/workspace/forms.rs` | Form fields, labels, notes, choice chips, provider notices |
 
 When sources disagree, product intent wins, then a rule here, then the shared
@@ -129,6 +130,7 @@ never hex values.
 | `success`, `warning`, `danger` | Provider and bot states | `#31cf76`, `#ff9412`, `#fd2f3b` | `#1fa85a`, `#f08a00`, `#e8222d` |
 | `success_soft`, `warning_soft`, `danger_soft` | The fill of a state badge, under the matching `_text` color | each state color at 0.12, 0.12, 0.16 | at 0.08, 0.14, 0.12 |
 | `inverse_surface`, `inverse_text` | The primary button | `#f0f0f0` on `#141414` | `#1c1c1e` on `#ffffff` |
+| `mascot_eye`, `mascot_pupil`, `mascot_beak` | The eyes, the pupils, and the beak of a mascot, over the color of its bot (5.12) | `#ffffff`, `#17171a`, black at 0.42 | The same |
 
 Text roles hold 4.5:1 on every surface they sit on, and focus marks 3:1; the
 tests `text_meets_wcag_contrast_on_every_surface_it_sits_on` and
@@ -141,7 +143,7 @@ surface joins those tests.
 | --- | --- |
 | Menus, pickers, dialogs, toasts (`menu_shadow`) | A 1 px `dialog_ring` edge, then 0 18, blur 44, spread -18, black at 0.80 in dark and 0.55 in light |
 | The search palette (`drop_shadow`) | The drop of the menu shadow alone: its 1 px `dialog_ring` border is its only edge |
-| A chosen avatar picture | A 2 px spread of `accent_soft` outside its `accent_text` edge |
+| The chosen head of the avatar picker | A 2 px spread of `accent_soft` outside its `accent_text` edge |
 
 No other surface carries a shadow. Depth comes from the surface steps
 (`frame`, `canvas`, `surface`, `menu_surface`).
@@ -157,7 +159,8 @@ No other surface carries a shadow. Depth comes from the surface steps
 | Menu rows in a plain menu (`menu::ROW_RADIUS`) | 4 | |
 | Buttons, icon buttons, tooltips | 6 (`radius::SM`) | |
 | Rail buttons | 12 (`radius::LG`) | |
-| Avatars, swatches, state dots, chips, badges | full | |
+| Swatches, state dots, chips, badges | full | |
+| Avatars | None | A mascot is drawn alone, with no surface behind it (5.12) |
 
 Two rules hold everywhere:
 
@@ -203,7 +206,7 @@ Consolas, Menlo, or monospace for code.
 | `text::TITLE` | 15 / 20 | Bot names in rows, the primary button of a form |
 | `text::XL` | 16 / 22 | Suggestion titles, screen headings |
 | `text::FIELD`, `text::AREA` | 16 / 22, 16 / 24 | The fields and areas of a form page, such as the creation form |
-| `text::XXL`, `text::XXXL` | 18 / 24, 24 / 30 | Large glyphs in avatars |
+| `text::XXL` | 18 / 24 | The largest heading of a message, the headings of Settings |
 
 Emphasis is one weight step. Labels are Medium in `text_secondary`. Sentence
 case everywhere. Never an em dash.
@@ -228,13 +231,19 @@ on. A provider with no logo shows two letters of its name.
 | --- | --- | --- |
 | Menu and picker reveal (`ui::menu_reveal`) | 140 ms, ease-out quint | Fades in from 0 while dropping 4 px into place; no exit animation; shown at rest when the system asks for reduced motion (`cx.reduce_motion()`) |
 | Spinner | 900 ms loop | Loading states |
-| Working dots | 960 ms cycle | A bot that works |
+| Working dots | 960 ms cycle | The three dots over the mascot of a bot that works hop one after the other, 5 of the 100 of its box high (`mascot::DOT_HOP`); they stand still when motion is reduced |
 | Suggestion row fades (`duration::FADE`) | 160 ms, ease-out quint | Each edge fades in while the row can scroll past it; shown at rest when motion is reduced |
 | Suggestion row glide (`motion`) | Per frame | A drag past 8 px moves the row; on release it keeps the speed of the drag (at most 1.75 px/ms) and loses 12 % of it per 60 Hz frame until it stops or meets an end; no glide when motion is reduced |
 | Hover | Instant | Rows and buttons |
+| Mascot eyes | Instant | The eyes change with the state of the bot at once: no transition between states yet (5.12) |
+| Mascot sway | 6.1 to 9.7 s, ease-in-out, there and back | The head leans to one side then the other about its base; twice as fast while the bot waits (5.12) |
+| Mascot blink | Every 3.1 to 4.9 s | Lids in the bot's color come down over the eyes and go back up, then lower a little once more |
+| Mascot bob | A quarter of the sway | A mascot with something new rises 2.5 of the 100 of its box and comes down |
 | Search palette | Instant | It opens and closes with no animation: it is opened many times a day |
 
-Motion explains a state change. Nothing animates for decoration.
+Motion explains a state change. Nothing animates for decoration, with one
+exception: a mascot is alive (5.12). Its life stands still when the system
+asks for reduced motion.
 
 ## 5. Component contracts
 
@@ -350,14 +359,16 @@ on each side in a narrow pane), padded 24 above and below, with 12 between
 parts, and sits centered in the height left above the suggestions.
 
 - The live avatar is 72 and rises 8 above its box, with 4 more below it.
-- Colors: the automatic color, which follows the picture, then the 17 of
+- Colors: the automatic color, which follows the head, then the 17 of
   `AVATAR_COLORS`, in two rows of 9 (`SWATCH_COLUMNS`). A swatch is 18 with
   a `border_strong` edge in a 28 button; the chosen one carries a 1 px
   `accent_text` ring at the edge of the button, 4 out from the swatch.
-- Pictures: the first letter of the name, then 11 emoji, each drawn as a 24
-  avatar in the current color, in 33 cells 2 apart that wrap in a narrow
-  pane. The chosen cell has an `accent_text` edge and the 2 px
-  `accent_soft` ring.
+- Heads: one row of the 6 heads. Each cell draws the avatar it gives, a 32
+  mascot in the current color, in 40 cells 2 apart that wrap in a narrow
+  pane. The chosen cell has an `accent_text` edge and the 2 px `accent_soft`
+  ring. The form opens on the head a bot made now would take (`mascot_at`).
+  The settings panel of a bot shows the same two pickers under its avatar.
+  An avatar is two choices and no more: making a bot stays quick.
 - The fields start 4 below the gap: Name (required, opened on the default
   name "New bot"), Purpose (an area), the model trigger, then any provider
   notice.
@@ -512,6 +523,68 @@ of this document.
   `text::SM` and `text_secondary`; an arrow key is a 12 icon. The hints are
   Navigate, Open (only while a row can be opened), and Close.
 
+### 5.12 Mascot (`mascot.rs`, layers in `assets/mascot`, tokens in `theme::mascot`)
+
+The avatar of a bot is its mascot: the head of a crow seen from the front,
+in the bot's color, drawn alone. Nothing stands behind it: no disc, no ring,
+no fill.
+
+- An avatar is a color (one of `AVATAR_COLORS`, or any `#rrggbb`) and a
+  head (smooth, crest, spikes, curl, plume, flat). Every mascot has the same
+  short beak: the beak is not a choice. A bot made with no avatar takes the
+  next head (`mascot_at`), so bots made one after the other differ.
+- A mascot is a stack of SVG layers of one color each, on a shared box of
+  100 by 100: the head in the bot's color, the beak in `mascot_beak`, the
+  eyes in `mascot_eye`, the pupils in `mascot_pupil`. The head is 80 wide and
+  sits in the lower 72 of the box; the feathers take the top. The size of an
+  avatar is the size of that box, so a head reads smaller than a disc of the
+  same size did.
+- The eyes show the state of the bot:
+
+  | State | Eyes |
+  | --- | --- |
+  | Idle | Round, looking ahead |
+  | Working | Looking up at three dots in the bot's color, which hop (4.7) |
+  | Waiting | Wide, with small pupils, on a head tilted 10 degrees to the left (`mascot::TILT`) |
+  | Failed | Looking down under lids in the bot's color |
+  | Unread | Closed in a smile |
+
+- The sidebar and the header show the state. Everywhere else (messages, the
+  empty conversation, the search palette, the pickers, the suggestions, the
+  settings panel) a mascot is at rest.
+- A mascot is alive where it stands for the bot itself: the sidebar, the
+  header, the empty conversation, the creation form, and the settings panel.
+  It is still where it is a label: beside a message, in the search palette,
+  in a picker cell, on a suggestion.
+- Alive, a mascot moves while nothing changes (`theme::mascot`, 4.7):
+  - Its head sways about its base (`NECK`), 2.5 degrees to each side at
+    rest, 1.5 at work, 2 about its tilt while it waits, 0.8 after a failure.
+  - At rest its pupils look 1.2 to the side its head leans to. At work they
+    stay on the dots, and while it waits, on the user.
+  - It blinks: lids in its own color (`blink.svg`) hang from 28 on the box,
+    above the eyes, and come down to 65. The first part of their way passes
+    over the head and shows nothing, which keeps a blink short. A mascot
+    with something new does not blink: its eyes smile, and it bobs.
+  - Each bot has a sway and a blink of its own length, from its id, so the
+    bots of a list do not move together.
+- The life costs no drawing: each motion is a timed transformation of a
+  layer (`Svg::with_timed_transformation`), which the window plays in the
+  scene it already has, at 30 frames per second at most. Only the dots of a
+  bot that works draw the view again. A new motion of a mascot takes the
+  same path: never an animation that draws the view at each frame for a
+  mascot that only stands there.
+- Under 24 (`mascot::SMALL`: the header at 18, the palette at 20) the eyes
+  are drawn 1.22 times larger about the point between them
+  (`assets/mascot/small`).
+- A sidebar row keeps a state badge at the lower right of the box for the
+  states that ask for the user: waiting, failed, and unread, which carries
+  the count of new messages. It covers the lower right of the head and
+  leaves the eyes clear. A bot that works has no badge: the dots of its
+  mascot show it.
+- A new head is a file of `assets/mascot` with `fill="black"` on the shared
+  box, a variant of `MascotShape` in the protocol, and its layer in
+  `mascot.rs`.
+
 ## 6. What not to do
 
 - A fill that reaches a rounded corner of its parent (4.3, rule 2).
@@ -521,6 +594,7 @@ of this document.
 - An accent fill on anything larger than a chip, a selected swatch, or the
   focus halo.
 - Hue in a neutral.
+- A disc, a ring, or any fill behind a mascot (5.12).
 - A control without an accessible name, or an icon button without a tooltip.
 - `aria_expanded` or `aria_selected` on a clickable element without an
   `on_a11y_action` handler: GPUI then drops its Invoke pattern.

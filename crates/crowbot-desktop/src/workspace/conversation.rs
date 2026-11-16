@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::ConversationSummary;
-use gpui::{AnyElement, Context, FontWeight, Role, SharedString, div, list, prelude::*};
+use gpui::{AnyElement, App, Context, FontWeight, Role, SharedString, div, list, prelude::*};
 
 use super::{OpenConversation, Workspace, row_id};
 use crate::assets::Icon;
@@ -147,7 +147,7 @@ impl Workspace {
         }
     }
 
-    fn render_empty(&self, theme: &Theme) -> AnyElement {
+    fn render_empty(&self, theme: &Theme, cx: &App) -> AnyElement {
         let bot = self.selected_bot().map(|summary| &summary.bot);
         let name = bot.map(|bot| SharedString::from(bot.name.clone()));
         let title = bot
@@ -163,9 +163,9 @@ impl Workspace {
             .justify_center()
             .gap(space::S2)
             .p(space::S6)
-            .children(bot.map(|bot| {
-                ui::avatar(bot, size::AVATAR_EMPTY, size::AVATAR_EMPTY_GLYPH, theme).mb(space::S2)
-            }))
+            .children(
+                bot.map(|bot| ui::living_avatar(bot, size::AVATAR_EMPTY, theme, cx).mb(space::S2)),
+            )
             .children(name.map(|name| {
                 div()
                     .debug_selector(|| "empty-name".into())
@@ -308,7 +308,7 @@ impl Workspace {
             Some(open)
                 if open.transcript.rows().is_empty() && open.transcript.older().is_none() =>
             {
-                self.render_empty(theme)
+                self.render_empty(theme, cx)
             }
             Some(open) => div()
                 .debug_selector(|| "transcript".into())

@@ -125,7 +125,7 @@ pub mod tests {
                 instructions: String::new(),
                 avatar: Avatar {
                     color: "#3b82f6".to_owned(),
-                    glyph: "A".to_owned(),
+                    shape: Default::default(),
                 },
                 provider: "claude".to_owned(),
                 model: None,

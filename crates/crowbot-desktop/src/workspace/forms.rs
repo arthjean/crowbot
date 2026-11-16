@@ -1,6 +1,6 @@
 use crowbot_protocol::{
-    AVATAR_COLORS, Avatar, ClientMessage, ModelChoice, ModelsState, ProviderState, ProviderStatus,
-    RuntimeInstall,
+    AVATAR_COLORS, Avatar, ClientMessage, MascotShape, ModelChoice, ModelsState, ProviderState,
+    ProviderStatus, RuntimeInstall,
 };
 use gpui::{
     AnyElement, Context, Div, Entity, Focusable, FontWeight, Hsla, Role, SharedString, Stateful,
@@ -16,35 +16,43 @@ use crate::theme::{
 };
 use crate::ui::{self, ButtonKind};
 
-pub(super) const GLYPHS: [&str; 11] = [
-    "🐦", "🦉", "🦊", "🐙", "🤖", "🧠", "📚", "🔧", "🔬", "📝", "📈",
-];
 const COLOR_NAMES: [&str; 17] = [
     "Red", "Orange", "Yellow", "Lime", "Green", "Cyan", "Sky blue", "Blue", "Navy", "Indigo",
     "Violet", "Magenta", "Pink", "Wine", "Brown", "Sand", "Gray",
 ];
-/// The palette index of the automatic color of each picture: the letter, then
-/// each emoji of `GLYPHS`. Pictures next to each other get different colors.
-const AUTOMATIC_COLORS: [usize; 12] = [7, 0, 1, 4, 10, 6, 11, 5, 2, 9, 12, 3];
+/// The palette index of the automatic color of each head, in the order of
+/// `MascotShape::ALL`. Heads next to each other get different colors.
+const AUTOMATIC_COLORS: [usize; 6] = [7, 0, 4, 10, 1, 5];
 
-/// The place of a picture in the picker: 0 for a letter, then one per emoji.
-pub(super) fn glyph_cell(glyph: &str) -> usize {
-    GLYPHS
+/// The place of a head in the picker.
+fn shape_cell(shape: MascotShape) -> usize {
+    MascotShape::ALL
         .iter()
-        .position(|candidate| *candidate == glyph)
-        .map_or(0, |index| index + 1)
+        .position(|candidate| *candidate == shape)
+        .unwrap_or_default()
 }
 
-/// The color a picture takes when the color is automatic.
-pub(super) fn automatic_color(cell: usize) -> &'static str {
-    AVATAR_COLORS[AUTOMATIC_COLORS[cell % AUTOMATIC_COLORS.len()]]
+/// The color a head takes when the color is automatic.
+pub(super) fn automatic_color(shape: MascotShape) -> &'static str {
+    AVATAR_COLORS[AUTOMATIC_COLORS[shape_cell(shape)]]
 }
 
-/// The avatar has the automatic color of its picture.
+/// The avatar has the automatic color of its head.
 pub(super) fn is_automatic(avatar: &Avatar) -> bool {
     avatar
         .color
-        .eq_ignore_ascii_case(automatic_color(glyph_cell(&avatar.glyph)))
+        .eq_ignore_ascii_case(automatic_color(avatar.shape))
+}
+
+fn shape_name(shape: MascotShape) -> &'static str {
+    match shape {
+        MascotShape::Smooth => "Smooth head",
+        MascotShape::Crest => "Head with a crest",
+        MascotShape::Spikes => "Head with spikes",
+        MascotShape::Curl => "Head with a curl",
+        MascotShape::Plume => "Head with a plume",
+        MascotShape::Flat => "Flat head",
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,20 +67,6 @@ impl AvatarOwner {
             Self::Creation => "creation",
             Self::Panel => "panel",
         }
-    }
-}
-
-pub(super) fn initial(name: &str) -> String {
-    let first: String = name
-        .trim()
-        .chars()
-        .take(1)
-        .flat_map(char::to_uppercase)
-        .collect();
-    if first.is_empty() {
-        "?".to_owned()
-    } else {
-        first
     }
 }
 
@@ -455,7 +449,7 @@ impl Workspace {
         .child(div().flex_1().min_w_0().child(input.clone()))
     }
 
-    /// The avatar colors: the automatic one, which follows the picture, then
+    /// The avatar colors: the automatic one, which follows the head, then
     /// the palette, in rows of `layout::SWATCH_COLUMNS`.
     pub(super) fn render_color_picker(
         &self,
@@ -472,7 +466,7 @@ impl Workspace {
             theme.border_strong,
         );
         let prefix = owner.prefix();
-        let auto = automatic_color(glyph_cell(&avatar.glyph));
+        let auto = automatic_color(avatar.shape);
         let swatches: Vec<Stateful<Div>> = std::iter::once((None, auto))
             .chain(
                 AVATAR_COLORS
@@ -558,12 +552,11 @@ impl Workspace {
             .children(rows)
     }
 
-    /// The pictures an avatar can show: the first letter of the name, then
-    /// the emoji, each drawn as the avatar it gives, in the current color.
-    pub(super) fn render_glyph_picker(
+    /// The heads a mascot can have, each drawn as the avatar it gives, in the
+    /// current color.
+    pub(super) fn render_shape_picker(
         &self,
         owner: AvatarOwner,
-        initial: &str,
         avatar: &Avatar,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -575,71 +568,64 @@ impl Workspace {
         );
         let halo = theme.accent_soft;
         let prefix = owner.prefix();
-        let chosen_cell = glyph_cell(&avatar.glyph);
-        let cells = std::iter::once((None, initial.to_owned())).chain(
-            GLYPHS
-                .iter()
-                .enumerate()
-                .map(|(index, glyph)| (Some(index), (*glyph).to_owned())),
-        );
         div()
             .flex()
             .flex_wrap()
             .justify_center()
             .gap(space::S0_5)
-            .children(cells.enumerate().map(|(cell, (choice, glyph))| {
-                let chosen = cell == chosen_cell;
-                let label = match (choice, chosen) {
-                    (None, true) => "The first letter of the name, selected".to_owned(),
-                    (None, false) => "The first letter of the name".to_owned(),
-                    (Some(_), true) => format!("{glyph}, selected"),
-                    (Some(_), false) => glyph.clone(),
-                };
-                let sample = Avatar {
-                    color: avatar.color.clone(),
-                    glyph,
-                };
-                div()
-                    .id((prefix, AVATAR_COLORS.len() + cell))
-                    .debug_selector(move || format!("{prefix}-glyph-{cell}"))
-                    .focusable()
-                    .tab_stop(true)
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(label))
-                    .flex_none()
-                    .size(size::GLYPH_CELL)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(radius::MD)
-                    .border_1()
-                    .border_color(if chosen {
-                        ring
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(chosen, |cell| {
-                        cell.shadow(vec![gpui::BoxShadow {
-                            color: halo.into(),
-                            offset: gpui::point(gpui::px(0.), gpui::px(0.)),
-                            blur_radius: gpui::px(0.),
-                            spread_radius: size::RING,
-                            inset: false,
-                        }])
-                    })
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .focus_visible(move |style| style.border_color(focus))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.pick_glyph(owner, choice, cx);
-                    }))
-                    .child(ui::avatar_of(
-                        &sample,
-                        size::AVATAR_FACE,
-                        size::AVATAR_FACE_GLYPH,
-                        theme,
-                    ))
-            }))
+            .children(
+                MascotShape::ALL
+                    .into_iter()
+                    .enumerate()
+                    .map(|(cell, shape)| {
+                        let chosen = shape == avatar.shape;
+                        let name = shape_name(shape);
+                        let label = if chosen {
+                            format!("{name}, selected")
+                        } else {
+                            name.to_owned()
+                        };
+                        let sample = Avatar {
+                            shape,
+                            ..avatar.clone()
+                        };
+                        div()
+                            .id((prefix, AVATAR_COLORS.len() + cell))
+                            .debug_selector(move || format!("{prefix}-shape-{cell}"))
+                            .focusable()
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label(SharedString::from(label))
+                            .flex_none()
+                            .size(size::FACE_CELL)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(radius::MD)
+                            .border_1()
+                            .border_color(if chosen {
+                                ring
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .when(chosen, |cell| {
+                                cell.shadow(vec![gpui::BoxShadow {
+                                    color: halo.into(),
+                                    offset: gpui::point(gpui::px(0.), gpui::px(0.)),
+                                    blur_radius: gpui::px(0.),
+                                    spread_radius: size::RING,
+                                    inset: false,
+                                }])
+                            })
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(hover))
+                            .focus_visible(move |style| style.border_color(focus))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pick_shape(owner, shape, cx);
+                            }))
+                            .child(ui::avatar_of(&sample, size::AVATAR_FACE, theme))
+                    }),
+            )
     }
 
     /// `None` is the automatic color.
@@ -654,11 +640,11 @@ impl Workspace {
                 if let Some(bot) = self.selected_bot().map(|summary| &summary.bot) {
                     let color = match choice {
                         Some(index) => AVATAR_COLORS[index],
-                        None => automatic_color(glyph_cell(&bot.avatar.glyph)),
+                        None => automatic_color(bot.avatar.shape),
                     };
                     let avatar = Avatar {
                         color: color.to_owned(),
-                        glyph: bot.avatar.glyph.clone(),
+                        ..bot.avatar.clone()
                     };
                     self.save_avatar(bot.id, avatar);
                 }
@@ -667,31 +653,23 @@ impl Workspace {
         cx.notify();
     }
 
-    /// `None` is the first letter of the name. A bot on its automatic color
-    /// takes the automatic color of its new picture.
-    fn pick_glyph(&mut self, owner: AvatarOwner, choice: Option<usize>, cx: &mut Context<Self>) {
+    /// Gives the mascot another head. A bot on its automatic color takes the
+    /// automatic color of its new head.
+    fn pick_shape(&mut self, owner: AvatarOwner, shape: MascotShape, cx: &mut Context<Self>) {
         match owner {
             AvatarOwner::Creation => {
                 if let Some(creation) = self.creation.as_mut() {
-                    creation.glyph = choice;
+                    creation.shape = Some(shape);
                 }
             }
             AvatarOwner::Panel => {
                 if let Some(bot) = self.selected_bot().map(|summary| &summary.bot) {
-                    let cell = choice.map_or(0, |index| index + 1);
                     let color = if is_automatic(&bot.avatar) {
-                        automatic_color(cell).to_owned()
+                        automatic_color(shape).to_owned()
                     } else {
                         bot.avatar.color.clone()
                     };
-                    let avatar = Avatar {
-                        color,
-                        glyph: match choice {
-                            Some(index) => GLYPHS[index].to_owned(),
-                            None => initial(&bot.name),
-                        },
-                    };
-                    self.save_avatar(bot.id, avatar);
+                    self.save_avatar(bot.id, Avatar { color, shape });
                 }
             }
         }

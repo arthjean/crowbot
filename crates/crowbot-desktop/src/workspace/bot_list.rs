@@ -2,9 +2,9 @@ use chrono::Local;
 use crowbot_protocol::{BotState, BotSummary};
 use gpui::accesskit::Orientation;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent,
-    Role, SharedString, Stateful, WindowControlArea, anchored, deferred, div, point, prelude::*,
-    px,
+    AnyElement, App, ClickEvent, Context, Div, FontWeight, KeyDownEvent, MouseButton,
+    MouseDownEvent, Role, SharedString, Stateful, WindowControlArea, anchored, deferred, div,
+    point, prelude::*, px,
 };
 
 use super::{DragGhost, MenuTarget, ResizeSidebar, Workspace, row_id};
@@ -156,12 +156,7 @@ impl Workspace {
             .on_click(cx.listener(|this, _, window, cx| this.open_creation(window, cx)))
             // The bot being made: the avatar follows the form as it changes.
             .child(if self.creation.is_some() {
-                ui::avatar(
-                    &self.preview_bot(cx),
-                    size::AVATAR_ROW,
-                    size::AVATAR_TEMPLATE_GLYPH,
-                    theme,
-                )
+                ui::living_avatar(&self.preview_bot(cx), size::AVATAR_ROW, theme, cx)
             } else {
                 div()
                     .flex_none()
@@ -334,15 +329,15 @@ impl Workspace {
     fn avatar_with_badge(
         &self,
         summary: &BotSummary,
-        diameter: gpui::Pixels,
-        glyph: gpui::Pixels,
+        size: gpui::Pixels,
         theme: &Theme,
+        cx: &App,
     ) -> Div {
         div()
             .relative()
             .flex_none()
-            .size(diameter)
-            .child(ui::avatar(&summary.bot, diameter, glyph, theme))
+            .size(size)
+            .child(ui::live_avatar(summary, size, theme, cx))
             .children(ui::state_badge(summary, theme.sidebar, theme))
     }
 
@@ -416,7 +411,7 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(space::S2)
-            .child(self.avatar_with_badge(summary, size::AVATAR_ROW, text::XXL.size, theme));
+            .child(self.avatar_with_badge(summary, size::AVATAR_ROW, theme, cx));
         if shown.compact {
             return row
                 .justify_center()
@@ -493,12 +488,7 @@ impl Workspace {
                 .size(layout::TILE_COMPACT)
                 .justify_center()
                 .tooltip(ui::tooltip(sidebar::row_label(summary)))
-                .child(self.avatar_with_badge(
-                    summary,
-                    size::AVATAR_TILE_COMPACT,
-                    text::XXL.size,
-                    theme,
-                ))
+                .child(self.avatar_with_badge(summary, size::AVATAR_TILE_COMPACT, theme, cx))
                 .into_any_element();
         }
         tile.w(layout::TILE_WIDTH)
@@ -506,7 +496,7 @@ impl Workspace {
             .pt(space::S2)
             .px(space::S1)
             .gap(space::S1_5)
-            .child(self.avatar_with_badge(summary, size::AVATAR_TILE, text::XXXL.size, theme))
+            .child(self.avatar_with_badge(summary, size::AVATAR_TILE, theme, cx))
             .child(
                 div()
                     .w_full()

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crowbot_protocol::{
     ApprovalDecision, ApprovalReason, Avatar, BotDraft, BotPatch, BotState, ClientMessage,
-    ConversationSummary, Event, PermissionLevel, ServerMessage, TurnEnd,
+    ConversationSummary, Event, MascotShape, PermissionLevel, ServerMessage, TurnEnd,
 };
 
 use crate::support::{self, Client, Daemon, user_texts};
@@ -236,7 +236,7 @@ async fn a_bot_keeps_all_its_fields_across_a_restart() {
             instructions: "Answer in one line.".to_owned(),
             avatar: Some(Avatar {
                 color: "#10B981".to_owned(),
-                glyph: "🦉".to_owned(),
+                shape: MascotShape::Plume,
             }),
             provider: None,
             model: Some("smart".to_owned()),
@@ -251,7 +251,7 @@ async fn a_bot_keeps_all_its_fields_across_a_restart() {
     assert_eq!(bot.title, "Researcher");
     assert_eq!(bot.instructions, "Answer in one line.");
     assert_eq!(bot.avatar.color, "#10b981");
-    assert_eq!(bot.avatar.glyph, "🦉");
+    assert_eq!(bot.avatar.shape, MascotShape::Plume);
     assert_eq!(bot.provider, "custom");
     assert_eq!(bot.model.as_deref(), Some("smart"));
     assert_eq!(bot.permission_level, PermissionLevel::FullAccess);

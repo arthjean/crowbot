@@ -6,8 +6,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crowbot_protocol::{
-    AVATAR_COLORS, BOT_INSTRUCTIONS_LENGTH, ConversationHit, DaemonInfo, MessageAuthor, MessageHit,
-    PermissionLevel, ProviderState, ProviderStatus, SearchResults, SendShortcut,
+    AVATAR_COLORS, BOT_INSTRUCTIONS_LENGTH, ConversationHit, DaemonInfo, MascotShape,
+    MessageAuthor, MessageHit, PermissionLevel, ProviderState, ProviderStatus, SearchResults,
+    SendShortcut,
 };
 
 use super::*;
@@ -16,7 +17,7 @@ use crate::theme::{Theme, duration};
 use crate::transcript::RowKind;
 use crate::workspace::bot_panel::SaveState;
 use crate::workspace::creation::TEMPLATES;
-use crate::workspace::forms::{GLYPHS, automatic_color};
+use crate::workspace::forms::automatic_color;
 use gpui::{Modifiers, ScrollDelta, ScrollEvent};
 
 fn text_of(
@@ -111,8 +112,8 @@ fn with_no_bot_the_first_bot_form_fills_the_conversation_pane(cx: &mut TestAppCo
         "creation-color-auto",
         "creation-color-0",
         "creation-color-16",
-        "creation-glyph-0",
-        "creation-glyph-11",
+        "creation-shape-0",
+        "creation-shape-5",
         "creation-name",
         "creation-purpose",
         "creation-model-row",
@@ -128,7 +129,7 @@ fn with_no_bot_the_first_bot_form_fills_the_conversation_pane(cx: &mut TestAppCo
         &[
             "creation-avatar",
             "creation-color-0",
-            "creation-glyph-0",
+            "creation-shape-0",
             "creation-name",
             "creation-purpose",
             "creation-model-row",
@@ -173,21 +174,29 @@ fn with_no_bot_the_first_bot_form_fills_the_conversation_pane(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn the_automatic_color_follows_the_picture_until_a_color_is_picked(cx: &mut TestAppContext) {
+fn the_automatic_color_follows_the_head_until_a_color_is_picked(cx: &mut TestAppContext) {
     let (workspace, mut daemon, cx) = open(cx);
     cx.simulate_resize(size(px(1000.), px(1400.)));
     daemon.connect(Vec::new(), cx);
     let color = |cx: &mut VisualTestContext| {
         workspace.read_with(cx, |this, cx| this.preview_bot(cx).avatar.color)
     };
-    assert_eq!(color(cx), automatic_color(0));
-    click(cx, "creation-glyph-3");
-    assert_eq!(color(cx), automatic_color(3));
+    // With no bot yet, the form starts on the first head.
+    let shape = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |this, cx| this.preview_bot(cx).avatar.shape)
+    };
+    assert_eq!(shape(cx), MascotShape::Smooth);
+    assert_eq!(color(cx), automatic_color(MascotShape::Smooth));
+    click(cx, "creation-shape-3");
+    assert_eq!(shape(cx), MascotShape::Curl);
+    assert_eq!(color(cx), automatic_color(MascotShape::Curl));
     click(cx, "creation-color-2");
-    click(cx, "creation-glyph-5");
+    click(cx, "creation-shape-5");
     assert_eq!(color(cx), AVATAR_COLORS[2], "a picked color stays");
     click(cx, "creation-color-auto");
-    assert_eq!(color(cx), automatic_color(5));
+    assert_eq!(color(cx), automatic_color(MascotShape::Flat));
+    // The head is the only choice of shape: the beak is the same for all.
+    assert!(!shown(cx, "creation-beak-0"));
 }
 
 #[gpui::test]
@@ -275,7 +284,7 @@ fn create_shows_a_creating_state_then_the_bot_opens_with_the_composer_focused(
     press_enter(cx);
     assert!(!shown(cx, "creation-model-picker"));
     click(cx, "creation-color-3");
-    click(cx, "creation-glyph-2");
+    click(cx, "creation-shape-2");
     click(cx, "create-bot");
     let sent = daemon.sent();
     let [ClientMessage::CreateBot { draft }] = &sent[..] else {
@@ -286,7 +295,7 @@ fn create_shows_a_creating_state_then_the_bot_opens_with_the_composer_focused(
     assert_eq!(draft.model.as_deref(), Some("smart"));
     let avatar = draft.avatar.as_ref().unwrap();
     assert_eq!(avatar.color, AVATAR_COLORS[3]);
-    assert_eq!(avatar.glyph, GLYPHS[1]);
+    assert_eq!(avatar.shape, MascotShape::Spikes);
 
     assert!(shown(cx, "creating-bot"));
     assert!(!shown(cx, "create-bot"));
@@ -986,17 +995,18 @@ fn a_change_to_the_level_the_model_or_the_instructions_shows_in_the_header_and_t
         "a change from the daemon is not sent back"
     );
 
-    // The avatar: a color and a picture.
+    // The avatar: a color and a head.
     click(cx, "panel-avatar");
     click(cx, "panel-color-2");
-    click(cx, "panel-glyph-3");
+    click(cx, "panel-shape-3");
     let avatars: Vec<_> = updates(&daemon.sent())
         .into_iter()
         .filter_map(|patch| patch.avatar)
         .collect();
     assert_eq!(avatars.len(), 2);
     assert_eq!(avatars[0].color, AVATAR_COLORS[2]);
-    assert_eq!(avatars[1].glyph, GLYPHS[2]);
+    assert_eq!(avatars[1].shape, MascotShape::Curl);
+    assert_eq!(avatars[1].color, AVATAR_COLORS[2]);
     assert_eq!(bot(cx).avatar, avatars[1]);
 
     // The fields follow the bot on screen.

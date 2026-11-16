@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crowbot_protocol::{
-    AVATAR_COLORS, Avatar, Bot, BotDraft, ClientMessage, ModelChoice, ModelsState, PermissionLevel,
-    ProviderState,
+    AVATAR_COLORS, Avatar, Bot, BotDraft, ClientMessage, MascotShape, ModelChoice, ModelsState,
+    PermissionLevel, ProviderState, mascot_at,
 };
 use gpui::{
     Anchor, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Focusable,
@@ -15,7 +15,7 @@ use gpui::{
     prelude::*, px, radians,
 };
 
-use super::forms::{self, AvatarOwner, GLYPHS};
+use super::forms::{self, AvatarOwner};
 use super::rail::{provider_glyph, provider_logo};
 use super::settings::Section;
 use super::{FocusRequest, Workspace};
@@ -62,7 +62,7 @@ pub(super) struct Template {
     pub description: &'static str,
     /// What the form's purpose becomes.
     pub purpose: &'static str,
-    glyph: usize,
+    shape: MascotShape,
     color: usize,
 }
 
@@ -71,42 +71,42 @@ pub(super) const TEMPLATES: [Template; 6] = [
         name: "Researcher",
         description: "Finds sources and reports what they say.",
         purpose: "Find sources on a question, read them, and report what they say, with links.",
-        glyph: 8,
+        shape: MascotShape::Plume,
         color: 7,
     },
     Template {
         name: "Code reviewer",
         description: "Points out bugs and risks in a change.",
         purpose: "Read a change, point out bugs and risks, and propose a fix for each one.",
-        glyph: 7,
+        shape: MascotShape::Spikes,
         color: 10,
     },
     Template {
         name: "Writer",
         description: "Drafts and edits text in a clear voice.",
         purpose: "Draft and edit text in a clear, direct voice, and explain each edit.",
-        glyph: 9,
+        shape: MascotShape::Curl,
         color: 11,
     },
     Template {
         name: "Data analyst",
         description: "Explains what files and tables show.",
         purpose: "Explore files and tables, and explain what the numbers show in plain words.",
-        glyph: 10,
+        shape: MascotShape::Flat,
         color: 4,
     },
     Template {
         name: "Planner",
         description: "Breaks a goal into steps and tracks them.",
         purpose: "Break a goal into steps, keep track of them, and flag what blocks progress.",
-        glyph: 6,
+        shape: MascotShape::Crest,
         color: 2,
     },
     Template {
         name: "Tutor",
         description: "Explains a topic one step at a time.",
         purpose: "Explain a topic step by step, and check understanding with short questions.",
-        glyph: 1,
+        shape: MascotShape::Smooth,
         color: 5,
     },
 ];
@@ -274,10 +274,11 @@ impl Carousel {
 
 #[derive(Default)]
 pub(super) struct Creation {
-    /// `None` is the automatic color of the picture.
+    /// `None` is the automatic color of the head.
     pub color: Option<usize>,
-    /// `None` is the first letter of the name.
-    pub glyph: Option<usize>,
+    /// `None` is the head of a bot made after the ones that exist:
+    /// `mascot_at`.
+    pub shape: Option<MascotShape>,
     /// `None` is the first provider of the daemon.
     pub provider: Option<String>,
     /// `None` is the default reasoning level of the provider.
@@ -365,23 +366,20 @@ impl Workspace {
         cx.notify();
     }
 
-    fn creation_avatar(&self, cx: &App) -> Avatar {
-        let (color, glyph) = self
+    fn creation_avatar(&self) -> Avatar {
+        let (color, shape) = self
             .creation
             .as_ref()
-            .map_or((None, None), |creation| (creation.color, creation.glyph));
-        let cell = glyph.map_or(0, |index| index + 1);
+            .map_or((None, None), |creation| (creation.color, creation.shape));
+        let shape = shape.unwrap_or_else(|| mascot_at(self.bots.len() as u64));
         Avatar {
             color: color
                 .map_or_else(
-                    || forms::automatic_color(cell),
+                    || forms::automatic_color(shape),
                     |index| AVATAR_COLORS[index % AVATAR_COLORS.len()],
                 )
                 .to_owned(),
-            glyph: match glyph {
-                Some(index) => GLYPHS[index % GLYPHS.len()].to_owned(),
-                None => forms::initial(self.creation_name.read(cx).text()),
-            },
+            shape,
         }
     }
 
@@ -394,7 +392,7 @@ impl Workspace {
         TEMPLATES.iter().position(|template| {
             template.name == name
                 && template.purpose == purpose
-                && creation.glyph == Some(template.glyph)
+                && creation.shape == Some(template.shape)
                 && creation.color == Some(template.color)
         })
     }
@@ -407,7 +405,7 @@ impl Workspace {
         if creation.creating || std::mem::take(&mut creation.suggestions.suppress_click) {
             return;
         }
-        creation.glyph = Some(template.glyph);
+        creation.shape = Some(template.shape);
         creation.color = Some(template.color);
         creation.error = None;
         self.creation_name.update(cx, |input, cx| {
@@ -435,7 +433,7 @@ impl Workspace {
         }
         let name = self.creation_name.read(cx).text().trim().to_owned();
         let instructions = self.creation_purpose.read(cx).text().to_owned();
-        let avatar = self.creation_avatar(cx);
+        let avatar = self.creation_avatar();
         let Some(creation) = self.creation.as_mut() else {
             return;
         };
@@ -478,7 +476,7 @@ impl Workspace {
             name: self.creation_name.read(cx).text().trim().to_owned(),
             title: String::new(),
             instructions: String::new(),
-            avatar: self.creation_avatar(cx),
+            avatar: self.creation_avatar(),
             provider: String::new(),
             model: None,
             effort: None,
@@ -1496,12 +1494,7 @@ impl Workspace {
             .gap(space::S1_5)
             .pl(layout::HEADER_PADDING_START)
             .pr(space::S2)
-            .child(ui::avatar(
-                &preview,
-                size::AVATAR_HEADER,
-                size::AVATAR_HEADER_GLYPH,
-                theme,
-            ))
+            .child(ui::living_avatar(&preview, size::AVATAR_HEADER, theme, cx))
             .child(
                 div()
                     .id("creation-title")
@@ -1603,7 +1596,7 @@ impl Workspace {
             let chosen = selected == Some(index);
             let sample = Avatar {
                 color: AVATAR_COLORS[template.color].to_owned(),
-                glyph: GLYPHS[template.glyph].to_owned(),
+                shape: template.shape,
             };
             div()
                 .id(("template", index))
@@ -1634,12 +1627,7 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.apply_template(index, window, cx);
                 }))
-                .child(ui::avatar_of(
-                    &sample,
-                    size::AVATAR_TEMPLATE,
-                    size::AVATAR_TEMPLATE_GLYPH,
-                    theme,
-                ))
+                .child(ui::avatar_of(&sample, size::AVATAR_TEMPLATE, theme))
                 .child(
                     div()
                         .flex_1()
@@ -1928,15 +1916,9 @@ impl Workspace {
             .gap(space::S3)
             .child(
                 div().mb(space::S1).flex().justify_center().child(
-                    ui::avatar(
-                        &preview,
-                        size::AVATAR_CREATION,
-                        size::AVATAR_CREATION_GLYPH,
-                        theme,
-                    )
-                    .relative()
-                    .top(-size::AVATAR_CREATION_LIFT)
-                    .debug_selector(|| "creation-avatar".into()),
+                    ui::living_avatar(&preview, size::AVATAR_CREATION, theme, cx)
+                        .top(-size::AVATAR_CREATION_LIFT)
+                        .debug_selector(|| "creation-avatar".into()),
                 ),
             )
             .child(
@@ -1954,12 +1936,11 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("creation-glyphs")
+                    .id("creation-shapes")
                     .role(Role::Group)
-                    .aria_label("Avatar picture")
-                    .child(self.render_glyph_picker(
+                    .aria_label("Avatar head")
+                    .child(self.render_shape_picker(
                         AvatarOwner::Creation,
-                        &forms::initial(&preview.name),
                         &preview.avatar,
                         theme,
                         cx,

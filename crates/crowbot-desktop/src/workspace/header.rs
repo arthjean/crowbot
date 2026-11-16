@@ -79,12 +79,7 @@ impl Workspace {
             .hover(move |style| style.bg(hover))
             .focus_visible(move |style| style.border_color(focus))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_side_panel(cx)))
-            .child(ui::avatar(
-                &summary.bot,
-                size::AVATAR_HEADER,
-                size::AVATAR_HEADER_GLYPH,
-                theme,
-            ))
+            .child(ui::live_avatar(summary, size::AVATAR_HEADER, theme, cx))
             .child(
                 div()
                     .id("bot-name")

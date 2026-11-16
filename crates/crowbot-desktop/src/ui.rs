@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::assets::Icon;
-use crate::bots;
+use crate::mascot::{self, Mood};
 use crate::theme::{
     Theme, control, duration, font, icon as icon_size, layout, menu, opacity, radius, size, space,
     text,
@@ -262,25 +262,49 @@ pub fn small_icon_button(
         )
 }
 
-pub fn avatar(bot: &Bot, diameter: Pixels, glyph: Pixels, theme: &Theme) -> Div {
-    avatar_of(&bot.avatar, diameter, glyph, theme)
+/// The avatar of a bot where it stands as a label, such as beside a message:
+/// its mascot at rest in a square of `size`, still.
+pub fn avatar(bot: &Bot, size: Pixels, theme: &Theme) -> Div {
+    avatar_of(&bot.avatar, size, theme)
 }
 
 /// An avatar that belongs to no bot yet, such as a choice in a picker.
-pub fn avatar_of(avatar: &Avatar, diameter: Pixels, glyph: Pixels, theme: &Theme) -> Div {
-    div()
-        .flex_none()
-        .size(diameter)
-        .rounded_full()
-        .bg(bots::avatar_color(&avatar.color).unwrap_or(theme.accent))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(glyph)
-        .line_height(diameter)
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.on_accent)
-        .child(SharedString::from(avatar.glyph.clone()))
+pub fn avatar_of(avatar: &Avatar, size: Pixels, theme: &Theme) -> Div {
+    mascot::mascot(0, avatar, Mood::Rest, false, size, theme)
+}
+
+/// Mascots move, unless the system asks for reduced motion.
+fn alive(cx: &App) -> bool {
+    !cx.reduce_motion()
+}
+
+fn mascot_id(bot: &Bot) -> usize {
+    usize::try_from(bot.id).unwrap_or_default()
+}
+
+/// The avatar of a bot where it stands for the bot itself: its mascot at
+/// rest, alive.
+pub fn living_avatar(bot: &Bot, size: Pixels, theme: &Theme, cx: &App) -> Div {
+    mascot::mascot(
+        mascot_id(bot),
+        &bot.avatar,
+        Mood::Rest,
+        alive(cx),
+        size,
+        theme,
+    )
+}
+
+/// The avatar of a bot with the eyes of what the bot does now, alive.
+pub fn live_avatar(summary: &BotSummary, size: Pixels, theme: &Theme, cx: &App) -> Div {
+    mascot::mascot(
+        mascot_id(&summary.bot),
+        &summary.bot.avatar,
+        summary.state.into(),
+        alive(cx),
+        size,
+        theme,
+    )
 }
 
 fn badge_shell(ring: impl Into<Hsla>) -> Div {
@@ -296,50 +320,17 @@ fn badge_shell(ring: impl Into<Hsla>) -> Div {
         .justify_center()
 }
 
-fn hop(phase: f32) -> f32 {
-    let rise = duration::WORKING_RISE;
-    if phase < rise {
-        (phase / rise * std::f32::consts::PI).sin()
-    } else {
-        0.
-    }
-}
-
+/// The badge at the lower right of an avatar, for a state that asks for the
+/// user: a request, a failure, or new messages.
 pub fn state_badge(
     summary: &BotSummary,
     ring: impl Into<Hsla>,
     theme: &Theme,
 ) -> Option<AnyElement> {
-    let id = usize::try_from(summary.bot.id).unwrap_or_default();
     let shell = badge_shell(ring);
     Some(match summary.state {
-        BotState::Idle => return None,
-        BotState::Working => {
-            let dot_color = theme.text_secondary;
-            shell
-                .w(size::BADGE_WORKING_WIDTH)
-                .h(size::BADGE)
-                .gap(space::S0_5)
-                .bg(theme.surface)
-                .children((0..3_usize).map(|dot| {
-                    div()
-                        .flex_none()
-                        .size(size::BADGE_DOT)
-                        .rounded_full()
-                        .bg(dot_color)
-                        .relative()
-                        .with_animation(
-                            ("working", id * 3 + dot),
-                            Animation::new(duration::WORKING).repeat(),
-                            move |ball, turn| {
-                                let phase =
-                                    (turn + 1. - dot as f32 * duration::WORKING_STAGGER).fract();
-                                ball.top(-size::BADGE_HOP * hop(phase))
-                            },
-                        )
-                }))
-                .into_any_element()
-        }
+        // The mascot of a bot that works shows it: its dots hop.
+        BotState::Idle | BotState::Working => return None,
         BotState::Waiting => shell
             .size(size::BADGE_PILL)
             .bg(theme.warning)
@@ -505,17 +496,4 @@ pub fn divider(theme: &Theme) -> Div {
         .w(size::HAIRLINE)
         .h(size::DIVIDER_HEIGHT)
         .bg(theme.border_strong)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_working_dot_rises_once_per_cycle_and_rests() {
-        assert_eq!(hop(0.), 0.);
-        assert!((hop(0.2) - 1.).abs() < 0.001);
-        assert_eq!(hop(0.4), 0.);
-        assert_eq!(hop(0.9), 0.);
-    }
 }

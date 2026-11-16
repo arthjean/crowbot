@@ -14,7 +14,7 @@ use crowbot_protocol::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH as INSTRUCTIONS_LENGTH,
     BOT_MODEL_LENGTH as MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH as TITLE_LENGTH, BotDraft,
     BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, PROTOCOL_VERSION,
-    PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage,
+    PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage, mascot_at,
 };
 use tokio::sync::oneshot;
 
@@ -25,7 +25,6 @@ use crate::store::{BotRow, NewBot, SharedStore, StoreError};
 /// The provider of a bot that runs the agent command given to the daemon.
 pub const CUSTOM_PROVIDER: &str = "custom";
 
-const GLYPH_LENGTH: usize = 16;
 const SLUG_LENGTH: usize = 48;
 /// How long a deleted bot's conversation gets to stop its turn. A turn ends
 /// within the stop timeout of the conversation, which is shorter.
@@ -297,7 +296,7 @@ impl Daemon {
         let name = checked_name(&draft.name)?;
         let avatar = match draft.avatar {
             Some(avatar) => checked_avatar(avatar)?,
-            None => self.default_avatar(&name)?,
+            None => self.default_avatar()?,
         };
         let folder = match draft.workspace {
             Some(workspace) => Folder::Chosen(checked_workspace(&workspace)?),
@@ -398,11 +397,13 @@ impl Daemon {
         ))
     }
 
-    fn default_avatar(&self, name: &str) -> Result<Avatar, Refusal> {
+    /// The avatar of a bot created with none: the next color and the next head
+    /// after those of the bots that exist.
+    fn default_avatar(&self) -> Result<Avatar, Refusal> {
         let bots = self.store.with(|store| store.bots())?.len();
         Ok(Avatar {
             color: AVATAR_COLORS[bots % AVATAR_COLORS.len()].to_owned(),
-            glyph: name.chars().take(1).flat_map(char::to_uppercase).collect(),
+            shape: mascot_at(bots as u64),
         })
     }
 
@@ -634,16 +635,9 @@ fn checked_avatar(avatar: Avatar) -> Result<Avatar, Refusal> {
             "An avatar color is written #rrggbb, for example #3b82f6.",
         ));
     }
-    let glyph = avatar.glyph.trim();
-    if glyph.is_empty() || glyph.chars().count() > GLYPH_LENGTH {
-        return Err(invalid(
-            "avatar",
-            "An avatar glyph is one letter or one emoji.",
-        ));
-    }
     Ok(Avatar {
         color: color.to_ascii_lowercase(),
-        glyph: glyph.to_owned(),
+        ..avatar
     })
 }
 
@@ -817,7 +811,7 @@ mod tests {
             field(patch(BotPatch {
                 avatar: Some(Avatar {
                     color: "blue".to_owned(),
-                    glyph: "A".to_owned(),
+                    shape: Default::default(),
                 }),
                 ..BotPatch::default()
             })),

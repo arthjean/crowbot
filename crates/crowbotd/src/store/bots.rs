@@ -1,12 +1,14 @@
 //! Bots in the database: their records, their conversations, and their read marks.
 
-use crowbot_protocol::{Avatar, Bot, BotPatch, ConversationSummary, Event, PermissionLevel};
+use crowbot_protocol::{
+    Avatar, Bot, BotPatch, ConversationSummary, Event, MascotShape, PermissionLevel, mascot_at,
+};
 use rusqlite::{OptionalExtension, Row, params};
 
 use super::{Store, StoreError, now_ms, title_of};
 
 const BOT_COLUMNS: &str =
-    "id, name, title, instructions, avatar_color, avatar_glyph, provider, model,
+    "id, name, title, instructions, avatar_color, avatar_shape, provider, model,
     permission_level, workspace, pinned, hidden, created_at_ms, current_conversation_id,
     session_revision, effort";
 
@@ -84,9 +86,10 @@ fn bot_row(row: &Row<'_>) -> rusqlite::Result<BotRow> {
             name: row.get(1)?,
             title: row.get(2)?,
             instructions: row.get(3)?,
+            // A head this daemon does not know is the first one.
             avatar: Avatar {
                 color: row.get(4)?,
-                glyph: row.get(5)?,
+                shape: MascotShape::from_name(&row.get::<_, String>(5)?).unwrap_or_default(),
             },
             provider: row.get(6)?,
             model: row.get(7)?,
@@ -107,15 +110,15 @@ impl Store {
     pub fn create_bot(&self, new: &NewBot) -> Result<BotRow, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO bots (name, title, instructions, avatar_color, avatar_glyph, provider,
-                model, permission_level, workspace, created_at_ms, effort)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO bots (name, title, instructions, avatar_color, avatar_glyph, avatar_shape,
+                provider, model, permission_level, workspace, created_at_ms, effort)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 new.name,
                 new.title,
                 new.instructions,
                 new.avatar.color,
-                new.avatar.glyph,
+                new.avatar.shape.name(),
                 new.provider,
                 new.model,
                 level_name(new.permission_level),
@@ -220,7 +223,7 @@ impl Store {
         let revision = session_revision + i64::from(session_settings(&bot) != before);
         transaction.execute(
             "UPDATE bots SET name = ?2, title = ?3, instructions = ?4, avatar_color = ?5,
-                avatar_glyph = ?6, model = ?7, permission_level = ?8, workspace = ?9,
+                avatar_shape = ?6, model = ?7, permission_level = ?8, workspace = ?9,
                 pinned = ?10, hidden = ?11, session_revision = ?12, provider = ?13,
                 effort = ?14
              WHERE id = ?1",
@@ -230,7 +233,7 @@ impl Store {
                 bot.title,
                 bot.instructions,
                 bot.avatar.color,
-                bot.avatar.glyph,
+                bot.avatar.shape.name(),
                 bot.model,
                 level_name(bot.permission_level),
                 bot.workspace,
@@ -540,6 +543,24 @@ impl Store {
         }
         Ok(())
     }
+
+    /// Gives each bot stored before mascots a head, from its place among the
+    /// bots: the one a new bot at that place gets.
+    pub(super) fn assign_mascots(&self) -> Result<(), StoreError> {
+        let ids = {
+            let mut statement = self.connection.prepare("SELECT id FROM bots ORDER BY id")?;
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (place, id) in (0_u64..).zip(ids) {
+            self.connection.execute(
+                "UPDATE bots SET avatar_shape = ?2 WHERE id = ?1",
+                params![id, mascot_at(place).name()],
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -561,7 +582,7 @@ mod tests {
             instructions: "Answer in one line.".to_owned(),
             avatar: Avatar {
                 color: "#10b981".to_owned(),
-                glyph: "A".to_owned(),
+                shape: MascotShape::Curl,
             },
             provider: "claude".to_owned(),
             model: Some("opus".to_owned()),
@@ -606,7 +627,7 @@ mod tests {
         assert_eq!(loaded.bot.title, "Researcher");
         assert_eq!(loaded.bot.instructions, "Answer in one line.");
         assert_eq!(loaded.bot.avatar.color, "#10b981");
-        assert_eq!(loaded.bot.avatar.glyph, "A");
+        assert_eq!(loaded.bot.avatar.shape, MascotShape::Curl);
         assert_eq!(loaded.bot.provider, "claude");
         assert_eq!(loaded.bot.model.as_deref(), Some("opus"));
         assert_eq!(loaded.bot.permission_level, PermissionLevel::AskFirst);
