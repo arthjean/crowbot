@@ -115,6 +115,19 @@ mod tests {
     }
 
     #[test]
+    fn every_stroke_icon_has_the_light_stroke_and_every_mark_is_filled() {
+        for icon in Icon::ALL {
+            let text = std::str::from_utf8(icon.bytes()).unwrap();
+            if icon.path().starts_with("icons/providers/") {
+                assert!(text.contains("fill=\"black\""), "{}", icon.path());
+                assert!(!text.contains("stroke"), "{}", icon.path());
+            } else {
+                assert!(text.contains("stroke-width=\"1.75\""), "{}", icon.path());
+            }
+        }
+    }
+
+    #[test]
     fn the_bundled_fonts_are_the_three_weights_of_inter() {
         let fonts = fonts();
         assert_eq!(fonts.len(), 3);

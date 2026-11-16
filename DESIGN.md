@@ -206,10 +206,13 @@ case everywhere. Never an em dash.
 
 ### 4.6 Icons
 
-Lucide stroke icons (ISC) in `assets/icons/`, painted with `text_color`:
-`text_muted` at rest, `text` on hover. A new icon is the Lucide file, added
-to the `icons!` list in `src/assets.rs`. Provider marks are the providers'
-logos, from LobeHub Icons (MIT) in `assets/icons/providers/`, filled with one
+Lucide stroke icons (ISC) in `assets/icons/`, drawn as T3 Code draws them:
+the Lucide glyph with a stroke of 1.75 in place of 2, at every size. They are
+painted with `text_color`: `text_muted` at rest, `text` on hover. A new icon
+is the Lucide file with `stroke-width="1.75"`, added to the `icons!` list in
+`src/assets.rs`; a test fails on another stroke. Provider marks are the
+providers' logos, in `assets/icons/providers/`: Claude and Grok from LobeHub
+Icons (MIT), OpenAI from T3 Code (MIT). They are filled with one
 color by the client (`rail::provider_glyph`): 14 in the rail ring, 19 in a
 picker tab, 15 beside the model in the trigger, where the Claude mark takes
 `claude_mark` and the others `text`. They only name the provider a bot runs

@@ -1,13 +1,16 @@
-The provider marks in this folder (claude.svg, openai.svg, grok.svg) come from
-LobeHub Icons, @lobehub/icons-static-svg 1.102.0
-(https://github.com/lobehub/lobe-icons), under the MIT License below. Their
-width, height, style, and title attributes were removed and their fill set to
-black, so the client can tint them. The marks are trademarks of Anthropic,
+The marks claude.svg and grok.svg in this folder come from LobeHub Icons,
+@lobehub/icons-static-svg 1.102.0 (https://github.com/lobehub/lobe-icons).
+Their width, height, style, and title attributes were removed. The mark
+openai.svg comes from T3 Code (https://github.com/pingdotgg/t3code,
+apps/web/src/components/Icons.tsx): its path and its view box, as a plain SVG
+file. Both sources are under the MIT License below. The fill of each mark is
+black, so the client can tint it. The marks are trademarks of Anthropic,
 OpenAI, and xAI; Crow Bot shows them only to name the provider a bot runs on.
 
 MIT License
 
 Copyright (c) 2023 LobeHub
+Copyright (c) 2026 T3 Tools Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
