@@ -10,6 +10,7 @@
 | 1.2 | 2026-11-16 | Arthur Jean | US-007 moves from EP-001 to its own epic, EP-007, which follows EP-001 and EP-002 |
 | 1.3 | 2026-11-17 | Arthur Jean | Every check that needs Windows leaves its story for a final epic, EP-008, so that the Linux work is certified on Linux alone |
 | 1.4 | 2026-11-17 | Arthur Jean | What GPUI cannot do on Linux at the pinned rev (COLRv1 emoji, the AT-SPI bridge) leaves US-002 and US-006 for a new story, US-026 in EP-009; the check of KDE's button layout moves from US-004 to US-007 |
+| 1.5 | 2026-11-17 | Arthur Jean | EP-009 moves before EP-007, since US-007 is blocked by US-026 and US-026 only by EP-001 |
 
 ## Problem Statement
 
@@ -41,7 +42,7 @@ The work is phased, because it holds 26 stories:
 
 | Phase | Epics | Stories | Outcome |
 |-------|-------|---------|---------|
-| A. Works from source on Fedora | EP-001, EP-002, EP-003, EP-004, EP-007, EP-009 | 20 | A window with full chrome, known to the desktop, on a daemon that stops, survives a logout, and keeps its files private, all guarded by continuous integration |
+| A. Works from source on Fedora | EP-001, EP-002, EP-009, EP-007, EP-003, EP-004 | 20 | A window with full chrome, known to the desktop, on a daemon that stops, survives a logout, and keeps its files private, all guarded by continuous integration |
 | B. Providers | EP-005 | 3 | Claude, ChatGPT, and Grok sign in and run a turn on Linux |
 | C. Windows non-regression | EP-008 | 3 | The Windows client and daemon behave as before the port, and every push runs the gates on Windows |
 
@@ -295,9 +296,37 @@ The desktop learns what the window is: a name, an icon, an entry in the applicat
 
 ---
 
+### EP-009: GPUI on Linux
+
+Two things GPUI does not do on Linux at the pinned rev, found by the review of EP-001 on 2026-11-17: it draws no COLRv1 color glyph, the format of Fedora's "Noto Color Emoji", and it publishes nothing on the AT-SPI bus, so assistive tools see no GPUI window. Zed's main branch has the same code (issues 58287, 61660, and 51171 closed with no fix).
+
+**Definition of Done:** On Fedora 45 an emoji draws in color; with AT-SPI on, the client's window and its buttons show to assistive tools with their roles and labels; the way GPUI is changed is recorded in `AGENTS.md`.
+
+#### US-026: GPUI draws emoji and speaks to assistive tools on Linux
+**Description:** As a solo builder on Linux, I want emoji drawn and the window readable by a screen reader so that Crow Bot is complete and accessible on my desktop.
+
+**Priority:** P1
+**Size:** L (5 pts)
+**Dependencies:** Blocked by US-002, US-006
+
+**References:**
+- Zed: the rasterizer's sources, `zed/crates/gpui_wgpu/src/cosmic_text_system.rs` lines 532-539 (swash: COLRv0, bitmaps, outlines; no COLRv1); fallback families without a Latin `m` dropped, same file lines 423-432; the emoji font known by name only, line 1204; the AT-SPI adapter, `zed/crates/gpui_linux/src/linux/wayland/window.rs` lines 2282-2295.
+- cosmic-text 0.19: its Unix fallback picks "Noto Color Emoji" by name, `src/font/fallback/unix.rs` line 46.
+- Crow Bot: the oracles `theme::system_fonts::an_emoji_draws_a_glyph` (fails on Fedora 45 today) and `every_script_of_a_message_draws_a_glyph`.
+- `AGENTS.md`, "GPUI source": GPUI comes from Zed's repository at a pinned rev; a change to GPUI is an exception this story decides.
+
+**Acceptance Criteria:**
+- [ ] Given Fedora 45 and its COLRv1 "Noto Color Emoji", when a message with emoji draws, then each emoji shows in color, and `an_emoji_draws_a_glyph` passes (from US-006)
+- [ ] Given a fallback family with no Latin glyph (Noto Sans Arabic, an emoji family), when the client names it, then the text system uses it in the order named
+- [ ] Given AT-SPI is on, when the client runs, then its window shows on the accessibility bus, and each window button reads with the Button role and its label (from US-002)
+- [ ] Given the way GPUI is changed (a patch upstream and a rev bump, or a fork the client takes by path), when the story ends, then `AGENTS.md` records it, and the change is offered to Zed
+- [ ] Given Windows, when the client runs, then nothing changes
+
+---
+
 ### EP-007: Validation on real desktops
 
-The chrome, the identity, and the text, specified from source and proven on the reference computer's headless compositors, are checked by hand on real sessions. The epic follows EP-001 and EP-002, whose work it checks, so that neither waits on the other.
+The chrome, the identity, and the text, specified from source and proven on the reference computer's headless compositors, are checked by hand on real sessions. The epic follows EP-001 and EP-002, whose work it checks, so that neither waits on the other, and EP-009, whose emoji and AT-SPI bridge it checks too.
 
 **Definition of Done:** Every check of US-007 holds on GNOME Wayland, KDE on Wayland, Xwayland, and Sway, with its captures kept; a failed check is a new story or a fixed defect; the "Not verified" list of `docs/linux-port.md` is current.
 
@@ -612,34 +641,6 @@ The three providers install, sign in, and run a turn on Linux, with every gated 
 - [ ] Given `crowbotd --help`, when it runs, then it prints the usage on standard output and exits 0, and a wrong argument still exits 2 on the error stream
 - [ ] Given the data folder is on a file system mounted `noexec`, when a runtime is started, then the turn fails with a message that names the mount option
 - [ ] Given the ignored pin test, when it runs with the network, then it fails for any pinned address that does not answer or whose SHA-256 differs, on every platform
-
----
-
-### EP-009: GPUI on Linux
-
-Two things GPUI does not do on Linux at the pinned rev, found by the review of EP-001 on 2026-11-17: it draws no COLRv1 color glyph, the format of Fedora's "Noto Color Emoji", and it publishes nothing on the AT-SPI bus, so assistive tools see no GPUI window. Zed's main branch has the same code (issues 58287, 61660, and 51171 closed with no fix).
-
-**Definition of Done:** On Fedora 45 an emoji draws in color; with AT-SPI on, the client's window and its buttons show to assistive tools with their roles and labels; the way GPUI is changed is recorded in `AGENTS.md`.
-
-#### US-026: GPUI draws emoji and speaks to assistive tools on Linux
-**Description:** As a solo builder on Linux, I want emoji drawn and the window readable by a screen reader so that Crow Bot is complete and accessible on my desktop.
-
-**Priority:** P1
-**Size:** L (5 pts)
-**Dependencies:** Blocked by US-002, US-006
-
-**References:**
-- Zed: the rasterizer's sources, `zed/crates/gpui_wgpu/src/cosmic_text_system.rs` lines 532-539 (swash: COLRv0, bitmaps, outlines; no COLRv1); fallback families without a Latin `m` dropped, same file lines 423-432; the emoji font known by name only, line 1204; the AT-SPI adapter, `zed/crates/gpui_linux/src/linux/wayland/window.rs` lines 2282-2295.
-- cosmic-text 0.19: its Unix fallback picks "Noto Color Emoji" by name, `src/font/fallback/unix.rs` line 46.
-- Crow Bot: the oracles `theme::system_fonts::an_emoji_draws_a_glyph` (fails on Fedora 45 today) and `every_script_of_a_message_draws_a_glyph`.
-- `AGENTS.md`, "GPUI source": GPUI comes from Zed's repository at a pinned rev; a change to GPUI is an exception this story decides.
-
-**Acceptance Criteria:**
-- [ ] Given Fedora 45 and its COLRv1 "Noto Color Emoji", when a message with emoji draws, then each emoji shows in color, and `an_emoji_draws_a_glyph` passes (from US-006)
-- [ ] Given a fallback family with no Latin glyph (Noto Sans Arabic, an emoji family), when the client names it, then the text system uses it in the order named
-- [ ] Given AT-SPI is on, when the client runs, then its window shows on the accessibility bus, and each window button reads with the Button role and its label (from US-002)
-- [ ] Given the way GPUI is changed (a patch upstream and a rev bump, or a fork the client takes by path), when the story ends, then `AGENTS.md` records it, and the change is offered to Zed
-- [ ] Given Windows, when the client runs, then nothing changes
 
 ---
 

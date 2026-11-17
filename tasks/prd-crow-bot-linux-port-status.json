@@ -23,6 +23,14 @@
       "stories_done": 2
     },
     {
+      "id": "EP-009",
+      "title": "GPUI on Linux",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 1,
+      "stories_done": 0
+    },
+    {
       "id": "EP-007",
       "title": "Validation on real desktops",
       "status": "TODO",
@@ -52,14 +60,6 @@
       "status": "TODO",
       "priority": "P1",
       "stories_total": 3,
-      "stories_done": 0
-    },
-    {
-      "id": "EP-009",
-      "title": "GPUI on Linux",
-      "status": "TODO",
-      "priority": "P1",
-      "stories_total": 1,
       "stories_done": 0
     },
     {
@@ -153,6 +153,21 @@
       "started_at": "2026-11-16",
       "completed_at": "2026-11-17",
       "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-026",
+      "title": "GPUI draws emoji and speaks to assistive tools on Linux",
+      "epic": "EP-009",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "L",
+      "blocked_by": [
+        "US-002",
+        "US-006"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
     },
     {
       "id": "US-007",
@@ -368,21 +383,6 @@
       "priority": "P2",
       "size": "S",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
-    },
-    {
-      "id": "US-026",
-      "title": "GPUI draws emoji and speaks to assistive tools on Linux",
-      "epic": "EP-009",
-      "status": "TODO",
-      "priority": "P1",
-      "size": "L",
-      "blocked_by": [
-        "US-002",
-        "US-006"
-      ],
       "started_at": null,
       "completed_at": null,
       "reviewed_at": null
