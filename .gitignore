@@ -5,3 +5,4 @@
 TASKS.md
 .DS_Store
 Thumbs.db
+/crates/crowbot-desktop/target
