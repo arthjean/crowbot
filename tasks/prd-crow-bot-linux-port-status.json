@@ -1,0 +1,445 @@
+{
+  "prd": {
+    "file": "tasks/prd-crow-bot-linux-port.md",
+    "title": "Crow Bot Linux port",
+    "created_at": "2026-11-16",
+    "status": "IN_PROGRESS"
+  },
+  "epics": [
+    {
+      "id": "EP-001",
+      "title": "A usable window on Linux",
+      "status": "DONE",
+      "priority": "P0",
+      "stories_total": 6,
+      "stories_done": 6
+    },
+    {
+      "id": "EP-002",
+      "title": "Identity on the desktop",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 2,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-007",
+      "title": "Validation on real desktops",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 1,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-003",
+      "title": "The daemon on Linux",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 6,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-004",
+      "title": "Tests and continuous integration",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 4,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-005",
+      "title": "Providers on Linux",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 3,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-009",
+      "title": "GPUI on Linux",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 1,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-008",
+      "title": "Windows non-regression",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 3,
+      "stories_done": 0
+    }
+  ],
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "The client opens a window on Wayland and X11",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "size": "S",
+      "blocked_by": [],
+      "started_at": "2026-11-16",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-002",
+      "title": "The title band moves the window and holds its buttons",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "size": "L",
+      "blocked_by": [
+        "US-001"
+      ],
+      "started_at": "2026-11-16",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-003",
+      "title": "The window has resize edges, a shadow, and rounded corners",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "size": "L",
+      "blocked_by": [
+        "US-002"
+      ],
+      "started_at": "2026-11-16",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-004",
+      "title": "Exactly one title bar when the compositor decorates",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P1",
+      "size": "M",
+      "blocked_by": [
+        "US-003"
+      ],
+      "started_at": "2026-11-16",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-005",
+      "title": "A start that cannot show a window says why",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P1",
+      "size": "S",
+      "blocked_by": [
+        "US-001"
+      ],
+      "started_at": "2026-11-16",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-006",
+      "title": "Text draws in every script",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P1",
+      "size": "S",
+      "blocked_by": [
+        "US-001"
+      ],
+      "started_at": "2026-11-16",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
+    },
+    {
+      "id": "US-007",
+      "title": "Validate assumption: the chrome and the interface hold on real desktops",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "M",
+      "blocked_by": [
+        "US-004",
+        "US-006",
+        "US-009",
+        "US-026"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-008",
+      "title": "The window carries the application ID",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "XS",
+      "blocked_by": [
+        "US-001"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-009",
+      "title": "The desktop entry and the icon",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [
+        "US-008"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-010",
+      "title": "The daemon stops cleanly on a signal",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-011",
+      "title": "The files sit in the XDG folders",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-012",
+      "title": "A socket path that is too long is refused first",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "S",
+      "blocked_by": [
+        "US-011"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-013",
+      "title": "The daemon's files are private",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "S",
+      "blocked_by": [
+        "US-011"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-014",
+      "title": "Agents end at once when the daemon dies",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-015",
+      "title": "The daemon runs as a systemd user unit",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "L",
+      "blocked_by": [
+        "US-009",
+        "US-010",
+        "US-011"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-016",
+      "title": "The tests pass in any environment",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-017",
+      "title": "The Unix transport has tests of its own",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-018",
+      "title": "Every push is built and tested on Linux",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "size": "M",
+      "blocked_by": [
+        "US-016"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-019",
+      "title": "A real window opens in the pipeline",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "M",
+      "blocked_by": [
+        "US-001",
+        "US-018"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-020",
+      "title": "Each provider signs in on Linux",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "M",
+      "blocked_by": [
+        "US-015"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-021",
+      "title": "Each provider runs a turn with the daemon's approvals",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "M",
+      "blocked_by": [
+        "US-020"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-022",
+      "title": "Small Linux corrections of the daemon",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P2",
+      "size": "S",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-026",
+      "title": "GPUI draws emoji and speaks to assistive tools on Linux",
+      "epic": "EP-009",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "L",
+      "blocked_by": [
+        "US-002",
+        "US-006"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-023",
+      "title": "The Windows client is unchanged",
+      "epic": "EP-008",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "S",
+      "blocked_by": [
+        "US-002",
+        "US-003",
+        "US-004",
+        "US-005",
+        "US-006",
+        "US-008",
+        "US-026"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-024",
+      "title": "The Windows daemon is unchanged",
+      "epic": "EP-008",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "S",
+      "blocked_by": [
+        "US-010",
+        "US-011",
+        "US-013",
+        "US-014",
+        "US-022"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-025",
+      "title": "Every push is built and tested on Windows",
+      "epic": "EP-008",
+      "status": "TODO",
+      "priority": "P1",
+      "size": "S",
+      "blocked_by": [
+        "US-018",
+        "US-023",
+        "US-024"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    }
+  ]
+}
