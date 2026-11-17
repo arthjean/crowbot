@@ -284,21 +284,63 @@ fn alpha_of(color: Rgba, alpha: f32) -> Rgba {
 }
 
 pub mod font {
+    use std::sync::OnceLock;
+
+    use gpui::{App, SharedString};
+
     use super::{Font, FontFallbacks};
 
     pub const SANS: &str = "Inter";
-    pub const SANS_FALLBACKS: [&str; 3] = [".SystemUIFont", "Segoe UI", "Noto Sans Arabic"];
+    /// Inter is embedded; these draw what it has no glyph for. On Linux they
+    /// are the families Fedora and Ubuntu install, then the scripts Inter
+    /// lacks. A family the system does not have is skipped.
+    #[cfg(target_os = "linux")]
+    pub const SANS_FALLBACKS: &[&str] = &[
+        "Adwaita Sans",
+        "Noto Sans",
+        "Cantarell",
+        "DejaVu Sans",
+        "Noto Sans Arabic",
+        "Noto Sans CJK SC",
+        "Noto Color Emoji",
+    ];
+    #[cfg(not(target_os = "linux"))]
+    pub const SANS_FALLBACKS: &[&str] = &[".SystemUIFont", "Segoe UI", "Noto Sans Arabic"];
     #[cfg(target_os = "windows")]
     pub const MONO: &str = "Consolas";
     #[cfg(target_os = "macos")]
     pub const MONO: &str = "Menlo";
+    /// The monospaced family before [`init`] resolves the system's own. A
+    /// family name must match a font exactly: `monospace` is a fontconfig
+    /// alias that the text system does not know, so it cannot be named here.
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    pub const MONO: &str = "monospace";
-    pub const MONO_FALLBACKS: [&str; 4] = ["SF Mono", "Menlo", "Consolas", "monospace"];
+    pub const MONO: &str = "DejaVu Sans Mono";
+    /// The monospaced families tried in order after the one fontconfig
+    /// resolves for `monospace`.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub const MONO_CANDIDATES: &[&str] = &[
+        "Adwaita Mono",
+        "Noto Sans Mono",
+        "DejaVu Sans Mono",
+        "Ubuntu Mono",
+        "Liberation Mono",
+    ];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub const MONO_FALLBACKS: &[&str] = &[
+        "Adwaita Mono",
+        "Noto Sans Mono",
+        "DejaVu Sans Mono",
+        "Noto Sans CJK SC",
+        "Noto Color Emoji",
+        SANS,
+    ];
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub const MONO_FALLBACKS: &[&str] = &["SF Mono", "Menlo", "Consolas", "monospace"];
     pub const WINDOW_GLYPHS: &str = "Segoe Fluent Icons";
     pub const WINDOW_GLYPHS_FALLBACK: &str = "Segoe MDL2 Assets";
 
-    fn with_fallbacks(family: &'static str, fallbacks: &[&str]) -> Font {
+    static MONO_FAMILY: OnceLock<SharedString> = OnceLock::new();
+    fn with_fallbacks(family: impl Into<SharedString>, fallbacks: &[&str]) -> Font {
         let mut font = gpui::font(family);
         font.fallbacks = Some(FontFallbacks::from_fonts(
             fallbacks.iter().map(|name| (*name).to_owned()).collect(),
@@ -307,15 +349,66 @@ pub mod font {
     }
 
     pub fn sans() -> Font {
-        with_fallbacks(SANS, &SANS_FALLBACKS)
+        with_fallbacks(SANS, SANS_FALLBACKS)
+    }
+
+    /// The monospaced family code is set in.
+    pub fn mono_family() -> SharedString {
+        MONO_FAMILY
+            .get()
+            .cloned()
+            .unwrap_or(SharedString::new_static(MONO))
     }
 
     pub fn mono() -> Font {
-        with_fallbacks(MONO, &MONO_FALLBACKS)
+        with_fallbacks(mono_family(), MONO_FALLBACKS)
     }
 
     pub fn window_glyphs() -> Font {
         with_fallbacks(WINDOW_GLYPHS, &[WINDOW_GLYPHS_FALLBACK])
+    }
+
+    /// Picks the monospaced family on Linux, once the embedded fonts are
+    /// registered: the one fontconfig resolves for `monospace`, then the
+    /// first of [`MONO_CANDIDATES`] the system has. With none, code is set in
+    /// Inter, which is embedded: a family that resolves nowhere makes GPUI
+    /// panic. Other systems keep [`MONO`].
+    pub fn init(cx: &App) {
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let installed = cx.text_system().all_font_names();
+            let family = resolve_mono(&installed, fontconfig_monospace());
+            let _ = MONO_FAMILY.set(family);
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let _ = cx;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    fn fontconfig_monospace() -> Option<String> {
+        let output = std::process::Command::new("fc-match")
+            .args(["--format=%{family[0]}", "monospace"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let family = String::from_utf8(output.stdout).ok()?;
+        (output.status.success() && !family.trim().is_empty()).then(|| family.trim().to_owned())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub fn resolve_mono(installed: &[String], fontconfig: Option<String>) -> SharedString {
+        let has = |family: &str| installed.iter().any(|name| name == family);
+        fontconfig
+            .filter(|family| has(family))
+            .map(SharedString::from)
+            .or_else(|| {
+                MONO_CANDIDATES
+                    .iter()
+                    .find(|family| has(family))
+                    .map(|family| SharedString::new_static(family))
+            })
+            .unwrap_or(SharedString::new_static(SANS))
     }
 }
 
@@ -695,6 +788,32 @@ pub mod size {
     /// A provider logo inside its ring on the rail.
     pub const PROVIDER_LOGO: Pixels = px(14.);
     pub const RAIL_SEPARATOR: Pixels = px(24.);
+}
+
+/// The window chrome the client draws on Linux (`chrome.rs`, `DESIGN.md` 5.13).
+pub mod chrome {
+    use super::{Pixels, px};
+
+    /// The edge of the window: 1 px inside its outline.
+    pub const BORDER: Pixels = px(1.);
+    /// The concentric rule from the card: its radius of 14, its inset of 4,
+    /// and the border of 1 (a test holds the sum).
+    pub const RADIUS: Pixels = px(19.);
+    /// The transparent margin around a floating window, where the shadow
+    /// draws. It is given to the compositor as the client inset.
+    pub const SHADOW: Pixels = px(16.);
+    /// The blur of the shadow, inside the margin.
+    pub const SHADOW_BLUR: Pixels = px(12.);
+    /// The band of the margin next to the window that resizes it, as wide as
+    /// the border Mutter grabs around a window it decorates. The rest of the
+    /// margin is outside the input region: a click there reaches the window
+    /// behind.
+    pub const RESIZE: Pixels = px(10.);
+    /// A corner resizes along both edges in a square this wide, from the
+    /// outer edge of the band, which reaches 5 px into the window.
+    pub const RESIZE_CORNER: Pixels = px(15.);
+    /// The round hover of a window button, centered in its 46 wide slot.
+    pub const BUTTON_HOVER: Pixels = px(24.);
 }
 
 pub mod layout {
@@ -1080,9 +1199,55 @@ mod tests {",
         let sans = font::sans();
         assert_eq!(sans.family.as_ref(), "Inter");
         let fallbacks = sans.fallbacks.unwrap();
-        assert_eq!(fallbacks.fallback_list()[0], ".SystemUIFont");
+        let first = if cfg!(target_os = "linux") {
+            "Adwaita Sans"
+        } else {
+            ".SystemUIFont"
+        };
+        assert_eq!(fallbacks.fallback_list()[0], first);
         let mono = font::mono();
-        assert!(["Consolas", "Menlo", "monospace"].contains(&mono.family.as_ref()));
+        assert!(
+            ["Consolas", "Menlo", "DejaVu Sans Mono"].contains(&mono.family.as_ref()),
+            "{}",
+            mono.family
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_names_its_own_families_and_no_segoe_one() {
+        for family in ["Adwaita Sans", "Noto Sans", "Cantarell", "DejaVu Sans"] {
+            assert!(font::SANS_FALLBACKS.contains(&family), "{family}");
+        }
+        assert!(
+            font::SANS_FALLBACKS
+                .iter()
+                .chain(font::MONO_FALLBACKS)
+                .all(|family| !family.contains("Segoe") && !family.starts_with('.'))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_monospaced_family_is_fontconfigs_choice_or_a_family_the_system_has() {
+        let installed = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let fedora = installed(&["Inter", "Adwaita Mono", "Noto Sans Mono"]);
+        assert_eq!(
+            font::resolve_mono(&fedora, Some("Noto Sans Mono".into())),
+            "Noto Sans Mono"
+        );
+        assert_eq!(
+            font::resolve_mono(&fedora, Some("Gone Mono".into())),
+            "Adwaita Mono"
+        );
+        assert_eq!(font::resolve_mono(&fedora, None), "Adwaita Mono");
+        // A system with no font of its own: code is set in the embedded Inter.
+        assert_eq!(font::resolve_mono(&installed(&["Inter"]), None), "Inter");
     }
 
     #[test]
@@ -1177,5 +1342,100 @@ mod tests {",
             assert!(contrast(theme.danger, theme.sidebar) >= 3.);
             assert!(contrast(theme.on_accent, theme.danger) >= 3.);
         }
+    }
+}
+
+/// What the real text system of Linux draws: system fonts, through the same
+/// fallbacks as the window.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod system_fonts {
+    use gpui::{FontRun, px};
+
+    use super::font;
+
+    /// The characters of `text` that `font` and its fallbacks shape to no
+    /// glyph, or to a glyph the rasterizer draws with no pixel.
+    fn undrawn(text: &str, font: &gpui::Font) -> Vec<char> {
+        let platform = gpui_platform::current_platform(true);
+        let system = platform.text_system();
+        system.add_fonts(crate::assets::fonts()).unwrap();
+        let id = system.font_id(font).unwrap();
+        let layout = system.layout_line(
+            text,
+            px(13.),
+            &[FontRun {
+                len: text.len(),
+                font_id: id,
+            }],
+        );
+        let mut missing = Vec::new();
+        for run in &layout.runs {
+            for glyph in &run.glyphs {
+                let character = text[glyph.index..].chars().next().unwrap();
+                if character.is_whitespace() || character == '\u{200d}' {
+                    continue;
+                }
+                let params = gpui::RenderGlyphParams {
+                    font_id: run.font_id,
+                    glyph_id: glyph.id,
+                    font_size: px(13.),
+                    subpixel_variant: gpui::Point::default(),
+                    scale_factor: 1.,
+                    is_emoji: glyph.is_emoji,
+                    subpixel_rendering: false,
+                    dilation: 0,
+                };
+                let drawn = glyph.id.0 != 0
+                    && system.glyph_raster_bounds(&params).is_ok_and(|bounds| {
+                        bounds.size.width.0 > 0
+                            && bounds.size.height.0 > 0
+                            && system
+                                .rasterize_glyph(&params, bounds)
+                                .is_ok_and(|(_, pixels)| pixels.iter().any(|byte| *byte != 0))
+                    });
+                if !drawn {
+                    missing.push(character);
+                }
+            }
+        }
+        missing
+    }
+
+    #[test]
+    #[ignore = "reads the fonts this computer has; run on the target desktop"]
+    fn every_script_of_a_message_draws_a_glyph() {
+        let message = "Latin é Ж Ω مرحبا 你好 こんにちは 안녕하세요";
+        let missing = undrawn(message, &font::sans());
+        assert!(missing.is_empty(), "nothing drawn for {missing:?}");
+    }
+
+    /// GPUI at the pinned rev draws no COLRv1 glyph, the format of Fedora's
+    /// "Noto Color Emoji", so this fails there until US-026.
+    #[test]
+    #[ignore = "reads the fonts this computer has; fails on Fedora 45 until US-026"]
+    fn an_emoji_draws_a_glyph() {
+        let missing = undrawn("🐦‍⬛ 👍", &font::sans());
+        assert!(missing.is_empty(), "nothing drawn for {missing:?}");
+    }
+
+    #[test]
+    #[ignore = "reads the fonts this computer has; run on the target desktop"]
+    fn a_code_block_is_set_in_a_monospaced_family_the_system_has() {
+        let platform = gpui_platform::current_platform(true);
+        let system = platform.text_system();
+        let installed = system.all_font_names();
+        let family = font::resolve_mono(&installed, None);
+        assert!(installed.iter().any(|name| *name == *family), "{family}");
+        let mut code = font::mono();
+        code.family = family.clone();
+        let id = system.font_id(&code).unwrap();
+        let narrow = system
+            .advance(id, system.glyph_for_char(id, 'i').unwrap())
+            .unwrap();
+        let wide = system
+            .advance(id, system.glyph_for_char(id, 'W').unwrap())
+            .unwrap();
+        assert_eq!(narrow.width, wide.width, "{family} is not monospaced");
     }
 }

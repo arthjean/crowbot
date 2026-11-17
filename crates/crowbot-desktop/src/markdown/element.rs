@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(run_at("slanted").font.style, FontStyle::Italic);
         assert!(run_at("struck").strikethrough.is_some());
         let code = run_at("code");
-        assert_eq!(code.font.family.as_ref(), font::MONO);
+        assert_eq!(code.font.family, font::mono_family());
         assert!(code.background_color.is_some());
         let link = run_at("link");
         assert!(link.underline.is_some());
@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn a_code_block_is_set_in_the_monospace_font() {
         let run = code_run("fn main() {}", &Theme::light());
-        assert_eq!(run.font.family.as_ref(), font::MONO);
+        assert_eq!(run.font.family, font::mono_family());
         assert_eq!(run.len, 12);
     }
 

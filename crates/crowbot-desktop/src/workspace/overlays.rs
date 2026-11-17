@@ -168,7 +168,8 @@ impl Workspace {
                     ),
             );
         Some(
-            div()
+            self.frame
+                .round_inner(div())
                 .id("dialog-overlay")
                 .debug_selector(|| "dialog-overlay".into())
                 .occlude()
@@ -270,7 +271,8 @@ impl Workspace {
                     ),
             );
         Some(
-            div()
+            self.frame
+                .round_inner(div())
                 .id("full-access-overlay")
                 .occlude()
                 .absolute()
@@ -428,7 +430,8 @@ impl Workspace {
                     ),
             );
         Some(
-            div()
+            self.frame
+                .round_inner(div())
                 .id("confirm-overlay")
                 .occlude()
                 .absolute()

@@ -17,6 +17,11 @@ cargo run --manifest-path crates/crowbot-desktop/Cargo.toml -- --daemon target/d
 
 The client is its own Cargo workspace, so its commands run from `crates/crowbot-desktop` or with `--manifest-path`.
 
+On Linux the client opens its window on Wayland, or on X11 when `WAYLAND_DISPLAY` is empty. On Fedora:
+
+- To build: `sudo dnf install gcc fontconfig-devel libxcb-devel libxkbcommon-devel libxkbcommon-x11-devel`.
+- To run: `libxcb`, `libxkbcommon`, `libxkbcommon-x11`, `libwayland-client`, `libwayland-egl`, `vulkan-loader`, `libglvnd-egl`, a graphics driver (`mesa-vulkan-drivers`, or the vendor's), and `xdg-desktop-portal` with the backend of the desktop. Fedora Workstation installs all of them.
+
 To try a change apart from your own data, `scripts/sandbox.ps1` (Windows) or `zsh scripts/sandbox.zsh` (Linux, macOS) builds both and opens the client on a throwaway daemon with its own database, runtimes, and provider sign-ins. `stop`, `reset`, and `clean` end it, wipe it, or remove it.
 
 The daemon:

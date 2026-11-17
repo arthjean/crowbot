@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+mod chrome;
 mod conversation;
 mod providers;
 mod setup;

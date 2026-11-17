@@ -11,8 +11,8 @@ use gpui::{
     Anchor, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div, Focusable,
     FontWeight, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Role, ScrollEvent, ScrollHandle, SharedString, Stateful, Transformation, Window,
-    WindowControlArea, anchored, canvas, deferred, div, linear_color_stop, linear_gradient, point,
-    prelude::*, px, radians,
+    anchored, canvas, deferred, div, linear_color_stop, linear_gradient, point, prelude::*, px,
+    radians,
 };
 
 use super::forms::{self, AvatarOwner};
@@ -20,6 +20,7 @@ use super::rail::{provider_glyph, provider_logo};
 use super::settings::Section;
 use super::{FocusRequest, Workspace};
 use crate::assets::Icon;
+use crate::chrome::WindowDrag;
 use crate::composer::Composer;
 use crate::theme::{
     Theme, control, duration, icon as icon_size, layout, menu, motion, opacity, picker, radius,
@@ -1485,7 +1486,7 @@ impl Workspace {
         div()
             .id("creation-header")
             .debug_selector(|| "creation-header".into())
-            .window_control_area(WindowControlArea::Drag)
+            .window_drag()
             .flex_1()
             .min_w_0()
             .h_full()

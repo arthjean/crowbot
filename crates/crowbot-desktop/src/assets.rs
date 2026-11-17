@@ -70,6 +70,10 @@ svgs! {
     Terminal => "terminal.svg",
     Trash => "trash.svg",
     TriangleAlert => "triangle_alert.svg",
+    WindowClose => "window_close.svg",
+    WindowMaximize => "window_maximize.svg",
+    WindowMinimize => "window_minimize.svg",
+    WindowRestore => "window_restore.svg",
     Wrench => "wrench.svg",
     X => "x.svg",
 }

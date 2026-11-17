@@ -38,6 +38,7 @@ use self::creation::Creation;
 use self::palette::{Palette, RevealTarget};
 use self::settings::{EXECUTABLE_LENGTH, ExecutableEdit, SETTINGS_QUERY_LENGTH, SettingsPage};
 use crate::bots;
+use crate::chrome;
 use crate::composer::{self, Composer, ComposerEvent, InputStyle};
 use crate::connection::{Connection, ConnectionEvent};
 use crate::frames::{self, FrameLog};
@@ -330,6 +331,8 @@ pub struct Workspace {
     side_panel: bool,
     hidden_open: bool,
     title_width: Rc<Cell<Pixels>>,
+    /// How the window is decorated in the frame being drawn (`chrome.rs`).
+    frame: chrome::Frame,
     inert: bool,
     retry_focus: FocusHandle,
     creation_focus: FocusHandle,
@@ -422,7 +425,15 @@ impl Workspace {
                 },
             ),
             cx.observe(&composer, |this, _, cx| this.schedule_draft_save(cx)),
-            cx.observe_window_appearance(window, |this, _, cx| this.apply_theme(cx)),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                this.apply_theme(cx);
+                // A compositor that starts or stops decorating the window
+                // tells it as an appearance change.
+                if chrome::Frame::of(window) != this.frame {
+                    cx.notify();
+                }
+            }),
+            cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()),
             cx.on_app_quit(|this, cx| {
                 this.save_draft();
                 this.flush_panel(cx);
@@ -577,6 +588,7 @@ impl Workspace {
             side_panel: false,
             hidden_open: false,
             title_width: Rc::new(Cell::new(Pixels::MAX)),
+            frame: chrome::Frame::NATIVE,
             inert: false,
             retry_focus: cx.focus_handle(),
             creation_focus: cx.focus_handle(),
@@ -2246,6 +2258,7 @@ impl Render for Workspace {
         self.composer
             .update(cx, |composer, _| composer.set_enter_submits(enter_sends));
         self.follow_scroll();
+        self.frame = chrome::Frame::of(window);
         let theme = Theme::of(cx);
         let root = div()
             .id("workspace")
@@ -2280,7 +2293,9 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.frame)
+            // A frame the client draws holds the fill, inside its rounded
+            // outline: a fill here would paint square corners over it.
+            .when(!self.frame.client, |root| root.bg(theme.frame))
             .text_color(theme.text)
             .font(font::sans())
             .text_size(text::MD.size)
@@ -2307,6 +2322,7 @@ impl Render for Workspace {
             )
             .children(self.render_toast(&theme, cx))
             .into_any_element();
+        let root = self.frame.wrap(root, &theme, window);
         match &self.frames {
             Some(log) => frames::timed(root, log.clone()).into_any_element(),
             None => root,

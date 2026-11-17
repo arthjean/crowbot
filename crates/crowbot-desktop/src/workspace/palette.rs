@@ -753,7 +753,8 @@ impl Workspace {
         // and it never covers the title band.
         let room = window.viewport_size().height * palette::WINDOW_SHARE;
         Some(
-            div()
+            self.frame
+                .round_inner(div())
                 .id("search-overlay")
                 .occlude()
                 .absolute()

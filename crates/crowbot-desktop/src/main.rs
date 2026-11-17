@@ -2,8 +2,10 @@
 
 mod assets;
 mod bots;
+mod chrome;
 mod composer;
 mod connection;
+mod display;
 mod frames;
 mod layout;
 mod markdown;
@@ -16,16 +18,17 @@ mod transcript;
 mod ui;
 mod workspace;
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use crowbot_protocol::Endpoint;
-use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*, size};
+use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*};
 use gpui_platform::application;
 
 use crate::connection::DaemonLauncher;
-use crate::theme::layout::{WINDOW_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH, WINDOW_WIDTH};
 use crate::workspace::Workspace;
 
 const USAGE: &str =
@@ -85,6 +88,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Err(reason) = display::check() {
+        eprintln!("{reason}");
+        return ExitCode::FAILURE;
+    }
     let Some(endpoint) = args.endpoint.take().or_else(Endpoint::local) else {
         eprintln!("cannot choose a local endpoint; pass --endpoint <address>");
         return ExitCode::FAILURE;
@@ -98,12 +105,15 @@ fn main() -> ExitCode {
         }
     };
 
+    let failed = Rc::new(Cell::new(false));
+    let window_failed = failed.clone();
     application()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             if let Err(error) = cx.text_system().add_fonts(assets::fonts()) {
                 eprintln!("cannot load the interface font: {error}");
             }
+            theme::font::init(cx);
             composer::bind_keys(cx);
             workspace::bind_keys(cx);
             cx.on_window_closed(|cx, _| {
@@ -112,11 +122,12 @@ fn main() -> ExitCode {
                 }
             })
             .detach();
-            let bounds = Bounds::centered(None, size(WINDOW_WIDTH, WINDOW_HEIGHT), cx);
+            let bounds = Bounds::centered(None, chrome::default_size(), cx);
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)),
+                    window_min_size: Some(chrome::min_size(display::x11())),
+                    window_decorations: chrome::requested_decorations(),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Crow Bot".into()),
                         appears_transparent: true,
@@ -124,15 +135,28 @@ fn main() -> ExitCode {
                     }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Workspace::new(connection, events, window, cx)),
+                |window, cx| {
+                    if let Some(notice) = display::software_notice(window.gpu_specs().as_ref()) {
+                        eprintln!("{notice}");
+                    }
+                    cx.new(|cx| Workspace::new(connection, events, window, cx))
+                },
             );
-            if opened.is_err() {
-                cx.quit();
+            if let Err(error) = opened {
+                eprintln!("{}", display::open_failure(&format!("{error:#}")));
+                window_failed.set(true);
+                // A quit asked before the event loop runs is lost: the loop
+                // clears it when it starts. Ask it from a task of the loop.
+                cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach();
                 return;
             }
             cx.activate(true);
         });
-    ExitCode::SUCCESS
+    if failed.get() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]

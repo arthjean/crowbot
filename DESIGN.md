@@ -89,7 +89,7 @@ the one the bot runs on. No decoration stands in for data.
 
 | Region | Role | Geometry |
 | --- | --- | --- |
-| Window | Client-drawn title band on Windows, traffic lights on macOS | Default 1080 by 760, minimum 640 by 420; title band 38 tall (`layout::TOP_ROW`); caption buttons 46 wide |
+| Window | Client-drawn title band on Windows and Linux, traffic lights on macOS; on Linux the client also draws the frame (5.13) | Default 1080 by 760, minimum 640 by 420; title band 38 tall (`layout::TOP_ROW`); window buttons 46 wide |
 | Rail | The pages (Bots, Settings) and one ring per provider | 52 wide on the frame color; logo row 38; buttons 36 with 20 px icons at radius 12, gap 6, bottom padding 12; a 24 by 1 separator above Settings |
 | Sidebar | The bots, grouped: Pinned tiles, Needs you, Unread, Bots, Hidden | Default 280, 128 to 400, compact 88 below a 110 px drag; a 16 px resize handle on its right edge; no fill of its own, the card shows through |
 | Card | Holds the sidebar, the conversation, and the docked panel | Inset 4 from the right and bottom edges, radius 14, `canvas` fill, 1 px `border` edge, on the `frame` color |
@@ -144,6 +144,7 @@ surface joins those tests.
 | Menus, pickers, dialogs, toasts (`menu_shadow`) | A 1 px `dialog_ring` edge, then 0 18, blur 44, spread -18, black at 0.80 in dark and 0.55 in light |
 | The search palette (`drop_shadow`) | The drop of the menu shadow alone: its 1 px `dialog_ring` border is its only edge |
 | The chosen head of the avatar picker | A 2 px spread of `accent_soft` outside its `accent_text` edge |
+| The window on Linux, floating (`chrome::shadow`) | 0 0, blur 12, the color of `shadow_menu` at half its alpha, inside the 16 px margin (5.13) |
 
 No other surface carries a shadow. Depth comes from the surface steps
 (`frame`, `canvas`, `surface`, `menu_surface`).
@@ -152,6 +153,7 @@ No other surface carries a shadow. Depth comes from the surface steps
 
 | Element | Radius | Notes |
 | --- | --- | --- |
+| The window on Linux (`chrome::RADIUS`) | 19 | The card's 14, plus its inset of 4 and the 1 px border. A tiled edge squares its two corners. A full-window fill (a dialog scrim) takes 18 (`Frame::round_inner`) |
 | Card, wide picker (`menu::WIDE_RADIUS`), search palette (`palette::RADIUS`) | 14 | A wide picker and the palette pad 6, so their rows and inner panels take 8 |
 | Template cards, toasts, the cards and the logo tile of Settings | 12 (`radius::LG`) | A clickable row at an end of a Settings card keeps that 12 on its outer corners |
 | Plain menu (`menu::RADIUS`) | 8 | Pads 4, so its rows take 4 |
@@ -195,8 +197,16 @@ The spacing scale is 2, 4, 6, 8, 12, 16, 24, 32 (`space`). Controls are 24,
 
 ### 4.5 Typography
 
-Inter, bundled in Regular, Medium, and SemiBold, then the system stack.
-Consolas, Menlo, or monospace for code.
+Inter, bundled in Regular, Medium, and SemiBold, then the system stack:
+`.SystemUIFont` and Segoe UI on Windows and macOS; Adwaita Sans, Noto Sans,
+Cantarell, DejaVu Sans, then Noto Sans Arabic, Noto Sans CJK SC, and Noto
+Color Emoji on Linux. Code is set in Consolas (Windows), Menlo (macOS), or on
+Linux the family fontconfig resolves for `monospace`, then Adwaita Mono, Noto
+Sans Mono, DejaVu Sans Mono, Ubuntu Mono, Liberation Mono, and Inter when the
+system has none (`font::init`). A family must name a font exactly: the text
+system does not know fontconfig's aliases. On Linux, GPUI at the pinned rev
+drops a fallback family that has no Latin `m` and draws no COLRv1 glyph, so
+Fedora's emoji draw empty until US-026 of the Linux port PRD.
 
 | Step | Size / line | Use |
 | --- | --- | --- |
@@ -264,7 +274,10 @@ ends with ", selected". A page item joins the rail only when its page exists.
 The sidebar topbar holds only the sidebar toggle, 10 px from the sidebar's
 left edge (centered when compact). The header holds the bot button (avatar
 18, name, title), the model, History, New chat, a divider, and the panel
-toggle. The empty band drags the window.
+toggle. The empty band drags the window: every drag zone takes
+`WindowDrag::window_drag`, never a bare `WindowControlArea::Drag`. A control
+inside the band occludes it (`.occlude()`), so its presses do not move the
+window. The window buttons close the band on Windows and Linux (5.13).
 
 ### 5.3 Sidebar
 
@@ -585,9 +598,56 @@ no fill.
   box, a variant of `MascotShape` in the protocol, and its layer in
   `mascot.rs`.
 
+### 5.13 Linux window (`chrome.rs`, tokens in `theme::chrome`)
+
+GNOME draws no title bar for a Wayland window, so on Linux the client asks
+for client decorations and draws the chrome itself.
+
+- **Frame.** A floating window keeps a transparent margin of 16
+  (`chrome::SHADOW`) around its surface, given to the compositor as the
+  client inset. The surface carries the `frame` fill, a 1 px `dialog_ring`
+  border, a radius of 19, and the window shadow (4.2). The workspace inside
+  paints no fill of its own over the whole window. The margin is added to the
+  default size, so the window shows 1080 by 760 (`chrome::default_size`).
+  Wayland counts the minimum in the window's geometry, X11 counts the whole
+  window, so on X11 the margin is added to the minimum too
+  (`chrome::min_size`): a window the X server decorates is then 672 by 452 at
+  its smallest.
+- **Resize.** Each free edge resizes in the band of 10 of the margin next to
+  the window (`chrome::RESIZE`, the border Mutter grabs around a window it
+  decorates); each corner in a square of 15 (`chrome::RESIZE_CORNER`) from
+  the band's outer edge, which reaches 5 into the window. The outer 6 of the
+  margin are outside the input region (`chrome::input_region`), so a click
+  there reaches the window behind; GPUI sets an input region on Wayland only,
+  so on X11 the whole margin takes input. The cursor
+  shows the matching resize shape there, and a press there resizes before any
+  element under it acts (the close button and the rail's logo sit under the
+  top corners).
+- **Tiled states.** A tiled edge has no margin, no border, no rounding on its
+  two corners, and no resize zone; the free edges keep theirs. A tiled
+  window has no shadow. A maximized or fullscreen window is tiled on every
+  edge.
+- **Title band.** A press and a drag on a drag zone move the window; a double
+  click maximizes or restores it; a right click opens the desktop's window
+  menu.
+- **Buttons.** Minimize, maximize (restore when maximized), and close, in
+  the order and on the side of the desktop's button layout, among the ones
+  the compositor allows. A desktop with no layout gets the three on the
+  right. GNOME's default names close alone. Left buttons open the band before
+  the sidebar topbar; right buttons close it. Each is a 46 by 38 slot
+  holding a 24 round hover of `hover` behind a 16 Lucide-style icon in
+  `text_secondary` (`window_minimize`, `window_maximize`, `window_restore`,
+  `window_close`), so no fill reaches the rounded corner. Each has the
+  Button role and its label.
+- **A compositor that decorates** (`Decorations::Server`: X11 with no
+  compositing manager, or KDE when it keeps its own decorations) gets no
+  buttons, frame, shadow, rounding, or resize zone from the client; the band
+  keeps its content. The chrome follows a change at the next frame.
+
 ## 6. What not to do
 
-- A fill that reaches a rounded corner of its parent (4.3, rule 2).
+- A fill that reaches a rounded corner of its parent (4.3, rule 2), the
+  rounded window of Linux included (5.13).
 - A radius that breaks concentricity, or a radius, size, color, or duration
   that is not a token.
 - A shadow outside 4.2.

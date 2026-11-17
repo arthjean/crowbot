@@ -5,6 +5,7 @@ use gpui::{
 
 use super::{Workspace, model_label};
 use crate::assets::Icon;
+use crate::chrome::{Side, WindowDrag};
 use crate::theme::{Theme, control, font, icon as icon_size, layout, radius, size, space, text};
 use crate::ui;
 
@@ -37,7 +38,7 @@ impl Workspace {
         let header = div()
             .id("conversation-header")
             .debug_selector(|| "conversation-header".into())
-            .window_control_area(WindowControlArea::Drag)
+            .window_drag()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -236,7 +237,68 @@ impl Workspace {
             )
     }
 
-    pub(super) fn render_caption_buttons(
+    /// The window buttons on `side` of the title band. Windows draws its
+    /// caption buttons on the right. Linux draws the buttons the desktop's
+    /// layout names on that side, while the client decorates the window.
+    pub(super) fn render_window_buttons(
+        &self,
+        side: Side,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if cfg!(target_os = "linux") {
+            return self.render_linux_buttons(side, theme, window, cx);
+        }
+        if side == Side::Right {
+            self.render_caption_buttons(theme, window, cx)
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn render_linux_buttons(
+        &self,
+        side: Side,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if !self.frame.client {
+            return None;
+        }
+        let buttons = crate::chrome::buttons(window, cx, side);
+        if buttons.is_empty() {
+            return None;
+        }
+        let maximized = window.is_maximized();
+        Some(
+            div()
+                .debug_selector(move || format!("window-buttons-{side:?}").to_lowercase())
+                .flex_none()
+                .h_full()
+                .flex()
+                .children(
+                    buttons
+                        .into_iter()
+                        .map(|button| crate::chrome::button(button, maximized, theme)),
+                ),
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn render_linux_buttons(
+        &self,
+        _: Side,
+        _: &Theme,
+        _: &Window,
+        _: &mut Context<Self>,
+    ) -> Option<Div> {
+        None
+    }
+
+    fn render_caption_buttons(
         &self,
         theme: &Theme,
         window: &Window,

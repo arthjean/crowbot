@@ -7,13 +7,14 @@ use crowbot_protocol::{
 };
 use gpui::{
     Anchor, AnyElement, Bounds, Context, Div, Focusable, FontWeight, KeyDownEvent, MouseButton,
-    Pixels, Role, SharedString, Stateful, Window, WindowControlArea, anchored, canvas, deferred,
-    div, point, prelude::*, px,
+    Pixels, Role, SharedString, Stateful, Window, anchored, canvas, deferred, div, point,
+    prelude::*, px,
 };
 
 use super::rail::provider_glyph;
 use super::{Workspace, forms};
 use crate::assets::Icon;
+use crate::chrome::WindowDrag;
 use crate::theme::{
     Theme, control, font, icon as icon_size, layout, menu, opacity, radius, settings, size, space,
     text,
@@ -1732,7 +1733,7 @@ impl Workspace {
         };
         div()
             .id("settings-topbar")
-            .window_control_area(WindowControlArea::Drag)
+            .window_drag()
             .flex_none()
             .w(px(width))
             .h_full()
@@ -1772,7 +1773,7 @@ impl Workspace {
         let path = div()
             .id("settings-path")
             .debug_selector(|| "settings-path".into())
-            .window_control_area(WindowControlArea::Drag)
+            .window_drag()
             .flex_1()
             .min_w_0()
             .h_full()

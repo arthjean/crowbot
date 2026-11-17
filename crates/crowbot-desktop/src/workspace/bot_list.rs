@@ -1,10 +1,10 @@
+use crate::chrome::WindowDrag;
 use chrono::Local;
 use crowbot_protocol::{BotState, BotSummary};
 use gpui::accesskit::Orientation;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, Role, SharedString, Stateful, WindowControlArea, anchored, deferred, div,
-    point, prelude::*, px,
+    MouseDownEvent, Role, SharedString, Stateful, anchored, deferred, div, point, prelude::*, px,
 };
 
 use super::{DragGhost, MenuTarget, ResizeSidebar, Workspace, row_id};
@@ -36,7 +36,7 @@ impl Workspace {
         };
         div()
             .id("sidebar-topbar")
-            .window_control_area(WindowControlArea::Drag)
+            .window_drag()
             .flex_none()
             .w(px(shown.width))
             .h_full()

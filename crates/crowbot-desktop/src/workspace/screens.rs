@@ -1,11 +1,12 @@
 use crowbot_protocol::PROTOCOL_VERSION;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, KeyDownEvent, Role, SharedString, Stateful, Window,
-    WindowControlArea, div, prelude::*,
+    AnyElement, Context, Div, FontWeight, KeyDownEvent, Role, SharedString, Stateful, Window, div,
+    prelude::*,
 };
 
 use super::{Link, Screen, Workspace};
 use crate::assets::Icon;
+use crate::chrome::{Side, WindowDrag};
 use crate::theme::{Theme, icon as icon_size, layout, radius, settings, space, text};
 use crate::ui::{self, ButtonKind};
 
@@ -79,9 +80,10 @@ impl Workspace {
                     .flex_none()
                     .h(layout::TOP_ROW)
                     .flex()
+                    .children(self.render_window_buttons(Side::Left, theme, window, cx))
                     .child(self.render_settings_topbar(nav_width, theme, cx))
                     .child(self.render_settings_path(theme, cx))
-                    .children(self.render_caption_buttons(theme, window, cx)),
+                    .children(self.render_window_buttons(Side::Right, theme, window, cx)),
             )
             .child(
                 card(theme)
@@ -133,13 +135,14 @@ impl Workspace {
                     .flex_none()
                     .h(layout::TOP_ROW)
                     .flex()
+                    .children(self.render_window_buttons(Side::Left, theme, window, cx))
                     .child(self.render_sidebar_topbar(shown, theme, cx))
                     .child(if creating {
                         self.render_creation_header(theme, cx)
                     } else {
                         self.render_header(theme, window, cx)
                     })
-                    .children(self.render_caption_buttons(theme, window, cx)),
+                    .children(self.render_window_buttons(Side::Right, theme, window, cx)),
             )
             .child(
                 card(theme)
@@ -355,12 +358,13 @@ impl Workspace {
             .child(
                 div()
                     .id("screen-top")
-                    .window_control_area(WindowControlArea::Drag)
+                    .window_drag()
                     .flex_none()
                     .h(layout::TOP_ROW)
                     .flex()
+                    .children(self.render_window_buttons(Side::Left, theme, window, cx))
                     .child(div().flex_1())
-                    .children(self.render_caption_buttons(theme, window, cx)),
+                    .children(self.render_window_buttons(Side::Right, theme, window, cx)),
             )
             .child(
                 card(theme)
@@ -368,9 +372,7 @@ impl Workspace {
                     .items_center()
                     .justify_center()
                     .p(space::S6)
-                    .when(loading, |card| {
-                        card.window_control_area(WindowControlArea::Drag)
-                    })
+                    .when(loading, |card| card.window_drag())
                     .child(body),
             )
     }

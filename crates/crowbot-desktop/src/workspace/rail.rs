@@ -1,12 +1,13 @@
 use crowbot_protocol::ProviderStatus;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, Pixels, Role, SharedString, Stateful,
-    WindowControlArea, div, prelude::*,
+    AnyElement, Context, Div, FontWeight, Hsla, Pixels, Role, SharedString, Stateful, div,
+    prelude::*,
 };
 
 use super::Workspace;
 use super::forms;
 use crate::assets::Icon;
+use crate::chrome::WindowDrag;
 use crate::theme::{Theme, control, icon as icon_size, layout, radius, size, space, text};
 use crate::ui;
 
@@ -110,7 +111,8 @@ impl Workspace {
     pub(super) fn render_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let logo = div()
             .id("rail-logo")
-            .window_control_area(WindowControlArea::Drag)
+            .debug_selector(|| "rail-logo".into())
+            .window_drag()
             .flex_none()
             .w_full()
             .h(layout::TOP_ROW)
@@ -177,13 +179,7 @@ impl Workspace {
             .gap(space::S1_5)
             .child(logo)
             .child(bots)
-            .child(
-                div()
-                    .id("rail-spacer")
-                    .window_control_area(WindowControlArea::Drag)
-                    .flex_1()
-                    .w_full(),
-            )
+            .child(div().id("rail-spacer").window_drag().flex_1().w_full())
             .children(providers)
             .child(
                 div()
