@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Crow Bot
+GenericName=AI Teammates
+Comment=AI teammates that each work on a computer of their own
+Exec=crowbot
+Icon=io.github.arthjean.CrowBot
+Terminal=false
+StartupNotify=true
+Categories=Development;
+Keywords=AI;agent;bot;assistant;teammate;Claude;ChatGPT;Grok;

@@ -7,6 +7,7 @@ mod composer;
 mod connection;
 mod display;
 mod frames;
+mod identity;
 mod layout;
 mod markdown;
 mod mascot;
@@ -25,7 +26,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use crowbot_protocol::Endpoint;
-use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, prelude::*};
+use gpui::{App, Bounds, Pixels, TitlebarOptions, WindowBounds, WindowOptions, prelude::*};
 use gpui_platform::application;
 
 use crate::connection::DaemonLauncher;
@@ -80,6 +81,21 @@ fn launcher(args: Args, endpoint: &Endpoint) -> Option<DaemonLauncher> {
     })
 }
 
+fn window_options(bounds: Bounds<Pixels>, x11: bool) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(chrome::min_size(x11)),
+        window_decorations: chrome::requested_decorations(),
+        titlebar: Some(TitlebarOptions {
+            title: Some(identity::APP_NAME.into()),
+            appears_transparent: true,
+            ..Default::default()
+        }),
+        app_id: Some(identity::APP_ID.to_owned()),
+        ..Default::default()
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
@@ -123,25 +139,12 @@ fn main() -> ExitCode {
             })
             .detach();
             let bounds = Bounds::centered(None, chrome::default_size(), cx);
-            let opened = cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(chrome::min_size(display::x11())),
-                    window_decorations: chrome::requested_decorations(),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Crow Bot".into()),
-                        appears_transparent: true,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    if let Some(notice) = display::software_notice(window.gpu_specs().as_ref()) {
-                        eprintln!("{notice}");
-                    }
-                    cx.new(|cx| Workspace::new(connection, events, window, cx))
-                },
-            );
+            let opened = cx.open_window(window_options(bounds, display::x11()), |window, cx| {
+                if let Some(notice) = display::software_notice(window.gpu_specs().as_ref()) {
+                    eprintln!("{notice}");
+                }
+                cx.new(|cx| Workspace::new(connection, events, window, cx))
+            });
             if let Err(error) = opened {
                 eprintln!("{}", display::open_failure(&format!("{error:#}")));
                 window_failed.set(true);
@@ -187,6 +190,27 @@ mod tests {
             args.daemon_args,
             ["--db", "test.db", "--endpoint", "ignored"]
         );
+    }
+
+    #[test]
+    fn the_window_carries_the_application_id_and_the_name() {
+        let bounds = Bounds::new(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            chrome::default_size(),
+        );
+        for x11 in [false, true] {
+            let options = window_options(bounds, x11);
+            assert_eq!(options.app_id.as_deref(), Some(identity::APP_ID));
+            assert_eq!(
+                options
+                    .titlebar
+                    .and_then(|titlebar| titlebar.title)
+                    .as_deref(),
+                Some(identity::APP_NAME)
+            );
+            assert_eq!(options.window_decorations, chrome::requested_decorations());
+            assert_eq!(options.window_min_size, Some(chrome::min_size(x11)));
+        }
     }
 
     #[test]

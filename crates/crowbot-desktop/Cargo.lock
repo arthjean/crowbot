@@ -1167,6 +1167,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "pulldown-cmark",
+ "resvg",
  "serde_json",
  "tokio",
  "unicode-segmentation",

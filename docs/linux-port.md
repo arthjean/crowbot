@@ -109,6 +109,7 @@ Each item names its evidence. The order inside a group is the order of dependenc
 - Nothing ran on aarch64, on musl, on KDE, on a computer with no GPU driver, or on macOS.
 - No release build was made; sizes and glibc needs come from debug builds.
 - The execute bit after a zip unpack (Codex, Bun) was not checked; the tar path (Claude) works.
+- The identity of the window (items 8 and 9) was checked on headless compositors only: GNOME Shell 51.1 ties it to `io.github.arthjean.CrowBot.desktop` and shows its name and icon, sway reports its `app_id`, and Xvfb its `WM_CLASS`. GPUI sends `set_app_id` after `get_toplevel`, so a window preview that GNOME builds before the ID arrives (the overview open when the shell starts) keeps the generic icon until the overview opens again. A real session is US-007's.
 
 The two sections below are the research this list rests on, each claim with its source.
 

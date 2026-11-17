@@ -24,6 +24,8 @@ On Linux the client opens its window on Wayland, or on X11 when `WAYLAND_DISPLAY
 
 To try a change apart from your own data, `scripts/sandbox.ps1` (Windows) or `zsh scripts/sandbox.zsh` (Linux, macOS) builds both and opens the client on a throwaway daemon with its own database, runtimes, and provider sign-ins. `stop`, `reset`, and `clean` end it, wipe it, or remove it.
 
+To find Crow Bot in the application grid of a Linux desktop, `sh scripts/desktop-files.sh` builds both and copies the desktop entry and the icons of `crates/crowbot-desktop/resources/linux` under `${XDG_DATA_HOME:-~/.local/share}`, with the entry pointing at the built client. `install --release` uses a release build, `install --client <path>` a client already built (the daemon must sit next to it), and `remove` deletes every file the install copied. The window carries the application ID `io.github.arthjean.CrowBot`, so the desktop ties it to that entry and its icon.
+
 The daemon:
 
 - `--db <path>` selects the database. The default is `~/.crowbot/crowbot.db`.

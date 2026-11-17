@@ -20,6 +20,7 @@ re-derive the system from the render code.
 | `src/theme.rs` | Every color, size, radius, duration, and opacity, in both themes |
 | `src/ui.rs` | The shared primitives: icons, buttons, tooltips, avatars, the menu surface and rows, the text field skin |
 | `src/mascot.rs` | The mascot of a bot: its layers and what its eyes show |
+| `src/identity.rs` | The application ID and name, and the guards of the desktop entry and the icon |
 | `src/workspace/forms.rs` | Form fields, labels, notes, choice chips, provider notices |
 
 When sources disagree, product intent wins, then a rule here, then the shared
@@ -643,6 +644,27 @@ for client decorations and draws the chrome itself.
   compositing manager, or KDE when it keeps its own decorations) gets no
   buttons, frame, shadow, rounding, or resize zone from the client; the band
   keeps its content. The chrome follows a change at the next frame.
+
+### 5.14 Application icon (`identity.rs`, files in `resources/linux`)
+
+The desktop shows Crow Bot by one icon: in the dock, the overview, and the
+application grid. It is a mascot (5.12), so the product and its bots read as
+one family.
+
+- The icon is the mascot at rest with the crest head, in `accent`
+  (`#007cf7`): the layers `head_crest`, `beak`, `eyes`, and `pupils_rest` of
+  `assets/mascot`, on the shared box of 100, with no disc or plate behind it,
+  as every mascot. The beak is black at 0.42, the eyes `#ffffff`, the pupils
+  `#17171a`, as `mascot_beak`, `mascot_eye`, and `mascot_pupil`.
+- `accent` keeps a contrast of at least 3 to 1 against both a light and a
+  dark background (4.0 on white, 5.2 on black), so the outline of the crow
+  holds on a light dock and a dark one with no rim. A change of color keeps
+  that bound: the test of the 48 px icon fails under it.
+- The scalable icon is the source. The PNG files at 48, 128, 256, and 512 are
+  that SVG rendered at their size; a test fails when one drifts from it.
+- Every file is named after the application ID (`identity::APP_ID`), and the
+  desktop entry names the application "Crow Bot" (`identity::APP_NAME`),
+  which is also the title of the window.
 
 ## 6. What not to do
 
