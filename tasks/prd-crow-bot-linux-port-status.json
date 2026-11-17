@@ -17,10 +17,10 @@
     {
       "id": "EP-002",
       "title": "Identity on the desktop",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 2,
-      "stories_done": 0
+      "stories_done": 2
     },
     {
       "id": "EP-007",
@@ -175,29 +175,29 @@
       "id": "US-008",
       "title": "The window carries the application ID",
       "epic": "EP-002",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "XS",
       "blocked_by": [
         "US-001"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-17",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
     },
     {
       "id": "US-009",
       "title": "The desktop entry and the icon",
       "epic": "EP-002",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-008"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-17",
+      "completed_at": "2026-11-17",
+      "reviewed_at": "2026-11-17"
     },
     {
       "id": "US-010",
