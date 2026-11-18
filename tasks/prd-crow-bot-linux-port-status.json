@@ -25,7 +25,7 @@
     {
       "id": "EP-009",
       "title": "GPUI on Linux",
-      "status": "TODO",
+      "status": "IN_REVIEW",
       "priority": "P1",
       "stories_total": 1,
       "stories_done": 0
@@ -158,14 +158,14 @@
       "id": "US-026",
       "title": "GPUI draws emoji and speaks to assistive tools on Linux",
       "epic": "EP-009",
-      "status": "TODO",
+      "status": "IN_REVIEW",
       "priority": "P1",
       "size": "L",
       "blocked_by": [
         "US-002",
         "US-006"
       ],
-      "started_at": null,
+      "started_at": "2026-11-18",
       "completed_at": null,
       "reviewed_at": null
     },
