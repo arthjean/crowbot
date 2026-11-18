@@ -646,7 +646,7 @@ impl Workspace {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(theme.text_secondary)
-                                .child(provider_name),
+                                .child(crate::truncated::truncated(provider_name)),
                         )
                         .children(provider.map(|status| {
                             let (label, color) = forms::provider_state(status, theme);
@@ -834,7 +834,7 @@ impl Workspace {
                                 .truncate()
                                 .text_center()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Bot settings"),
+                                .child(crate::truncated::truncated("Bot settings")),
                         )
                         .child(
                             ui::icon_button(

@@ -234,7 +234,13 @@ impl Workspace {
                     } else {
                         theme.text_secondary
                     })
-                    .child(title),
+                    .map(|row| {
+                        if thinking {
+                            row.child(title)
+                        } else {
+                            row.child(crate::truncated::truncated(title))
+                        }
+                    }),
             )
             .children(state.map(|state| {
                 div()
@@ -268,7 +274,7 @@ impl Workspace {
                     .truncate()
                     .font(font::mono())
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(
+                    .child(crate::truncated::truncated(
                         input.lines().next().unwrap_or_default().to_owned(),
                     ))
             }))

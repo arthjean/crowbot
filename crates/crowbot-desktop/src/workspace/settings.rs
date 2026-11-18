@@ -741,7 +741,7 @@ impl Workspace {
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(value),
+                    .child(crate::truncated::truncated(value)),
             )
             .child(ui::icon(
                 Icon::ChevronUpDown,
@@ -785,7 +785,13 @@ impl Workspace {
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.pick_setting(select, index, cx)),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(*option))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(crate::truncated::truncated(*option)),
+                    )
                     .children(chosen.then(|| ui::menu_check(theme)))
             })
             .collect();
@@ -1176,7 +1182,7 @@ impl Workspace {
                                     .text_size(text::XXL.size)
                                     .line_height(text::XXL.leading)
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name.clone()),
+                                    .child(crate::truncated::truncated(name.clone())),
                             )
                             .child(
                                 state_badge(status, theme)
@@ -1323,7 +1329,12 @@ impl Workspace {
             .child(
                 row_text(
                     SharedString::from(status.name.clone()),
-                    Some(div().truncate().child(line).into_any_element()),
+                    Some(
+                        div()
+                            .truncate()
+                            .child(crate::truncated::truncated(line))
+                            .into_any_element(),
+                    ),
                     theme,
                 )
                 .flex_1(),
@@ -1579,7 +1590,12 @@ impl Workspace {
                             )
                             .group_hover(NAV_ROW_GROUP, move |style| style.text_color(strong)),
                         )
-                        .child(div().min_w_0().truncate().child(item.label()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(crate::truncated::truncated(item.label())),
+                        )
                         .into_any_element()
                 })
                 .collect(),
@@ -1635,7 +1651,7 @@ impl Workspace {
                             div()
                                 .pl(icon_size::SM + space::S2)
                                 .truncate()
-                                .child(hit.title.clone()),
+                                .child(crate::truncated::truncated(hit.title.clone())),
                         )
                         .into_any_element()
                 })
@@ -1796,7 +1812,7 @@ impl Workspace {
                 .min_w_0()
                 .truncate()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(label)
+                .child(crate::truncated::truncated(label))
         };
         let Some(status) = self.settings_provider() else {
             return path.child(current(page.section.label().into()));

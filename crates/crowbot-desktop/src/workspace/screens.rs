@@ -208,7 +208,7 @@ impl Workspace {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(theme.text_muted)
-                                .child(detail),
+                                .child(crate::truncated::truncated(detail)),
                         ),
                 )
                 .children(retry.then(|| {

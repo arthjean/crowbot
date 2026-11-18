@@ -39,7 +39,7 @@ impl Workspace {
                         .min_w_0()
                         .truncate()
                         .when(editing, |text| text.text_color(theme.text_muted))
-                        .child(label),
+                        .child(crate::truncated::truncated(label)),
                 )
                 .child(
                     ui::small_icon_button(("queue-edit", index), Icon::Pencil, "Edit", theme)

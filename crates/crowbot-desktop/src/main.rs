@@ -21,6 +21,7 @@ mod reveal;
 mod sidebar;
 mod theme;
 mod transcript;
+mod truncated;
 mod ui;
 mod workspace;
 

@@ -89,7 +89,7 @@ impl Workspace {
                     .flex_none()
                     .max_w(layout::HEADER_NAME_MAX)
                     .truncate()
-                    .child(name),
+                    .child(crate::truncated::truncated(name)),
             )
             .children((!title.is_empty()).then(|| self.render_title(title, theme, window)));
 
@@ -125,7 +125,12 @@ impl Workspace {
                     .line_height(text::SM.leading)
                     .font_weight(FontWeight::MEDIUM)
                     .child(ui::icon(Icon::Clock, icon_size::XS, theme.accent_text))
-                    .child(div().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(crate::truncated::truncated(label)),
+                    )
             }))
             .child(
                 div()
@@ -143,7 +148,12 @@ impl Workspace {
                     .text_color(theme.text_secondary)
                     .text_size(text::SM.size)
                     .line_height(text::SM.leading)
-                    .child(div().min_w_0().truncate().child(model)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(crate::truncated::truncated(model)),
+                    ),
             )
             .child(
                 div().occlude().child(
@@ -233,7 +243,12 @@ impl Workspace {
                     .text_color(theme.text_placeholder)
                     .when(hidden, |row| row.invisible())
                     .child(div().flex_none().child(separator))
-                    .child(div().min_w_0().truncate().child(title)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(crate::truncated::truncated(title)),
+                    ),
             )
     }
 

@@ -178,7 +178,7 @@ impl Workspace {
                         .text_size(text::LG.size)
                         .line_height(text::LG.leading)
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Create your first bot"),
+                        .child(crate::truncated::truncated("Create your first bot")),
                 )
             });
         create.into_any_element()
@@ -204,7 +204,7 @@ impl Workspace {
                 .text_size(text::SM.size)
                 .line_height(text::SM.leading)
                 .text_color(theme.text_readable)
-                .child(title)
+                .child(crate::truncated::truncated(title))
         };
         let heading = |children: Div| {
             children
@@ -454,7 +454,7 @@ impl Workspace {
                                 .text_size(text::TITLE.size)
                                 .line_height(text::TITLE.leading)
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(SharedString::from(summary.bot.name.clone())),
+                                .child(crate::truncated::truncated(summary.bot.name.clone())),
                         )
                         .child(detail),
                 )
@@ -465,7 +465,7 @@ impl Workspace {
                         .text_size(text::LG.size)
                         .line_height(text::LG.leading)
                         .text_color(theme.text_muted)
-                        .child(preview),
+                        .child(crate::truncated::truncated(preview)),
                 ),
         )
         .into_any_element()
@@ -504,7 +504,7 @@ impl Workspace {
                     .text_center()
                     .text_size(text::SM.size)
                     .line_height(text::SM.leading)
-                    .child(SharedString::from(summary.bot.name.clone())),
+                    .child(crate::truncated::truncated(summary.bot.name.clone())),
             )
             .into_any_element()
     }

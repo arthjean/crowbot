@@ -57,7 +57,13 @@ impl Workspace {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_from_history(id, window, cx);
                 }))
-                .child(div().flex_1().min_w_0().truncate().child(title))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(crate::truncated::truncated(title)),
+                )
                 .child(
                     div()
                         .flex_none()

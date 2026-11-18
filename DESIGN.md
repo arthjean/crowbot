@@ -701,5 +701,8 @@ Before a UI change is done:
    `/agent-desktop` skill, in dark and light, at the default size and at the
    640 by 420 minimum.
 3. Hover, focus, open, selected, disabled, loading, empty, and error states
-   of every control touched hold, and long names truncate.
+   of every control touched hold, and long names truncate. A one-line
+   truncation goes through `truncated::truncated`, which never cuts inside a
+   grapheme (a flag, a skin tone, a joined emoji); GPUI's `.truncate()`
+   alone can.
 4. Every rounded surface touched is checked up close for square corners.

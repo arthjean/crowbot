@@ -876,7 +876,7 @@ impl Workspace {
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(model),
+                            .child(crate::truncated::truncated(model)),
                     )
                     .children(level.map(|level| {
                         div()
@@ -1238,7 +1238,7 @@ impl Workspace {
                     .line_height(text::MD.leading)
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(label),
+                    .child(crate::truncated::truncated(label)),
             )
             .child(ui::icon(
                 Icon::ChevronUpDown,
@@ -1253,34 +1253,31 @@ impl Workspace {
                         .then(|| level.id.clone());
                     (value, Some(SharedString::from(level.name.clone())))
                 }));
-            let rows = entries.enumerate().map(|(index, (value, name))| {
-                let chosen = value == current;
-                let tab = tab.to_owned();
-                ui::menu_row(("creation-effort", index), chosen, false, theme)
-                    .debug_selector(move || {
-                        if chosen {
-                            format!("creation-effort-{index}-chosen")
-                        } else {
-                            format!("creation-effort-{index}")
-                        }
-                    })
-                    .focusable()
-                    .tab_stop(true)
-                    .role(Role::ListBoxOption)
-                    .text_size(text::MD.size)
-                    .line_height(text::MD.leading)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.pick_effort(tab.clone(), value.clone(), cx);
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(name.unwrap_or_else(|| "Default".into())),
-                    )
-                    .children(chosen.then(|| ui::menu_check(theme)))
-            });
+            let rows =
+                entries.enumerate().map(|(index, (value, name))| {
+                    let chosen = value == current;
+                    let tab = tab.to_owned();
+                    ui::menu_row(("creation-effort", index), chosen, false, theme)
+                        .debug_selector(move || {
+                            if chosen {
+                                format!("creation-effort-{index}-chosen")
+                            } else {
+                                format!("creation-effort-{index}")
+                            }
+                        })
+                        .focusable()
+                        .tab_stop(true)
+                        .role(Role::ListBoxOption)
+                        .text_size(text::MD.size)
+                        .line_height(text::MD.leading)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pick_effort(tab.clone(), value.clone(), cx);
+                        }))
+                        .child(div().flex_1().min_w_0().truncate().child(
+                            crate::truncated::truncated(name.unwrap_or_else(|| "Default".into())),
+                        ))
+                        .children(chosen.then(|| ui::menu_check(theme)))
+                });
             deferred(
                 anchored()
                     .attach(bounds.get(), Anchor::BottomRight)
@@ -1367,7 +1364,7 @@ impl Workspace {
                     .text_size(text::LG.size)
                     .line_height(text::LG.leading)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(SharedString::from(name)),
+                    .child(crate::truncated::truncated(name)),
             )
             .child(
                 div()
@@ -1375,7 +1372,7 @@ impl Workspace {
                     .text_size(text::SM.size)
                     .line_height(text::SM.leading)
                     .text_color(theme.text_muted)
-                    .child(summary),
+                    .child(crate::truncated::truncated(summary)),
             );
         let notice = notice.map(|reason| {
             div()
@@ -1503,7 +1500,7 @@ impl Workspace {
                     .aria_label(name.clone())
                     .min_w_0()
                     .truncate()
-                    .child(name),
+                    .child(crate::truncated::truncated(name)),
             )
             .child(div().flex_1())
             .children((!self.bots.is_empty()).then(|| {

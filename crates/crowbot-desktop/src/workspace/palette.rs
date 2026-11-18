@@ -5,7 +5,7 @@ use crowbot_protocol::{ClientMessage, MessageAuthor, SEARCH_MESSAGE_TERM_LENGTH,
 use gpui::{
     AnyElement, Context, Div, FocusHandle, Focusable, FollowMode, FontWeight, HighlightStyle,
     KeyDownEvent, ListOffset, MouseMoveEvent, Pixels, Point, Role, ScrollHandle, SharedString,
-    Stateful, StyledText, Task, Window, div, prelude::*, relative,
+    Stateful, Task, Window, div, prelude::*, relative,
 };
 
 use super::{HEAD, Workspace};
@@ -449,14 +449,14 @@ impl Workspace {
                 font_weight: Some(FontWeight::SEMIBOLD),
                 ..HighlightStyle::default()
             };
-            StyledText::new(SharedString::from(shown.to_owned())).with_highlights(
+            crate::truncated::truncated(shown.to_owned()).with_highlights(
                 matches(shown, &results.query)
                     .into_iter()
                     .map(move |range| (range, style)),
             )
         };
         // The title of a result, then what tells it from its neighbors.
-        let headline = |title: StyledText, context: String| {
+        let headline = |title: crate::truncated::Truncated, context: String| {
             div()
                 .min_w_0()
                 .flex()
@@ -470,7 +470,7 @@ impl Workspace {
                         .flex_none()
                         .max_w(relative(palette::CONTEXT_SHARE))
                         .truncate()
-                        .child(SharedString::from(context))
+                        .child(crate::truncated::truncated(context))
                 }))
         };
         let time = |at_ms: i64| {
@@ -573,10 +573,7 @@ impl Workspace {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(headline(
-                            StyledText::new(SharedString::from(author)),
-                            context,
-                        ))
+                        .child(headline(crate::truncated::truncated(author), context))
                         .child(small().truncate().child(marked(&hit.snippet))),
                 )
                 .child(time(hit.at_ms));
