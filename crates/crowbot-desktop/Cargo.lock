@@ -2241,7 +2241,6 @@ dependencies = [
  "web-sys",
  "wgpu",
  "zed-font-kit",
- "zeno",
 ]
 
 [[package]]

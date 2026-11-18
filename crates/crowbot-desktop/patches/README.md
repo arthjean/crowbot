@@ -14,8 +14,7 @@ The copy is not a member of the client's workspace (`exclude = ["patches"]`),
 so it builds with Zed's own lints, written out in its `Cargo.toml`, and the
 client's gates do not lint Zed's code. Its upstream dependencies are written
 out with Zed's requirements at the rev, so the lockfile keeps the versions it
-had; `skrifa` and `zeno`, which it adds, were already in the graph through
-`swash`.
+had; `skrifa`, which it adds, was already in the graph through `swash`.
 
 ## The changes to `gpui_wgpu`
 
@@ -23,8 +22,8 @@ All in `src/cosmic_text_system.rs`, plus the new `src/color_glyph.rs`.
 
 - **COLRv1 emoji.** swash draws COLRv0 layers, color bitmaps, and outlines.
   Fedora ships "Noto Color Emoji" as COLRv1 only, so every emoji came out empty.
-  `color_glyph.rs` walks the paint graph of a glyph with skrifa and paints it on
-  the CPU: transforms, glyph and box clips, solid fills, linear, radial
+  `color_glyph.rs` walks the paint graph of a glyph with skrifa and paints it
+  on the CPU, with swash's own rasterizer (zeno) for the clips: transforms, glyph and box clips, solid fills, linear, radial
   (two-circle), and sweep gradients with their extend modes, and layers with the
   28 composite modes of the COLR table. Its output matches HarfBuzz and cairo
   (`hb-view`) on Noto Color Emoji. A glyph of a COLRv1 face is drawn there
