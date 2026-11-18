@@ -628,6 +628,53 @@ async fn a_runtime_folder_mounted_noexec_fails_the_turn_and_names_the_option() {
     assert_eq!(publisher.requests(), 0);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_codex_turn_on_a_computer_without_user_namespaces_names_the_cause() {
+    let on_path = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|folder| folder.join("bwrap").is_file())
+    });
+    if !on_path {
+        eprintln!("skipped: no bwrap on PATH, so the sandbox of Codex is not checked here");
+        return;
+    }
+    let publisher = Publisher::start(Duration::ZERO);
+    let runtime = runtime();
+    let mut manifest = manifest(publisher.port, &sha256(&runtime), runtime.len());
+    manifest = json!({ "codex": manifest[CLAUDE].clone() });
+    let Some(daemon) =
+        Daemon::start_with_providers_confined(&manifest, support::Confinement::NoUserNamespaces)
+    else {
+        eprintln!("skipped: this computer allows no user namespace to confine the daemon in");
+        return;
+    };
+    let mut client = daemon.client().await;
+    let bot = client
+        .create_bot(BotDraft {
+            name: "Atlas".to_owned(),
+            provider: Some("codex".to_owned()),
+            ..BotDraft::default()
+        })
+        .await;
+    let conversation = bot.current_conversation_id;
+    client.open(conversation).await;
+    client.say(conversation, "say caw").await;
+    let end = client.until_turn_ends().await;
+    let Event::TurnFailed {
+        message, provider, ..
+    } = end
+    else {
+        panic!("the turn did not fail: {end:?}");
+    };
+    assert!(
+        message
+            .starts_with("ChatGPT's sandbox needs user namespaces, which this computer disables ("),
+        "{message}"
+    );
+    assert!(message.contains("namespace failed"), "{message}");
+    assert_eq!(provider.as_deref(), Some("codex"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn an_executable_with_no_execute_bit_is_not_found_and_says_why() {

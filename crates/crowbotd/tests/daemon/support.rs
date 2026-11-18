@@ -164,6 +164,10 @@ fn confined(command: Command, runtimes: &Path, confinement: Confinement) -> Comm
         Confinement::NoexecRuntimes => {
             r#"mkdir -p "$0" && mount -t tmpfs -o noexec,mode=0700 tmpfs "$0" && exec "$@""#
         }
+        Confinement::NoUserNamespaces => concat!(
+            "echo 0 > /proc/sys/user/max_user_namespaces && ",
+            r#"exec setpriv --bounding-set -all --inh-caps -all --ambient-caps -all -- "$@""#
+        ),
     };
     let mut wrapped = Command::new("unshare");
     wrapped
@@ -209,6 +213,9 @@ pub struct Daemon {
 pub enum Confinement {
     /// The folder of its runtimes is a file system mounted `noexec`.
     NoexecRuntimes,
+    /// It holds no capability and can create no user namespace, as on a
+    /// computer that disables them.
+    NoUserNamespaces,
 }
 
 impl Daemon {

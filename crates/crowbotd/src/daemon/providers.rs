@@ -247,6 +247,12 @@ impl Daemon {
                 profile.name
             ))
         })?;
+        #[cfg(target_os = "linux")]
+        if id == codex::PROVIDER {
+            codex::check_sandbox(&launch)
+                .await
+                .map_err(SessionFailure::plain)?;
+        }
         Ok((profile, launch, setting.signed_in))
     }
 

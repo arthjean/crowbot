@@ -64,6 +64,70 @@ pub fn profile(home: &Path) -> AgentProfile {
     }
 }
 
+/// On Linux Codex runs each shell command under bubblewrap (`bwrap`), which
+/// needs user namespaces unless it is installed setuid. This starts the
+/// `bwrap` Codex picks, the first one on `PATH` and else the one its runtime
+/// brings, once, with the namespaces Codex asks for. A computer that disables
+/// user namespaces then fails the turn with its cause, instead of failing each
+/// command the bot runs. Any other failure is left to Codex to report.
+#[cfg(target_os = "linux")]
+pub async fn check_sandbox(launch: &crate::provider::acp::Launch) -> Result<(), String> {
+    let Some(bwrap) = sandbox_program(launch) else {
+        return Ok(());
+    };
+    let checked = tokio::process::Command::new(&bwrap)
+        .args(["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/"])
+        .args(["--", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+    let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(10), checked).await
+    else {
+        return Ok(());
+    };
+    let said = String::from_utf8_lossy(&output.stderr);
+    let said = said.lines().next().unwrap_or_default().trim();
+    if output.status.success() || !said.contains("namespace") {
+        return Ok(());
+    }
+    Err(format!(
+        "ChatGPT's sandbox needs user namespaces, which this computer disables ({}: {said}).",
+        bwrap.display()
+    ))
+}
+
+/// The `bwrap` Codex runs: the first one on the agent's `PATH`, else the one
+/// beside the Codex program of its runtime.
+#[cfg(target_os = "linux")]
+fn sandbox_program(launch: &crate::provider::acp::Launch) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let runs = |path: &Path| {
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    let path = launch
+        .env
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
+    let on_path = std::env::split_paths(&path)
+        .map(|folder| folder.join("bwrap"))
+        .find(|candidate| runs(candidate));
+    let bundled = || {
+        let codex = Path::new(launch.env.get("CODEX_PATH")?);
+        let bwrap = codex
+            .parent()?
+            .parent()?
+            .join("codex-resources")
+            .join("bwrap");
+        runs(&bwrap).then_some(bwrap)
+    };
+    on_path.or_else(bundled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
