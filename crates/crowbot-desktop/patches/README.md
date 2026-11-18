@@ -55,8 +55,9 @@ AT-SPI once `org.a11y.Status.IsEnabled` is true, as Orca sets it.
 - Upstream's own tests of the crate, and the tests of `color_glyph.rs`, pass on
   the copy: 63 of 63 on 2026-11-18. They run outside the client's gates; to run
   them, place the copy at `crates/gpui_wgpu` of a tree whose `assets` is Zed's,
-  and add upstream's dev-dependencies (`gpui` with `bench-support`, `image`, and
-  `naga` at the rev of `wgpu`).
+  add upstream's dev-dependencies (`gpui` with `bench-support`, `image`, and
+  `naga` at the rev of `wgpu`), and run `cargo test -p gpui_wgpu --lib
+  --features test-support` (without the feature, one test does not build: 62).
 - `src/gpui_patches.rs` fails when the client's Zed rev and the copy's differ.
 
 ## Upkeep
