@@ -437,6 +437,8 @@ impl Workspace {
             cx.observe_window_activation(window, |_, window, cx| {
                 if window.is_window_active() {
                     crate::reduced_motion::refresh(cx);
+                    #[cfg(target_os = "linux")]
+                    crate::kwin::refresh(cx);
                     cx.notify();
                 }
             }),

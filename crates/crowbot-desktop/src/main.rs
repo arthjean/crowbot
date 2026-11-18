@@ -10,6 +10,8 @@ mod frames;
 #[cfg(test)]
 mod gpui_patches;
 mod identity;
+#[cfg(target_os = "linux")]
+mod kwin;
 mod layout;
 mod markdown;
 mod mascot;
@@ -134,6 +136,8 @@ fn main() -> ExitCode {
             }
             theme::font::init(cx);
             reduced_motion::follow(cx);
+            #[cfg(target_os = "linux")]
+            kwin::refresh(cx);
             composer::bind_keys(cx);
             workspace::bind_keys(cx);
             cx.on_window_closed(|cx, _| {

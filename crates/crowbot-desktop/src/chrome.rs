@@ -467,13 +467,13 @@ pub enum Button {
 }
 
 /// The Linux window buttons on `side`, in the order of the desktop's button
-/// layout, among the ones the compositor allows. A desktop with no layout
+/// layout (KWin's own on KDE), among the ones the compositor allows. A desktop with no layout
 /// (no portal) gets minimize, maximize, and close on the right. GNOME's
 /// default layout names close alone.
 #[cfg(target_os = "linux")]
 pub fn buttons(window: &Window, cx: &App, side: Side) -> Vec<Button> {
-    let layout = cx
-        .button_layout()
+    let layout = crate::kwin::button_layout(cx)
+        .or_else(|| cx.button_layout())
         .unwrap_or_else(gpui::WindowButtonLayout::linux_default);
     let named = match side {
         Side::Left => layout.left,

@@ -636,7 +636,8 @@ for client decorations and draws the chrome itself.
   click maximizes or restores it; a right click opens the desktop's window
   menu.
 - **Buttons.** Minimize, maximize (restore when maximized), and close, in
-  the order and on the side of the desktop's button layout, among the ones
+  the order and on the side of the desktop's button layout (KWin's own, read
+  from `kwinrc`, on KDE), among the ones
   the compositor allows. A desktop with no layout gets the three on the
   right. GNOME's default names close alone. Left buttons open the band before
   the sidebar topbar; right buttons close it. Each is a 46 by 38 slot
