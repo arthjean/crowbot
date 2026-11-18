@@ -11,6 +11,7 @@
 | 1.3 | 2026-11-17 | Arthur Jean | Every check that needs Windows leaves its story for a final epic, EP-008, so that the Linux work is certified on Linux alone |
 | 1.4 | 2026-11-17 | Arthur Jean | What GPUI cannot do on Linux at the pinned rev (COLRv1 emoji, the AT-SPI bridge) leaves US-002 and US-006 for a new story, US-026 in EP-009; the check of KDE's button layout moves from US-004 to US-007 |
 | 1.5 | 2026-11-17 | Arthur Jean | EP-009 moves before EP-007, since US-007 is blocked by US-026 and US-026 only by EP-001 |
+| 1.6 | 2026-11-18 | Arthur Jean | GPUI does publish to AT-SPI at the pinned rev, once `org.a11y.Status.IsEnabled` is true (EP-009 corrected); US-007 checks a message with emoji and Orca on a real session |
 
 ## Problem Statement
 
@@ -298,7 +299,7 @@ The desktop learns what the window is: a name, an icon, an entry in the applicat
 
 ### EP-009: GPUI on Linux
 
-Two things GPUI does not do on Linux at the pinned rev, found by the review of EP-001 on 2026-11-17: it draws no COLRv1 color glyph, the format of Fedora's "Noto Color Emoji", and it publishes nothing on the AT-SPI bus, so assistive tools see no GPUI window. Zed's main branch has the same code (issues 58287, 61660, and 51171 closed with no fix).
+Two things GPUI seemed not to do on Linux at the pinned rev, found by the review of EP-001 on 2026-11-17: it draws no COLRv1 color glyph, the format of Fedora's "Noto Color Emoji", and it published nothing on the AT-SPI bus, so assistive tools saw no GPUI window. Zed's main branch has the same text code (issues 58287, 61660, and 51171 closed with no fix; checked again on 2026-11-18 at `5b282ac`). The second was not a defect: GPUI publishes its window once `org.a11y.Status.IsEnabled` is true, which Orca sets when it starts, and the session of that review had it false (found in US-026, proven by `scripts/accessibility-check.sh`).
 
 **Definition of Done:** On Fedora 45 an emoji draws in color; with AT-SPI on, the client's window and its buttons show to assistive tools with their roles and labels; the way GPUI is changed is recorded in `AGENTS.md`.
 
@@ -314,6 +315,7 @@ Two things GPUI does not do on Linux at the pinned rev, found by the review of E
 - cosmic-text 0.19: its Unix fallback picks "Noto Color Emoji" by name, `src/font/fallback/unix.rs` line 46.
 - Crow Bot: the oracles `theme::system_fonts::an_emoji_draws_a_glyph` (fails on Fedora 45 today) and `every_script_of_a_message_draws_a_glyph`.
 - `AGENTS.md`, "GPUI source": GPUI comes from Zed's repository at a pinned rev; a change to GPUI is an exception this story decides.
+- AccessKit's Unix adapter activates on `org.a11y.Status.IsEnabled` (`accesskit_unix` 0.22, `src/context.rs`); Orca sets it at start (`orca/orca.py`, `_ensure_accessibility_enabled`).
 
 **Acceptance Criteria:**
 - [ ] Given Fedora 45 and its COLRv1 "Noto Color Emoji", when a message with emoji draws, then each emoji shows in color, and `an_emoji_draws_a_glyph` passes (from US-006)
@@ -340,6 +342,7 @@ The chrome, the identity, and the text, specified from source and proven on the 
 **References:**
 - Note 7; the "Not verified" lists of `docs/linux-port.md`.
 - Zed's documented variables, `zed/docs/src/linux.md` lines 139-201, 308-314.
+- `scripts/accessibility-check.sh` (US-026): the tree the client publishes, on a headless compositor.
 
 **Acceptance Criteria:**
 - [ ] Given GNOME Wayland at 100%, 125%, and 150% scale, when the window is captured in the light and the dark theme, then each capture matches `DESIGN.md` and is kept with the story
@@ -351,6 +354,8 @@ The chrome, the identity, and the text, specified from source and proven on the 
 - [ ] Given KDE on Wayland and Xwayland on GNOME, when the window is captured, then one title bar shows and the buttons act
 - [ ] Given KDE on Wayland, when the window opens, then its buttons follow the button layout set in KDE's settings (from US-004)
 - [ ] Given a desktop with no portal (Sway), when the client starts, then it starts in the light theme and does not fail
+- [ ] Given GNOME Wayland, when a message holds `👍 🐦‍⬛ ❤️ 1️⃣ 👍🏽 🇫🇷` and a plain `❤`, then each emoji shows in color in the transcript and the plain heart in the text color, and the capture is kept (from US-026)
+- [ ] Given Orca running on GNOME Wayland, when focus moves through the window buttons, the bot list, and the composer, then Orca speaks each with its role and label (from US-026); libatspi's "AddAccessible with unknown signature" warnings are not a failure unless Orca misses a change
 - [ ] Given a check fails, when the story ends, then the failure is a new story or a fixed defect, and the "Not verified" list of `docs/linux-port.md` is updated
 
 ---
