@@ -736,6 +736,24 @@ fn a_drag_selects_across_paragraphs_lists_and_code_and_the_copy_key_copies_it(
 }
 
 #[gpui::test]
+fn the_copy_key_copies_the_selection_of_the_composer_before_the_transcript(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, _daemon, cx) = three_blocks(cx);
+    select_everything(&workspace, cx);
+    workspace.update_in(cx, |this, window, cx| this.focus_composer(window, cx));
+    cx.simulate_input("draft");
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    });
+    cx.simulate_keystrokes(copy_keys());
+    assert_eq!(clipboard(cx).as_deref(), Some("draft"));
+    assert_eq!(typed(&workspace, cx), "draft");
+}
+
+#[gpui::test]
 fn a_double_click_selects_the_word_and_a_triple_click_the_block(cx: &mut TestAppContext) {
     let (workspace, _daemon, cx) = three_blocks(cx);
     let bubble = of(&workspace, cx, "bubble", "user");

@@ -61,13 +61,20 @@ actions!(
     ]
 );
 
+/// The context of the workspace's own keys. A key bound with no context ranks
+/// as deep as the focused element, so it would win over the composer's own
+/// binding of the same key: bound to the workspace, it ranks below them, and
+/// runs when the composer passes the key on.
+const KEY_CONTEXT: &str = "Workspace";
+
 pub fn bind_keys(cx: &mut App) {
+    let context = Some(KEY_CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("tab", FocusNext, None),
-        KeyBinding::new("shift-tab", FocusPrevious, None),
-        KeyBinding::new(COPY_KEYS, CopySelection, None),
-        KeyBinding::new(SEARCH_KEYS, ToggleSearch, None),
-        KeyBinding::new(SETTINGS_KEYS, ToggleSettings, None),
+        KeyBinding::new("tab", FocusNext, context),
+        KeyBinding::new("shift-tab", FocusPrevious, context),
+        KeyBinding::new(COPY_KEYS, CopySelection, context),
+        KeyBinding::new(SEARCH_KEYS, ToggleSearch, context),
+        KeyBinding::new(SETTINGS_KEYS, ToggleSettings, context),
     ]);
 }
 
@@ -2270,6 +2277,7 @@ impl Render for Workspace {
         let theme = Theme::of(cx);
         let root = div()
             .id("workspace")
+            .key_context(KEY_CONTEXT)
             .role(Role::Application)
             .aria_label("Crow Bot")
             .track_focus(&self.focus_handle)
