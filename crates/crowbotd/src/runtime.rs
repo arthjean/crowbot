@@ -255,7 +255,9 @@ async fn install(
         message: error.to_string(),
     };
     tokio::fs::remove_dir_all(staging).await.ok();
-    tokio::fs::create_dir_all(staging).await.map_err(failed)?;
+    crate::private::create_folder_async(staging)
+        .await
+        .map_err(failed)?;
     let total = spec.bytes();
     let mut before = 0;
     for (index, artifact) in spec.artifacts.iter().enumerate() {
@@ -483,9 +485,11 @@ async fn lock_beside(folder: &Path, spec: &RuntimeSpec) -> Result<std::fs::File,
         message: format!("cannot lock {}: {error}", path.display()),
     };
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(failed)?;
+        crate::private::create_folder_async(parent)
+            .await
+            .map_err(failed)?;
     }
-    let file = std::fs::OpenOptions::new()
+    let file = crate::private::options()
         .create(true)
         .truncate(false)
         .write(true)

@@ -805,6 +805,16 @@ impl SharedStore {
         let store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         read_or_write(&store)
     }
+
+    /// Closes the database, for a daemon that stops: SQLite moves what the
+    /// write-ahead log holds into the database and removes the `-wal` and
+    /// `-shm` files. A use of the store afterward fails, on an empty
+    /// database in memory.
+    pub fn close(&self) -> Result<(), StoreError> {
+        let mut store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let closed = std::mem::replace(&mut store.connection, Connection::open_in_memory()?);
+        closed.close().map_err(|(_, error)| StoreError::from(error))
+    }
 }
 
 /// Writes the events of one conversation. Streamed text grows one row in place:

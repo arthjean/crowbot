@@ -705,7 +705,10 @@ impl Workspace {
 
     fn handle_message(&mut self, message: ServerMessage, cx: &mut Context<Self>) {
         match message {
-            ServerMessage::Welcome { .. } | ServerMessage::Incompatible { .. } => {}
+            // The connection reads these itself.
+            ServerMessage::Welcome { .. }
+            | ServerMessage::Incompatible { .. }
+            | ServerMessage::Stopping => {}
             ServerMessage::Preferences(preferences) => {
                 self.saved_sidebar = SidebarLayout::from_preferences(&preferences);
                 if !self.resizing {

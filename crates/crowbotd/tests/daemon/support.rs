@@ -265,6 +265,54 @@ impl Daemon {
         );
     }
 
+    /// The endpoint the daemon listens on.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// The process of the daemon, while it runs.
+    pub fn pid(&self) -> u32 {
+        self.child.as_ref().expect("the daemon is not running").id()
+    }
+
+    /// Sends a signal to the daemon, as a service stop or Ctrl+C does.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: i32) {
+        let pid = i32::try_from(self.pid()).unwrap();
+        // SAFETY: `kill` takes plain integers.
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
+    }
+
+    /// Waits for the daemon to exit, and returns its status and how long it
+    /// took, or `None` when it still runs after `patience`.
+    pub fn wait_exit(
+        &mut self,
+        patience: Duration,
+    ) -> Option<(std::process::ExitStatus, Duration)> {
+        let started = Instant::now();
+        let child = self.child.as_mut()?;
+        while started.elapsed() < patience {
+            if let Some(status) = child.try_wait().unwrap() {
+                self.child = None;
+                return Some((status, started.elapsed()));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        None
+    }
+
+    /// What the daemon wrote to its standard error.
+    pub fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.join("daemon.log")).unwrap_or_default()
+    }
+
+    /// The processes of the scripted agents of this daemon: the ones whose
+    /// environment names the folder of the test.
+    #[cfg(target_os = "linux")]
+    pub fn agent_processes(&self) -> Vec<u32> {
+        processes_with(&self.dir.join("heartbeat").to_string_lossy())
+    }
+
     /// Ends the daemon the way a crash does: at once, with no chance to clean up.
     pub fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -330,6 +378,20 @@ impl Client {
             .expect("the daemon sent nothing in time")
             .unwrap()
             .expect("the daemon closed the connection")
+    }
+
+    /// Reads until the daemon closes the connection, and returns what it sent.
+    pub async fn until_closed(&mut self) -> Vec<ServerMessage> {
+        let mut messages = Vec::new();
+        loop {
+            let read = tokio::time::timeout(PATIENCE, self.reader.read::<ServerMessage>())
+                .await
+                .expect("the daemon kept the connection open");
+            match read {
+                Ok(Some(message)) => messages.push(message),
+                Ok(None) | Err(_) => return messages,
+            }
+        }
     }
 
     /// The next message, for a turn of a real model that takes its time.
@@ -620,4 +682,39 @@ pub fn queued_texts(queue: &QueueState) -> Vec<&str> {
         .iter()
         .map(|message| message.text.as_str())
         .collect()
+}
+
+/// The processes of this user whose environment holds `text`.
+#[cfg(target_os = "linux")]
+pub fn processes_with(text: &str) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            // A process that exited and was not reaped yet is no longer there.
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let zombie = state
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
+            !zombie
+                && std::fs::read(format!("/proc/{pid}/environ"))
+                    .is_ok_and(|environ| String::from_utf8_lossy(&environ).contains(text))
+        })
+        .collect()
+}
+
+/// Waits until `done` holds, or `patience` passes, and returns whether it held.
+pub fn eventually(patience: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        if started.elapsed() > patience {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

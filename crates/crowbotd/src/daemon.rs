@@ -95,6 +95,8 @@ struct State {
     published: HashMap<i64, BotSummary>,
     /// The bots whose conversations are being removed: none of them starts a task.
     deleting: HashSet<i64>,
+    /// The daemon was told to stop: no conversation starts a task.
+    stopping: bool,
     providers: HashMap<&'static str, providers::ProviderEntry>,
 }
 
@@ -148,6 +150,7 @@ impl Daemon {
             daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: PROTOCOL_VERSION,
             database: self.database.to_string_lossy().into_owned(),
+            linger: crate::systemd::linger(),
         })
     }
 
@@ -178,6 +181,9 @@ impl Daemon {
 
     pub fn conversation(self: &Arc<Self>, id: i64) -> Result<ConversationHandle, String> {
         let mut state = self.state();
+        if state.stopping {
+            return Err("The daemon is stopping.".to_owned());
+        }
         if let Some(handle) = state.conversations.get(&id) {
             return Ok(handle.clone());
         }
@@ -466,10 +472,39 @@ impl Daemon {
         };
         for handle in running {
             let (done, stopped) = oneshot::channel();
-            handle.send(Command::ShutDown { done });
+            handle.send(Command::ShutDown {
+                done,
+                patience: conversation::STOP_TIMEOUT,
+            });
             tokio::time::timeout(SHUTDOWN_PATIENCE, stopped).await.ok();
         }
         Ok(())
+    }
+
+    /// Stops every running turn, for a daemon that was told to stop: each
+    /// waiting approval is answered as cancelled, and an agent that has not
+    /// ended its turn after `patience` is closed. Returns once every
+    /// conversation ended, or at `deadline`. From now on no conversation
+    /// starts.
+    pub async fn stop(&self, patience: Duration, deadline: tokio::time::Instant) {
+        let running: Vec<ConversationHandle> = {
+            let mut state = self.state();
+            state.stopping = true;
+            state
+                .conversations
+                .drain()
+                .map(|(_, handle)| handle)
+                .collect()
+        };
+        let mut ended = Vec::with_capacity(running.len());
+        for handle in running {
+            let (done, stopped) = oneshot::channel();
+            handle.send(Command::ShutDown { done, patience });
+            ended.push(stopped);
+        }
+        for stopped in ended {
+            tokio::time::timeout_at(deadline, stopped).await.ok();
+        }
     }
 
     /// Stops the running turns of a bot, then removes it and its conversations.

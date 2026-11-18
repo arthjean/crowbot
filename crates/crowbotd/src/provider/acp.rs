@@ -79,13 +79,13 @@ impl AgentProfile {
     /// Writes what the agent reads at its start.
     pub fn prepare(&self) -> std::io::Result<()> {
         for folder in &self.folders {
-            std::fs::create_dir_all(folder)?;
+            crate::private::create_folder(folder)?;
         }
         for (path, content) in &self.files {
             if let Some(folder) = path.parent() {
-                std::fs::create_dir_all(folder)?;
+                crate::private::create_folder(folder)?;
             }
-            std::fs::write(path, content)?;
+            crate::private::write(path, content)?;
         }
         for path in &self.removed {
             let removed = if path.is_dir() {

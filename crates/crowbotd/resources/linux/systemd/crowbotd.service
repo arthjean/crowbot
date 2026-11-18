@@ -1,0 +1,31 @@
+# The Crow Bot daemon as a systemd user unit. scripts/desktop-files.sh copies it
+# to ~/.config/systemd/user with the path of the daemon built from this
+# repository in ExecStart, and enables it, so the daemon starts at login.
+# The client starts it too when no daemon listens. With lingering on
+# (loginctl enable-linger), it also runs with no session.
+
+[Unit]
+Description=Crow Bot daemon
+
+[Service]
+# The daemon sends READY=1 once it holds its database, ended the turns a
+# previous daemon left running, and claimed its endpoint.
+Type=notify
+ExecStart=@CROWBOTD@
+Restart=on-failure
+RestartSec=1s
+# A wrong argument, a database or an endpoint another daemon holds, and a
+# socket path that is too long do not fix themselves: no restart.
+RestartPreventExitStatus=2 3 4 5
+TimeoutStartSec=30s
+# A signal gives the running turns up to 5 seconds to end.
+TimeoutStopSec=15s
+# A stop signals the daemon alone, which ends its turns and their agents
+# itself: with KillMode=control-group the agents would get the signal too,
+# and the turn would end as failed rather than stopped. Once the daemon is
+# gone, however it ended, systemd kills every process left in the unit, also
+# an agent that left its process group.
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

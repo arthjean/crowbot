@@ -66,14 +66,15 @@ pub async fn lock_database(db: &Path, endpoint: &Endpoint) -> Result<DatabaseLoc
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent).map_err(failed)?;
+        crate::private::create_folder(parent).map_err(failed)?;
     }
-    let file = std::fs::OpenOptions::new()
+    let file = crate::private::options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&path)
         .map_err(failed)?;
+    crate::private::restrict(&path).map_err(failed)?;
     let waited = Instant::now();
     loop {
         match file.try_lock() {
@@ -105,7 +106,7 @@ fn record_owner(db: &Path, endpoint: &Endpoint) -> std::io::Result<()> {
     let text = serde_json::to_vec(&owner).map_err(std::io::Error::other)?;
     let path = beside(db, "owner");
     let partial = beside(db, "owner.partial");
-    std::fs::write(&partial, text)?;
+    crate::private::write(&partial, text)?;
     std::fs::rename(&partial, &path)
 }
 

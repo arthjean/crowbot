@@ -1021,6 +1021,7 @@ fn info() -> DaemonInfo {
         daemon_version: "9.8.7".to_owned(),
         protocol_version: 6,
         database: "C:\\Users\\me\\.crowbot\\crowbot.db".to_owned(),
+        linger: None,
     }
 }
 
@@ -1097,6 +1098,16 @@ fn the_settings_page_has_general_providers_and_about(cx: &mut TestAppContext) {
         workspace.read_with(cx, |this, _| this.daemon_info.clone()),
         Some(info())
     );
+    assert!(!shown(cx, "about-linger"), "the notion does not apply");
+    // A daemon whose computer stops the user's services at logout says so,
+    // with the command that keeps them; lingering on says nothing.
+    for (linger, notice) in [(Some(false), true), (Some(true), false)] {
+        daemon.tell(
+            ServerMessage::DaemonInfo(DaemonInfo { linger, ..info() }),
+            cx,
+        );
+        assert_eq!(shown(cx, "about-linger"), notice, "{linger:?}");
+    }
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();

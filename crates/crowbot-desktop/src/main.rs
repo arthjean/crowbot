@@ -18,6 +18,7 @@ mod mascot;
 mod menu;
 mod reduced_motion;
 mod reveal;
+mod service;
 mod sidebar;
 mod theme;
 mod transcript;
@@ -36,6 +37,7 @@ use gpui::{App, Bounds, Pixels, TitlebarOptions, WindowBounds, WindowOptions, pr
 use gpui_platform::application;
 
 use crate::connection::DaemonLauncher;
+use crate::service::Service;
 use crate::workspace::Workspace;
 
 const USAGE: &str =
@@ -43,7 +45,9 @@ const USAGE: &str =
 
 The client attaches to the daemon on the endpoint. When none listens, it starts
 `crowbotd` from the folder of its own executable, or from --daemon <path>, and
-passes it the endpoint and the arguments that follow `--`.";
+passes it the endpoint and the arguments that follow `--`. On Linux, with none of
+these options and the systemd user unit crowbotd.service installed, it asks the
+user's systemd to start that unit instead.";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
@@ -76,15 +80,29 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 /// How to start the daemon that serves `endpoint`, when its binary and a place
-/// for its log can be found.
-fn launcher(args: Args, endpoint: &Endpoint) -> Option<DaemonLauncher> {
+/// for its log can be found. A client given an endpoint, a daemon, or daemon
+/// arguments runs a daemon of its own, such as a sandbox: it starts it
+/// detached and never touches the systemd unit, which runs the default one.
+fn launcher(args: Args, endpoint: &Endpoint, service: Option<Service>) -> Option<DaemonLauncher> {
+    let default = args.endpoint.is_none() && args.daemon.is_none() && args.daemon_args.is_empty();
+    let log = connection::daemon_log(&args.daemon_args)?;
     let mut daemon_args: Vec<OsString> = vec!["--endpoint".into(), endpoint.address().into()];
     daemon_args.extend(args.daemon_args);
     Some(DaemonLauncher {
         program: args.daemon.or_else(connection::bundled_daemon)?,
         args: daemon_args,
-        log: connection::default_daemon_log()?,
+        log,
+        service: service.filter(|_| default),
     })
+}
+
+/// The user unit of the daemon, on Linux.
+fn user_service() -> Option<Service> {
+    if cfg!(target_os = "linux") {
+        Service::of_user()
+    } else {
+        None
+    }
 }
 
 fn window_options(bounds: Bounds<Pixels>, x11: bool) -> WindowOptions {
@@ -103,7 +121,7 @@ fn window_options(bounds: Bounds<Pixels>, x11: bool) -> WindowOptions {
 }
 
 fn main() -> ExitCode {
-    let mut args = match parse_args(std::env::args().skip(1)) {
+    let args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");
@@ -114,11 +132,11 @@ fn main() -> ExitCode {
         eprintln!("{reason}");
         return ExitCode::FAILURE;
     }
-    let Some(endpoint) = args.endpoint.take().or_else(Endpoint::local) else {
+    let Some(endpoint) = args.endpoint.clone().or_else(Endpoint::local) else {
         eprintln!("cannot choose a local endpoint; pass --endpoint <address>");
         return ExitCode::FAILURE;
     };
-    let launcher = launcher(args, &endpoint);
+    let launcher = launcher(args, &endpoint, user_service());
     let (connection, events) = match connection::start(endpoint, launcher) {
         Ok(started) => started,
         Err(error) => {
@@ -173,6 +191,8 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Args, String> {
@@ -226,9 +246,43 @@ mod tests {
     fn the_daemon_is_started_on_the_endpoint_of_the_client() {
         let endpoint = Endpoint::new("here");
         let args = parse(&["--daemon", "bin/crowbotd", "--", "--db", "test.db"]).unwrap();
-        let launcher = launcher(args, &endpoint).unwrap();
+        let launcher = launcher(args, &endpoint, None).unwrap();
         assert_eq!(launcher.program, PathBuf::from("bin/crowbotd"));
         assert_eq!(launcher.args, ["--endpoint", "here", "--db", "test.db"]);
+    }
+
+    #[test]
+    fn the_log_of_a_daemon_with_its_own_database_sits_beside_that_database() {
+        let sandbox = std::env::temp_dir().join("sandbox");
+        let socket = sandbox.join("crowbotd.sock").to_string_lossy().into_owned();
+        let db = sandbox.join("crowbot.db").to_string_lossy().into_owned();
+        let endpoint = Endpoint::new(socket.clone());
+        let args = parse(&["--endpoint", &socket, "--", "--db", &db]).unwrap();
+        let launcher = launcher(args, &endpoint, None).unwrap();
+        assert_eq!(launcher.log, sandbox.join("crowbotd.log"));
+
+        let launcher = launcher_with_defaults(&[]);
+        let folders = crowbot_protocol::Folders::local().unwrap();
+        assert_eq!(launcher.log, folders.log());
+    }
+
+    fn launcher_with_defaults(raw: &[&str]) -> DaemonLauncher {
+        let args = parse(raw).unwrap();
+        let endpoint = args.endpoint.clone().or_else(Endpoint::local).unwrap();
+        let service = Service::at(Path::new("/unit"), Path::new("/run"));
+        launcher(args, &endpoint, Some(service)).unwrap()
+    }
+
+    #[test]
+    fn only_the_default_daemon_is_started_through_the_unit() {
+        assert!(launcher_with_defaults(&[]).service.is_some());
+        for raw in [
+            &["--endpoint", "/elsewhere.sock"][..],
+            &["--daemon", "/bin/crowbotd"][..],
+            &["--", "--db", "/sandbox/crowbot.db"][..],
+        ] {
+            assert!(launcher_with_defaults(raw).service.is_none(), "{raw:?}");
+        }
     }
 
     #[test]

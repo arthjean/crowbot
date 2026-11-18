@@ -2,8 +2,9 @@
 # Builds Crow Bot and starts the client on a throwaway daemon, apart from your
 # own data.
 #
-# The sandbox has its own socket, database, bot folders, runtimes, and provider
-# homes, under ${XDG_STATE_HOME:-~/.local/state}/crowbot-sandbox/<name>. Sign-ins
+# The sandbox has its own socket, database, log, bot folders, runtimes, and
+# provider homes, under ${XDG_STATE_HOME:-~/.local/state}/crowbot-sandbox/<name>,
+# and never touches the systemd unit of your own daemon. Sign-ins
 # made there stay there until you clean the sandbox. The client starts the
 # sandbox daemon, which keeps running after the window closes: stop it with
 # `stop`.
@@ -55,12 +56,13 @@ sandbox_pids() {
 }
 
 # The agents the daemon started from the runtimes it installed in the sandbox.
-# A daemon stopped at once leaves them running until they see it is gone.
+# They end with the daemon; this finds one that left its process group.
 agent_pids() {
   pgrep -f -- "$sandbox/data/" || true
 }
 
-# Stops what a function lists, then forces what is left after ten seconds.
+# Stops what a function lists, then forces what is left after ten seconds. The
+# daemon ends its turns on SIGTERM and exits within five seconds.
 stop_listed() {
   local list=$1
   local -a pids

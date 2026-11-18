@@ -28,6 +28,9 @@
 //! - `deaf`: never end the turn, and ignore the cancel and the end of stdin;
 //!   the process exits on its own after 20 seconds.
 //! - `crash`: exit in the middle of the turn.
+//! - `escape <path>`: start `sleep 120` in a session of its own, outside the
+//!   agent's process group, write its process id to the file, then answer
+//!   `escaped`. Unix only.
 //! - `session`: report the session id and whether the session was resumed.
 //! - `config`: report the system prompt, the text sent before the prompt, the
 //!   model, and the working folder of the session.
@@ -634,6 +637,30 @@ impl Agent {
                 std::process::exit(0);
             }
             "crash" => std::process::exit(3),
+            #[cfg(unix)]
+            "escape" => {
+                use std::os::unix::process::CommandExt;
+
+                let mut command = std::process::Command::new("sleep");
+                command.arg("120").stdin(std::process::Stdio::null());
+                // SAFETY: `setsid` is async-signal-safe.
+                unsafe {
+                    command.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+                let escaped = command.spawn().and_then(|mut child| {
+                    std::fs::write(rest, child.id().to_string())?;
+                    // Reaped while the agent lives; outlives it otherwise.
+                    std::thread::spawn(move || child.wait());
+                    Ok(())
+                });
+                match escaped {
+                    Ok(()) => self.say(session, "escaped"),
+                    Err(error) => self.say(session, &format!("cannot escape: {error}")),
+                }
+            }
             "session" => self.say(
                 session,
                 &format!(

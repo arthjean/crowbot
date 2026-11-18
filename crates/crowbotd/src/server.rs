@@ -4,26 +4,51 @@ use std::time::Duration;
 
 use crowbot_protocol::transport::{Listener, MessageReader, MessageWriter};
 use crowbot_protocol::{ClientMessage, PROTOCOL_VERSION, ServerMessage};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinSet;
 
 use crate::conversation::{Command, Sink};
 use crate::daemon::{Daemon, Refusal};
 
-pub async fn serve(daemon: Arc<Daemon>, mut listener: Listener) {
-    loop {
-        match listener.accept().await {
-            Ok((reader, writer)) => {
-                tokio::spawn(connection(daemon.clone(), reader, writer));
-            }
-            Err(error) => {
-                eprintln!("[crowbotd] cannot accept a client: {error}");
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-    }
+/// How a daemon that stops ends its serving, in two steps.
+pub struct Shutdown {
+    /// The endpoint is let go: no client attaches anymore.
+    pub listen: oneshot::Receiver<()>,
+    /// Each attached client is told that the daemon stops, and its
+    /// connection closes once what it was sent is written.
+    pub close: watch::Receiver<bool>,
 }
 
-async fn connection(daemon: Arc<Daemon>, mut reader: MessageReader, mut writer: MessageWriter) {
+/// Serves the clients until the shutdown closes their connections, and
+/// returns once each connection ended.
+pub async fn serve(daemon: Arc<Daemon>, mut listener: Listener, shutdown: Shutdown) {
+    let Shutdown { mut listen, close } = shutdown;
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = &mut listen => break,
+            accepted = listener.accept() => match accepted {
+                Ok((reader, writer)) => {
+                    connections.spawn(connection(daemon.clone(), reader, writer, close.clone()));
+                }
+                Err(error) => {
+                    eprintln!("[crowbotd] cannot accept a client: {error}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            },
+        }
+    }
+    // On Unix this removes the socket file.
+    drop(listener);
+    while connections.join_next().await.is_some() {}
+}
+
+async fn connection(
+    daemon: Arc<Daemon>,
+    mut reader: MessageReader,
+    mut writer: MessageWriter,
+    mut close: watch::Receiver<bool>,
+) {
     let id = daemon.next_connection();
     let (sink, mut outgoing) = mpsc::unbounded_channel::<ServerMessage>();
     let mut writing = tokio::spawn(async move {
@@ -40,7 +65,14 @@ async fn connection(daemon: Arc<Daemon>, mut reader: MessageReader, mut writer: 
     };
 
     loop {
-        match reader.read::<ClientMessage>().await {
+        let read = tokio::select! {
+            read = reader.read::<ClientMessage>() => read,
+            _ = close.wait_for(|close| *close) => {
+                sink.send(ServerMessage::Stopping).ok();
+                break;
+            }
+        };
+        match read {
             Ok(Some(message)) => match client.handle(&daemon, message, &sink) {
                 Ok(()) => {}
                 Err(Closing::Silent) => break,

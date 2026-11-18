@@ -1,6 +1,7 @@
 mod bot;
 mod endpoint;
 mod event;
+mod folders;
 mod message;
 mod preferences;
 mod provider;
@@ -14,11 +15,12 @@ pub use bot::{
     BOT_TITLE_LENGTH, Bot, BotDraft, BotPatch, BotState, BotSummary, MascotShape, PermissionLevel,
     mascot_at,
 };
-pub use endpoint::Endpoint;
+pub use endpoint::{Endpoint, SOCKET_PATH_LIMIT};
 pub use event::{
     APPROVAL_TARGET_BYTES, ApprovalClosure, ApprovalDecision, ApprovalReason, Event, FailureCause,
     Interruption, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
 };
+pub use folders::Folders;
 pub use message::{
     ClientMessage, ConversationSnapshot, ConversationSummary, MESSAGE_LENGTH, PROTOCOL_VERSION,
     QueueState, QueuedMessage, ServerMessage, TimedEvent,
@@ -43,3 +45,7 @@ pub const EXIT_DATABASE_HELD: u8 = 3;
 /// The exit status of a daemon that did not start because another program
 /// holds its endpoint. A client that started it attaches to that program.
 pub const EXIT_ENDPOINT_HELD: u8 = 4;
+
+/// The exit status of a daemon that did not start because the path of its
+/// socket is longer than `SOCKET_PATH_LIMIT`. Nothing was created.
+pub const EXIT_ENDPOINT_TOO_LONG: u8 = 5;

@@ -29,6 +29,9 @@ pub(super) const SETTINGS_QUERY_LENGTH: usize = 64;
 
 const NAV_ROW_GROUP: &str = "settings-nav-row";
 const PATH_PARENT_GROUP: &str = "settings-path-parent";
+/// Shown when the daemon's computer stops the user's services at logout.
+const LINGER_NOTICE: &str = "Bots stop when you log out. To keep them running, run:";
+const LINGER_COMMAND: &str = "loginctl enable-linger";
 
 /// The field that takes the path of the user's own executable for a provider.
 pub(super) struct ExecutableEdit {
@@ -1500,6 +1503,36 @@ impl Workspace {
                 false,
             ))
             .into_any_element();
+        let mut storage = vec![storage];
+        // A daemon whose computer does not keep the user's services running
+        // with no session ends with the session. The client never changes that.
+        if info.is_some_and(|info| info.linger == Some(false)) {
+            storage.push(
+                div()
+                    .id("about-linger")
+                    .debug_selector(|| "about-linger".into())
+                    .role(Role::Label)
+                    .aria_label(SharedString::from(format!(
+                        "{LINGER_NOTICE} {LINGER_COMMAND}"
+                    )))
+                    .child(row(
+                        row_text(
+                            LINGER_NOTICE,
+                            Some(
+                                div()
+                                    .font(font::mono())
+                                    .text_size(text::SM.size)
+                                    .child(LINGER_COMMAND)
+                                    .into_any_element(),
+                            ),
+                            theme,
+                        ),
+                        None,
+                        false,
+                    ))
+                    .into_any_element(),
+            );
+        }
         vec![
             group(
                 group_heading("settings-versions", "Versions", theme),
@@ -1507,7 +1540,7 @@ impl Workspace {
             ),
             group(
                 group_heading("settings-storage", "Storage", theme),
-                card(vec![storage], theme),
+                card(storage, theme),
             ),
         ]
     }

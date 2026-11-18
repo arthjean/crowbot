@@ -137,47 +137,354 @@ fn a_daemon_on_a_held_endpoint_exits_with_its_own_status() {
 
 #[cfg(unix)]
 mod unix {
+    use std::ffi::OsStr;
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use crowbot_protocol::Endpoint;
     use crowbot_protocol::transport::Listener;
+    use crowbot_protocol::{EXIT_ENDPOINT_TOO_LONG, Endpoint, SOCKET_PATH_LIMIT};
 
     use crate::support;
 
-    #[test]
-    fn the_default_folder_is_made_private() {
-        let home = support::test_dir();
-        let folder = home.join(".crowbot");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let log = home.join("daemon.log");
-        let mut daemon = Command::new(env!("CARGO_BIN_EXE_crowbotd"))
-            .env("HOME", &home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&log).unwrap())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut said = String::new();
-        while !said.contains("listening on") && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-            said.clear();
-            std::fs::File::open(&log)
+    /// A daemon started with `HOME` set to a folder of the test, the XDG
+    /// variables given, and every other XDG variable removed.
+    struct Started {
+        child: std::process::Child,
+        log: PathBuf,
+    }
+
+    impl Started {
+        fn new(home: &Path, vars: &[(&str, &OsStr)], args: &[&OsStr], umask: Option<u32>) -> Self {
+            let log = home.join("daemon.log");
+            let mut command = Command::new(env!("CARGO_BIN_EXE_crowbotd"));
+            command.env("HOME", home);
+            for name in [
+                "XDG_DATA_HOME",
+                "XDG_STATE_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_RUNTIME_DIR",
+            ] {
+                command.env_remove(name);
+            }
+            command
+                .envs(vars.iter().copied())
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap());
+            if let Some(mask) = umask {
+                use std::os::unix::process::CommandExt;
+                // SAFETY: `umask` is async-signal-safe.
+                unsafe {
+                    command.pre_exec(move || {
+                        libc::umask(mask);
+                        Ok(())
+                    });
+                }
+            }
+            Self {
+                child: command.spawn().unwrap(),
+                log,
+            }
+        }
+
+        fn said(&self) -> String {
+            let mut said = String::new();
+            std::fs::File::open(&self.log)
                 .unwrap()
                 .read_to_string(&mut said)
                 .unwrap();
+            said
         }
-        daemon.kill().ok();
-        daemon.wait().ok();
-        let mode = std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777;
+
+        /// Waits until the daemon listens, or exits.
+        fn listening(&mut self) -> String {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let said = self.said();
+                if said.contains("listening on")
+                    || self.child.try_wait().unwrap().is_some()
+                    || Instant::now() > deadline
+                {
+                    return said;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn exit(&mut self) -> Option<i32> {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    return status.code();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None
+        }
+    }
+
+    impl Drop for Started {
+        fn drop(&mut self) {
+            // SAFETY: `kill` takes plain integers.
+            unsafe {
+                libc::kill(i32::try_from(self.child.id()).unwrap(), libc::SIGTERM);
+            }
+            if self.exit().is_none() {
+                self.child.kill().ok();
+            }
+            self.child.wait().ok();
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// Writes, so that SQLite opens its `-wal` and `-shm` files.
+    fn write_something(endpoint: &Endpoint) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut client = support::Client::connect(endpoint).await;
+            client.new_bot("Private").await;
+        });
+    }
+
+    fn beside(db: &Path, suffix: &str) -> PathBuf {
+        let mut path = db.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn with_no_flag_the_files_sit_in_the_xdg_folders() {
+        let home = support::test_dir();
+        let runtime_dir = home.join("run");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A relative variable is ignored, as the specification says.
+        let mut daemon = Started::new(
+            &home,
+            &[
+                ("XDG_RUNTIME_DIR", runtime_dir.as_os_str()),
+                ("XDG_DATA_HOME", OsStr::new("relative/data")),
+            ],
+            &[],
+            None,
+        );
+        let said = daemon.listening();
+        let data = home.join(".local/share/crowbot");
+        let socket = runtime_dir.join("crowbot/crowbotd.sock");
+        assert!(
+            said.contains(&format!("listening on {}", socket.display())),
+            "{said}"
+        );
+        assert!(data.join("crowbot.db").is_file(), "{said}");
+        assert!(beside(&socket, ".lock").is_file());
+        assert_eq!(mode(&data), 0o700);
+        assert_eq!(mode(&runtime_dir.join("crowbot")), 0o700);
+        assert!(!said.contains("warning"), "{said}");
+        assert!(!home.join(".crowbot").exists());
+        assert!(!home.join("relative").exists());
+        drop(daemon);
+        assert!(!socket.exists(), "the stopped daemon left its socket");
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_a_runtime_folder_the_socket_goes_in_a_private_folder_under_the_data_folder() {
+        let home = support::test_dir();
+        let data_home = home.join("data");
+        let mut daemon = Started::new(
+            &home,
+            &[("XDG_DATA_HOME", data_home.as_os_str())],
+            &[],
+            None,
+        );
+        let said = daemon.listening();
+        let socket = data_home.join("crowbot/run/crowbotd.sock");
+        assert!(
+            said.contains("warning: XDG_RUNTIME_DIR is not set"),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!("listening on {}", socket.display())),
+            "{said}"
+        );
+        assert_eq!(mode(&data_home.join("crowbot/run")), 0o700);
+        assert!(data_home.join("crowbot/crowbot.db").is_file());
+        drop(daemon);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_socket_path_that_is_too_long_is_refused_before_anything_exists() {
+        let home = support::test_dir();
+        let folder = home.join("never");
+        let prefix = folder.join("s").to_string_lossy().len();
+        let path = |length: usize| {
+            let name = "s".repeat(length - prefix + 1);
+            folder.join(name).to_string_lossy().into_owned()
+        };
+        let too_long = path(SOCKET_PATH_LIMIT + 1);
+        assert_eq!(too_long.len(), SOCKET_PATH_LIMIT + 1);
+        let db = folder.join("data/crowbot.db");
+        let mut refused = Started::new(
+            &home,
+            &[],
+            &[
+                OsStr::new("--endpoint"),
+                OsStr::new(&too_long),
+                OsStr::new("--db"),
+                db.as_os_str(),
+            ],
+            None,
+        );
+        assert_eq!(refused.exit(), Some(i32::from(EXIT_ENDPOINT_TOO_LONG)));
+        let said = refused.said();
+        assert!(said.contains(&too_long), "{said}");
+        assert!(
+            said.contains(&format!("{} bytes long", too_long.len())),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!("limit of {SOCKET_PATH_LIMIT} bytes")),
+            "{said}"
+        );
+        assert!(said.contains("--endpoint"), "{said}");
+        assert!(
+            !folder.exists(),
+            "the refused daemon created {}",
+            folder.display()
+        );
+        assert!(!home.join(".local").exists() && !home.join(".crowbot").exists());
+
+        let longest = path(SOCKET_PATH_LIMIT);
+        let mut daemon = Started::new(
+            &home,
+            &[],
+            &[
+                OsStr::new("--endpoint"),
+                OsStr::new(&longest),
+                OsStr::new("--db"),
+                db.as_os_str(),
+            ],
+            None,
+        );
+        let said = daemon.listening();
         assert!(said.contains("listening on"), "{said}");
-        assert_eq!(mode, 0o700, "{said}");
-        assert!(said.contains("private"), "{said}");
+        drop((refused, daemon));
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_new_database_folder_and_every_file_are_private_under_a_permissive_umask() {
+        let home = support::test_dir();
+        let db = home.join("new/deeper/crowbot.db");
+        let endpoint = support::test_endpoint(&home);
+        let mut daemon = Started::new(
+            &home,
+            &[],
+            &[
+                OsStr::new("--db"),
+                db.as_os_str(),
+                OsStr::new("--endpoint"),
+                OsStr::new(endpoint.address()),
+            ],
+            Some(0o022),
+        );
+        let said = daemon.listening();
+        assert!(said.contains("listening on"), "{said}");
+        write_something(&endpoint);
+        assert_eq!(mode(&home.join("new")), 0o700);
+        assert_eq!(mode(&home.join("new/deeper")), 0o700);
+        // With its database and endpoint given, it creates nothing in the
+        // default folders.
+        assert!(!home.join(".local").exists() && !home.join(".crowbot").exists());
+        for suffix in ["", "-wal", "-shm", ".lock", ".owner"] {
+            assert_eq!(mode(&beside(&db, suffix)), 0o600, "{suffix}");
+        }
+        drop(daemon);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_folder_the_user_opened_keeps_its_mode_and_the_files_inside_are_made_private() {
+        let home = support::test_dir();
+        let folder = home.join("open");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = folder.join("crowbot.db");
+        // Files an earlier daemon left readable by everyone.
+        for suffix in ["", ".lock", ".owner"] {
+            let path = beside(&db, suffix);
+            std::fs::write(&path, "").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let endpoint = support::test_endpoint(&home);
+        let mut daemon = Started::new(
+            &home,
+            &[],
+            &[
+                OsStr::new("--db"),
+                db.as_os_str(),
+                OsStr::new("--endpoint"),
+                OsStr::new(endpoint.address()),
+            ],
+            Some(0o022),
+        );
+        let said = daemon.listening();
+        assert!(said.contains("listening on"), "{said}");
+        write_something(&endpoint);
+        assert_eq!(mode(&folder), 0o755);
+        for suffix in ["", "-wal", "-shm", ".lock", ".owner"] {
+            assert_eq!(mode(&beside(&db, suffix)), 0o600, "{suffix}");
+        }
+        drop(daemon);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_database_folder_of_another_account_is_refused() {
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "skipped: as root, the root folder belongs to the account that runs the test"
+            );
+            return;
+        }
+        let home = support::test_dir();
+        let endpoint = support::test_endpoint(&home);
+        // The root folder belongs to root.
+        let mut daemon = Started::new(
+            &home,
+            &[],
+            &[
+                OsStr::new("--db"),
+                OsStr::new("/crowbot.db"),
+                OsStr::new("--endpoint"),
+                OsStr::new(endpoint.address()),
+            ],
+            None,
+        );
+        assert_eq!(daemon.exit(), Some(1));
+        let said = daemon.said();
+        assert!(
+            said.contains("the folder / belongs to root (uid 0)"),
+            "{said}"
+        );
+        assert!(!said.contains("listening on"), "{said}");
+        drop(daemon);
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
@@ -188,7 +495,7 @@ mod unix {
         assert!(path.exists(), "the test left no stale socket");
         let endpoint = Endpoint::new(path.to_string_lossy().into_owned());
         let listener = Listener::bind(&endpoint);
-        assert!(listener.is_ok());
+        assert!(listener.is_ok(), "{:?}", listener.err());
         drop(listener);
         std::fs::remove_dir_all(&dir).ok();
     }

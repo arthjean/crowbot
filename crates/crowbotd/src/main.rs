@@ -4,18 +4,26 @@ mod digest;
 mod handoff;
 mod instance;
 mod lifetime;
+mod private;
 mod provider;
 mod runtime;
 mod server;
+mod stop;
 mod store;
+mod systemd;
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crowbot_protocol::transport::Listener;
-use crowbot_protocol::{EXIT_DATABASE_HELD, EXIT_ENDPOINT_HELD, Endpoint};
+use crowbot_protocol::{
+    EXIT_DATABASE_HELD, EXIT_ENDPOINT_HELD, EXIT_ENDPOINT_TOO_LONG, Endpoint, Folders,
+    SOCKET_PATH_LIMIT,
+};
+use tokio::sync::{oneshot, watch};
 
 use crate::daemon::Daemon;
 use crate::instance::LockFailure;
@@ -27,13 +35,20 @@ const USAGE: &str =
                 [--runtime-manifest <file>] [--endpoint <address>]
 
 The daemon listens on a local endpoint and serves Crow Bot clients until it is stopped.
+SIGTERM, SIGINT, or SIGHUP stops it: the running turns end, then it exits with
+status 0. A second signal stops it at once.
 A bot created with no folder gets one of its own under --bots-dir (~/CrowBot/Bots).
 The agent runtimes the daemon installs, and the files providers keep for bots, go
 under --data-dir (the folder of the database). --runtime-manifest replaces the pinned
 runtimes by the ones a JSON file lists, for a mirror.
 
+On Linux the database, the runtimes, and the provider homes go under
+$XDG_DATA_HOME/crowbot (~/.local/share/crowbot), and the socket under
+$XDG_RUNTIME_DIR/crowbot. Elsewhere they go under ~/.crowbot.
+
 Exit status: 1 when the daemon cannot start, 2 for a wrong argument, 3 when another
-crowbotd uses the database, 4 when another program holds the endpoint.";
+crowbotd uses the database, 4 when another program holds the endpoint, 5 when the
+path of the socket is too long.";
 
 struct Args {
     db: Option<PathBuf>,
@@ -84,12 +99,6 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(args)
 }
 
-fn default_db_path() -> Result<PathBuf, String> {
-    std::env::home_dir()
-        .map(|home| home.join(".crowbot").join("crowbot.db"))
-        .ok_or_else(|| "cannot find the home directory; pass --db <path>".to_owned())
-}
-
 /// Where the bots that were given no folder get one of their own.
 fn default_bots_dir() -> Result<PathBuf, String> {
     std::env::home_dir()
@@ -105,6 +114,8 @@ enum StartError {
     DatabaseHeld(String),
     /// `EXIT_ENDPOINT_HELD`: another program holds the endpoint.
     EndpointHeld(String),
+    /// `EXIT_ENDPOINT_TOO_LONG`: the socket path does not fit.
+    EndpointTooLong(String),
 }
 
 impl From<String> for StartError {
@@ -119,48 +130,44 @@ impl From<&str> for StartError {
     }
 }
 
-/// The folder `~/.crowbot` holds the database, the log, and the socket of
-/// the default daemon: only its user may enter it. It is made so, or kept so
-/// when the client or a permissive umask made it first.
-#[cfg(unix)]
-fn private_folder(folder: &std::path::Path) -> Result<(), String> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+/// How long the turns of a daemon that stops get to end before their agents
+/// are closed, and how long the daemon waits for them in all: it exits within
+/// 5 seconds of the signal.
+const STOP_PATIENCE: Duration = Duration::from_secs(3);
+const STOP_DEADLINE: Duration = Duration::from_millis(3_500);
 
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(folder)
-        .map_err(|error| format!("cannot create {}: {error}", folder.display()))?;
-    let metadata = std::fs::metadata(folder)
-        .map_err(|error| format!("cannot read {}: {error}", folder.display()))?;
-    // SAFETY: `geteuid` has no preconditions.
-    if metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(format!(
-            "{} belongs to another account, so it could read the database",
-            folder.display()
-        ));
-    }
-    if metadata.mode() & 0o077 != 0 {
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("cannot make {} private: {error}", folder.display()))?;
-        eprintln!("[crowbotd] made {} private to its user", folder.display());
-    }
-    Ok(())
-}
-
-/// Starts the daemon in this order: lock the database, open it, end the turns
-/// a previous daemon left running, then claim the endpoint. An endpoint that
-/// answers therefore belongs to a daemon that is ready, and a daemon that
-/// fails to start is never reached.
+/// Starts the daemon in this order: check the endpoint, lock the database,
+/// open it, end the turns a previous daemon left running, then claim the
+/// endpoint. An endpoint that answers therefore belongs to a daemon that is
+/// ready, and a daemon that fails to start is never reached. A socket path
+/// that cannot be used is refused before any file or folder exists.
 async fn run(args: Args) -> Result<(), StartError> {
-    #[cfg(unix)]
-    if args.db.is_none() || args.endpoint.is_none() {
-        let home = std::env::home_dir().ok_or("cannot find the home directory")?;
-        private_folder(&home.join(".crowbot"))?;
+    let folders = Folders::local();
+    let local = || folders.clone().ok_or("cannot find the home directory");
+    let endpoint = match args.endpoint {
+        Some(endpoint) => endpoint,
+        None => {
+            let folders = local()?;
+            if folders.runtime_missing && cfg!(unix) {
+                eprintln!(
+                    "[crowbotd] warning: XDG_RUNTIME_DIR is not set, so the socket goes in {}",
+                    folders.runtime.display()
+                );
+            }
+            Endpoint::local().ok_or("cannot choose a local endpoint; pass --endpoint <address>")?
+        }
+    };
+    if let Some(length) = endpoint.too_long() {
+        return Err(StartError::EndpointTooLong(format!(
+            "the socket path {endpoint} is {length} bytes long, over the limit of {SOCKET_PATH_LIMIT} bytes; pass a shorter --endpoint"
+        )));
     }
+    let default_db = args.db.is_none();
     let db = match args.db {
         Some(path) => path,
-        None => default_db_path()?,
+        None => local()
+            .map_err(|_| "cannot find the home directory; pass --db <path>")?
+            .database(),
     };
     let bots_dir = match args.bots_dir {
         Some(dir) => std::path::absolute(&dir)
@@ -182,12 +189,18 @@ async fn run(args: Args) -> Result<(), StartError> {
         .map(Runtimes::read_manifest)
         .transpose()?;
     let runtimes = Runtimes::new(data_dir.join("runtimes"), manifest);
-    let endpoint = match args.endpoint {
-        Some(endpoint) => endpoint,
-        None => {
-            Endpoint::local().ok_or("cannot choose a local endpoint; pass --endpoint <address>")?
-        }
-    };
+    // The folder of the database is the user's alone. A folder of Crow Bot's
+    // own is made so; one the user chose keeps its mode.
+    let db_folder = absolute(&db.parent().map_or_else(PathBuf::new, Path::to_owned))?;
+    let own_folder = default_db || folders.as_ref().is_some_and(|f| f.holds(&db_folder));
+    private::database_folder(&db_folder, own_folder)?;
+    #[cfg(unix)]
+    if Some(endpoint.address()) == Endpoint::local().as_ref().map(Endpoint::address)
+        && let Some(folders) = &folders
+    {
+        // The default socket's folder, which `Listener::bind` creates 0700.
+        private::database_folder(&folders.runtime, true)?;
+    }
     eprintln!("[crowbotd] process {}", std::process::id());
     let _locked =
         instance::lock_database(&db, &endpoint)
@@ -196,12 +209,14 @@ async fn run(args: Args) -> Result<(), StartError> {
                 LockFailure::Held(message) => StartError::DatabaseHeld(message),
                 LockFailure::Failed(message) => StartError::Failed(message),
             })?;
-    let store = Store::open(&db).map_err(|error| error.to_string())?;
+    let store = open_store(&db)?;
     eprintln!("[crowbotd] database {}", db.display());
     let interrupted = store.recover().map_err(|error| error.to_string())?;
     if interrupted > 0 {
         eprintln!("[crowbotd] ended {interrupted} turn(s) that a previous daemon left running");
     }
+    let mut signals =
+        stop::Signals::new().map_err(|error| format!("cannot handle signals: {error}"))?;
     let listener = Listener::bind(&endpoint).map_err(|error| match error.kind() {
         ErrorKind::PermissionDenied | ErrorKind::AddrInUse => StartError::EndpointHeld(format!(
             "another program already holds the endpoint {endpoint}: another crowbotd is running, or another program took the name"
@@ -209,19 +224,70 @@ async fn run(args: Args) -> Result<(), StartError> {
         _ => StartError::Failed(format!("cannot listen on {endpoint}: {error}")),
     })?;
     eprintln!("[crowbotd] listening on {endpoint}");
+    systemd::ready();
+    let store = SharedStore::new(store);
     let daemon = Arc::new(Daemon::new(
-        SharedStore::new(store),
+        store.clone(),
         db,
         bots_dir,
         data_dir,
         args.command,
         runtimes,
     ));
-    server::serve(daemon, listener).await;
+    let (listen, stop_listening) = oneshot::channel();
+    let (close, closing) = watch::channel(false);
+    let mut serving = tokio::spawn(server::serve(
+        daemon.clone(),
+        listener,
+        server::Shutdown {
+            listen: stop_listening,
+            close: closing,
+        },
+    ));
+    let signal = tokio::select! {
+        signal = signals.next() => signal,
+        _ = &mut serving => return Err("the daemon stopped serving".into()),
+    };
+    eprintln!("[crowbotd] stopping on {signal}; a second signal stops it at once");
+    systemd::stopping();
+    tokio::spawn(async move {
+        let signal = signals.next().await;
+        eprintln!("[crowbotd] stopped at once on a second {signal}");
+        std::process::exit(128 + signal.number());
+    });
+    listen.send(()).ok();
+    daemon
+        .stop(STOP_PATIENCE, tokio::time::Instant::now() + STOP_DEADLINE)
+        .await;
+    close.send(true).ok();
+    serving.await.ok();
+    if let Err(error) = store.close() {
+        eprintln!("[crowbotd] cannot close the database: {error}");
+    }
+    eprintln!("[crowbotd] stopped");
     Ok(())
 }
 
+/// Opens the database. A new database is created 0600 first, on Unix, so its
+/// `-wal` and `-shm` files, which SQLite creates with the mode of the
+/// database, are private too; files that exist are made private.
+fn open_store(db: &Path) -> Result<Store, String> {
+    let failed = |error: std::io::Error| format!("cannot open {}: {error}", db.display());
+    private::options()
+        .create(true)
+        .append(true)
+        .open(db)
+        .map_err(failed)?;
+    for extension in ["", "-wal", "-shm"] {
+        let mut path = db.as_os_str().to_os_string();
+        path.push(extension);
+        private::restrict(Path::new(&path)).map_err(failed)?;
+    }
+    Store::open(db).map_err(|error| error.to_string())
+}
+
 fn main() -> ExitCode {
+    systemd::take_notify_socket();
     #[cfg(unix)]
     {
         let mut raw = std::env::args_os().skip(1).peekable();
@@ -244,7 +310,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(serve())
+    let status = runtime.block_on(serve());
+    // A task that still blocks a thread does not hold the exit back.
+    runtime.shutdown_timeout(Duration::from_millis(500));
+    status
 }
 
 async fn serve() -> ExitCode {
@@ -260,6 +329,9 @@ async fn serve() -> ExitCode {
         Err(StartError::Failed(message)) => (message, ExitCode::FAILURE),
         Err(StartError::DatabaseHeld(message)) => (message, ExitCode::from(EXIT_DATABASE_HELD)),
         Err(StartError::EndpointHeld(message)) => (message, ExitCode::from(EXIT_ENDPOINT_HELD)),
+        Err(StartError::EndpointTooLong(message)) => {
+            (message, ExitCode::from(EXIT_ENDPOINT_TOO_LONG))
+        }
     };
     eprintln!("[crowbotd] failed: {message}");
     status

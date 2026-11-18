@@ -723,7 +723,7 @@ impl Daemon {
         let folder = self.data_dir.join("providers").join(id).join("models");
         profile
             .prepare()
-            .and_then(|()| std::fs::create_dir_all(&folder))
+            .and_then(|()| crate::private::create_folder(&folder))
             .map_err(|error| format!("Cannot prepare the folder of {name}: {error}"))?;
         let asked = acp::read_offer(profile, &launch, folder, setting.signed_in);
         match tokio::time::timeout(MODELS_PATIENCE, asked).await {

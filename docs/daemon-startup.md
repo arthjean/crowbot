@@ -77,6 +77,8 @@ The lock must be a separate file, not the database file.
 
 1. **Parse the arguments and resolve paths** (as today). Build `Runtimes` (it touches no files).
 2. **Prepare the default folder.** On Unix, when the database or the socket is under the default `~/.crowbot`, create it with mode `0700`, or, when it exists, check that the current user owns it and set the mode to `0700` if group or others have any access; refuse to start when another account owns it. For a folder given by `--db` or `--endpoint`, change nothing, and log a warning when the socket's folder is writable by others. Windows: no change. The client creates `~/.crowbot` with `0700` too.
+
+   *Since the Linux port (US-011 to US-013 of `tasks/prd-crow-bot-linux-port.md`):* the endpoint's length is checked first of all (exit status 5, nothing created); on Linux the default folders are the XDG ones (`Folders`, `folders.rs`); the folder of any database, when the daemon creates it, is `0700` and every file of the daemon `0600`; a database folder of another account is refused, whether it is the default one or not.
 3. **Lock the database.** Open `<db>.lock` (create, write, no truncate) and call `try_lock`. On `WouldBlock`, read `<db>.owner` (step 4) and exit with status **3**, logging `[crowbotd] failed: another crowbotd (process 1234, endpoint ...) uses the database <db>`. On any other error, exit with status 1. Never delete the lock file: removing it would let a later process lock a new file while the holder keeps the old one. Keep the `File` alive until `run` returns.
 4. **Record the owner.** Write `<db>.owner` (to a temporary name, then rename): `pid`, the start time, the endpoint, and the daemon version. It exists for messages only: the lock, not the file, says whether a daemon runs. A pid can be reused after the daemon ends, so nothing ever signals or trusts it. It is a separate file because on Windows the mandatory lock keeps others from reading `<db>.lock` [R18].
 5. **Open and migrate the store** (`Store::open`), then **`recover`**. Both run only while this process holds the lock, and every daemon takes the lock before it opens the database, so `recover` never meets another daemon. This makes the hard rule "The database is the source of truth" safe for any choice of `--endpoint`.
@@ -172,7 +174,7 @@ Holding a lock from the desktop tests needs `File::lock`, stable since Rust 1.89
 4. A daemon that finds the database locked retries `try_lock` for two seconds before it exits with status 3, for the late release of a killed process's lock on Windows [R18].
 5. The shared data folder gets no lock of its own yet: two daemons on different databases with one `--data-dir` stay unsupported.
 6. The Unix client now checks with `SO_PEERCRED` that the process on the socket runs as its own account, as the Windows client checks the owner of the pipe.
-7. For hosted servers, `READY=1` after the endpoint is claimed, and socket activation only with the database lock kept as the guard, remain to be done.
+7. For hosted servers, socket activation only with the database lock kept as the guard remains to be done. `READY=1` after the endpoint is claimed is done, for the systemd user unit (`systemd.rs`, US-015).
 
 Not covered by tests: the `SO_PEERCRED` refusal needs a second account; macOS is not verified.
 

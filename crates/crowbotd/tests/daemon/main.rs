@@ -7,12 +7,18 @@ mod bots;
 mod claude;
 mod conversation;
 mod endpoint;
+#[cfg(target_os = "linux")]
+mod guard;
 mod providers;
 mod queue;
 mod recovery;
 mod runtimes;
+#[cfg(target_os = "linux")]
+mod service;
 mod settings;
 mod shell;
+#[cfg(unix)]
+mod signals;
 mod startup;
 mod stop;
 mod support;

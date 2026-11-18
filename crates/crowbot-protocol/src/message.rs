@@ -6,7 +6,7 @@ use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
 use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -241,6 +241,9 @@ pub enum ServerMessage {
         protocol_version: u32,
         daemon_version: String,
     },
+    /// The daemon was told to stop and closes every connection next. A client
+    /// shows it as stopped and does not start it again on its own.
+    Stopping,
     TurnModel {
         conversation_id: i64,
         model: Option<String>,

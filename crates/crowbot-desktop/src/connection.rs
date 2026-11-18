@@ -7,9 +7,12 @@ use std::time::{Duration, Instant};
 
 use crowbot_protocol::transport::{self, MessageReader, MessageWriter};
 use crowbot_protocol::{
-    ClientMessage, EXIT_DATABASE_HELD, Endpoint, PROTOCOL_VERSION, ServerMessage,
+    ClientMessage, EXIT_DATABASE_HELD, EXIT_ENDPOINT_TOO_LONG, Endpoint, Folders, PROTOCOL_VERSION,
+    SOCKET_PATH_LIMIT, ServerMessage,
 };
 use tokio::sync::Notify;
+
+use crate::service::{Service, StartFailure};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// The pause before the client reaches for the daemon again after a connection dropped.
@@ -23,6 +26,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// A daemon that must be started again this soon after the last start keeps failing.
 const RESTART_GUARD: Duration = Duration::from_secs(10);
 const LOG_TAIL_BYTES: u64 = 2048;
+/// What the window says of a daemon that was told to stop.
+pub const STOPPED: &str = "The daemon was stopped.";
 
 type Stream = (MessageReader, MessageWriter);
 
@@ -47,20 +52,26 @@ pub struct DaemonLauncher {
     pub args: Vec<OsString>,
     /// Receives what the daemon writes to its standard error.
     pub log: PathBuf,
+    /// The systemd user unit that runs the default daemon, on Linux only.
+    /// When it is installed, the client starts the unit instead of `program`.
+    pub service: Option<Service>,
 }
 
 impl DaemonLauncher {
+    /// The unit to start, when one is installed and the user's systemd runs.
+    fn service(&self) -> Option<Service> {
+        self.service.clone().filter(Service::available)
+    }
+
     /// Starts the daemon as a process of its own: it has no window, it does not
-    /// receive the signals of this client's console, and it keeps running after
-    /// the client exits.
+    /// receive the signals of this client's console or session, and it keeps
+    /// running after the client exits.
     fn launch(&self) -> std::io::Result<Child> {
         if let Some(parent) = self.log.parent() {
             private_folder(parent)?;
         }
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log)?;
+        let log = private_file().create(true).append(true).open(&self.log)?;
+        restrict(&self.log)?;
         let mut command = Command::new(&self.program);
         command
             .args(&self.args)
@@ -97,8 +108,8 @@ impl DaemonLauncher {
     }
 }
 
-/// The folder of the log is the daemon's own (`~/.crowbot`): on Unix only its
-/// user may enter one this client creates.
+/// The log can hold what the daemon says of the user's conversations: on Unix
+/// only its user may enter a folder this client creates for it.
 #[cfg(unix)]
 fn private_folder(folder: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -114,6 +125,32 @@ fn private_folder(folder: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(folder)
 }
 
+/// Options that create a file only its user may read, on Unix.
+fn private_file() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+}
+
+/// Makes a log that an older client created readable by its user only.
+#[cfg(unix)]
+fn restrict(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn restrict(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(windows)]
 fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -125,11 +162,22 @@ fn detach(command: &mut Command) {
     command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
 
+/// The daemon leads a session of its own: the end of the terminal or of the
+/// process group that started the client does not reach it.
 #[cfg(unix)]
 fn detach(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
-    command.process_group(0);
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of the
+    // parent, as a function run between fork and exec must.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -207,6 +255,7 @@ async fn run(
                 while outgoing.try_recv().is_ok() {}
                 match serve(reader, writer, &mut outgoing, &attachment.events).await {
                     Ended::Dropped(reason) => (ConnectionEvent::Disconnected(reason), false),
+                    Ended::Stopped => (ConnectionEvent::Failed(STOPPED.to_owned()), false),
                     Ended::Refused(reason) => (ConnectionEvent::Failed(reason), true),
                     Ended::Incompatible {
                         daemon_protocol,
@@ -247,7 +296,12 @@ impl Attachment {
         let Some(launcher) = &self.launcher else {
             return Err(format!("No daemon is listening on {}.", self.endpoint));
         };
+        let service = launcher.service();
+        // Under the unit, systemd restarts a daemon that crashed and stops
+        // one that keeps crashing (its start limit), and the start then
+        // fails with that reason: the client does not guess.
         if guarded
+            && service.is_none()
             && self
                 .last_launch
                 .is_some_and(|launched| launched.elapsed() < RESTART_GUARD)
@@ -260,6 +314,18 @@ impl Attachment {
         if self.events.send(ConnectionEvent::Starting).is_err() {
             return Err(String::new());
         }
+        self.last_launch = Some(Instant::now());
+        match service {
+            Some(service) => self.start_service(service).await,
+            None => self.start_process().await,
+        }
+    }
+
+    /// Starts the daemon as a process of its own, then waits for it to answer.
+    async fn start_process(&self) -> Result<Stream, String> {
+        let Some(launcher) = &self.launcher else {
+            return Err(String::new());
+        };
         let log_start = launcher.log_length();
         let mut daemon = launcher.launch().map_err(|error| {
             let program = launcher.program.display();
@@ -271,7 +337,6 @@ impl Attachment {
             }
         })?;
         let launched = Instant::now();
-        self.last_launch = Some(launched);
         // The daemon claims its endpoint once it is ready, so the client
         // waits for it to answer, or to exit.
         let mut held = false;
@@ -291,7 +356,8 @@ impl Attachment {
                 if let Some(stream) = self.connect().await? {
                     return Ok(stream);
                 }
-                return Err(with_log_line(
+                return Err(self.exited(
+                    status.code(),
                     &format!("The daemon stopped as soon as it started ({status})."),
                     launcher.last_log_line(log_start),
                 ));
@@ -313,8 +379,73 @@ impl Attachment {
         }
     }
 
-    /// `Ok(None)` means that no daemon listens on the endpoint.
+    /// Asks the user's systemd to start the daemon's unit. The daemon tells
+    /// systemd that it is ready once it claimed its endpoint, so the start
+    /// returns when the daemon answers, or when it failed.
+    async fn start_service(&self, service: Service) -> Result<Stream, String> {
+        let unit = service.clone();
+        let started = tokio::task::spawn_blocking(move || unit.start())
+            .await
+            .map_err(|error| format!("Cannot start the daemon's unit: {error}"))?;
+        let held = match started {
+            Ok(()) => false,
+            Err(StartFailure { status, detail }) => {
+                if let Some(stream) = self.connect().await? {
+                    return Ok(stream);
+                }
+                if status != Some(i32::from(EXIT_DATABASE_HELD)) {
+                    let shown =
+                        status.map_or_else(String::new, |code| format!(", exit status {code}"));
+                    return Err(self.exited(
+                        status,
+                        &format!("The daemon's systemd unit did not start ({detail}{shown})."),
+                        service.last_log_line(),
+                    ));
+                }
+                true
+            }
+        };
+        let waited = Instant::now();
+        loop {
+            if let Some(stream) = self.connect().await? {
+                return Ok(stream);
+            }
+            if waited.elapsed() > START_TIMEOUT {
+                return Err(if held {
+                    with_log_line(
+                        "Another daemon uses the database and did not answer in time.",
+                        service.last_log_line(),
+                    )
+                } else {
+                    format!(
+                        "The daemon's unit started but does not answer on {}.",
+                        self.endpoint
+                    )
+                });
+            }
+            tokio::time::sleep(START_POLL).await;
+        }
+    }
+
+    /// What the window says of a daemon that exited with `code`.
+    fn exited(&self, code: Option<i32>, reason: &str, line: Option<String>) -> String {
+        if code == Some(i32::from(EXIT_ENDPOINT_TOO_LONG)) {
+            return format!(
+                "The daemon cannot listen on {}: the path is {} bytes long, over the limit of {SOCKET_PATH_LIMIT} bytes. Start Crow Bot with a shorter --endpoint.",
+                self.endpoint,
+                self.endpoint.address().len()
+            );
+        }
+        with_log_line(reason, line)
+    }
+
+    /// `Ok(None)` means that no daemon listens on the endpoint. No daemon
+    /// can listen on a socket path that is too long: the one the client
+    /// starts says why.
     async fn connect(&self) -> Result<Option<Stream>, String> {
+        if self.endpoint.too_long().is_some() {
+            return Ok(None);
+        }
         match transport::connect(&self.endpoint).await {
             Ok(stream) => Ok(Some(stream)),
             Err(error) => match error.kind() {
@@ -365,15 +496,38 @@ fn sibling_daemon(client: &Path) -> PathBuf {
     client.with_file_name(format!("crowbotd{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Where a daemon started by the client logs, next to its default database.
-pub fn default_daemon_log() -> Option<PathBuf> {
-    Some(std::env::home_dir()?.join(".crowbot").join("crowbotd.log"))
+/// Where a daemon started by the client logs: beside the database that the
+/// daemon arguments name, so that a sandbox keeps its log, or else in the
+/// state folder (`~/.local/state/crowbot` on Linux, `~/.crowbot` elsewhere).
+pub fn daemon_log(daemon_args: &[OsString]) -> Option<PathBuf> {
+    let database = daemon_args
+        .iter()
+        .zip(daemon_args.iter().skip(1))
+        .filter(|(flag, _)| *flag == "--db")
+        .map(|(_, path)| Path::new(path))
+        .next_back();
+    match database {
+        Some(database) => {
+            let folder = database.parent().unwrap_or_else(|| Path::new(""));
+            // The daemon runs in the home folder, where a relative path leads.
+            let folder = if folder.is_absolute() {
+                folder.to_owned()
+            } else {
+                std::env::home_dir()?.join(folder)
+            };
+            Some(folder.join("crowbotd.log"))
+        }
+        None => Some(Folders::local()?.log()),
+    }
 }
 
 /// How a connection to the daemon ended.
 enum Ended {
     /// The connection was lost. Reconnecting can help.
     Dropped(String),
+    /// The daemon was told to stop. It is not started again until the user
+    /// asks, or until a daemon listens again on its own.
+    Stopped,
     /// The daemon answered and refused this client. Reconnecting gives the same answer.
     Refused(String),
     Incompatible {
@@ -436,6 +590,7 @@ async fn serve(
     loop {
         tokio::select! {
             incoming = reader.read::<ServerMessage>() => match incoming {
+                Ok(Some(ServerMessage::Stopping)) => return Ended::Stopped,
                 Ok(Some(message)) => {
                     if events.send(ConnectionEvent::Message(Box::new(message))).is_err() {
                         return dropped("");
@@ -533,6 +688,7 @@ mod tests {
                     self.dir.join("crowbot.db").into(),
                 ],
                 log: self.log(name),
+                service: None,
             }
         }
 
@@ -891,6 +1047,271 @@ mod tests {
             other => panic!("expected the versions, got {other:?}"),
         }
         assert_eq!(scene.listening(&["first"]), 1);
+    }
+
+    #[cfg(unix)]
+    fn signal(pid: u32, signal: i32) {
+        // SAFETY: `kill` takes plain integers.
+        unsafe {
+            libc::kill(i32::try_from(pid).unwrap(), signal);
+        }
+    }
+
+    /// The daemons this scene started, once they listen.
+    #[cfg(unix)]
+    fn listening_pid(scene: &mut Scene, name: &str) -> u32 {
+        let started = Instant::now();
+        while scene.listening(&[name]) == 0 {
+            assert!(started.elapsed() < PATIENCE, "the daemon never listened");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        *scene.daemons.last().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_told_to_stop_is_shown_as_stopped_and_not_started_again() {
+        daemon_binary();
+        let mut scene = Scene::new();
+        let (_connection, mut events) = scene.client("first");
+        until_connected(&mut events);
+        let pid = listening_pid(&mut scene, "first");
+
+        signal(pid, libc::SIGTERM);
+        assert_eq!(until_failed(&mut events), STOPPED);
+        // The client waits for the user, and starts no daemon of its own.
+        std::thread::sleep(IDLE_POLL * 2 + Duration::from_millis(500));
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    ConnectionEvent::Starting | ConnectionEvent::Connected
+                ),
+                "the client started the stopped daemon again"
+            );
+        }
+        let log = std::fs::read_to_string(scene.log("first")).unwrap();
+        assert_eq!(log.matches("listening on").count(), 1, "{log}");
+        assert!(log.contains("[crowbotd] stopped"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_path_that_is_too_long_is_reported_with_its_reason_and_the_flag() {
+        let mut scene = Scene::new();
+        let prefix = scene.dir.join("s").to_string_lossy().len();
+        let name = "s".repeat(SOCKET_PATH_LIMIT + 2 - prefix);
+        scene.endpoint = Endpoint::new(scene.dir.join(name).to_string_lossy().into_owned());
+        assert_eq!(scene.endpoint.address().len(), SOCKET_PATH_LIMIT + 1);
+        let (_connection, mut events) = scene.client("long");
+        let reason = until_failed(&mut events);
+        assert!(reason.contains("--endpoint"), "{reason}");
+        assert!(
+            reason.contains(&format!("{} bytes long", SOCKET_PATH_LIMIT + 1)),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!("limit of {SOCKET_PATH_LIMIT} bytes")),
+            "{reason}"
+        );
+        assert!(!scene.dir.join("crowbot.db").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_private_and_the_daemon_leads_a_session_of_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+
+        daemon_binary();
+        let mut scene = Scene::new();
+        // A log an older client left readable by everyone.
+        std::fs::write(scene.log("first"), "").unwrap();
+        std::fs::set_permissions(scene.log("first"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let (_connection, mut events) = scene.client("first");
+        until_connected(&mut events);
+        let pid = listening_pid(&mut scene, "first");
+        let mode = std::fs::metadata(scene.log("first"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // The sixth field of `stat` is the session: the daemon's own pid.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let fields: Vec<&str> = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect();
+        assert_eq!(fields[3], pid.to_string(), "{stat}");
+    }
+
+    /// A unit of the daemon, installed for one test in the runtime unit
+    /// folder, which the user's systemd forgets at logout.
+    #[cfg(target_os = "linux")]
+    struct TestUnit {
+        service: Service,
+        file: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl TestUnit {
+        /// `None`, after saying so, when no user systemd answers.
+        fn install(scene: &Scene, args: &[&Path]) -> Option<Self> {
+            let systemctl = |args: &[&str]| {
+                Command::new("systemctl")
+                    .arg("--user")
+                    .args(args)
+                    .output()
+                    .is_ok_and(|output| output.status.success())
+            };
+            if !systemctl(&["show-environment"]) {
+                eprintln!("skipped: no user systemd answers");
+                return None;
+            }
+            let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+            let folder = runtime.join("systemd").join("user");
+            std::fs::create_dir_all(&folder).unwrap();
+            let name = format!(
+                "crowbotd-client-test-{}.service",
+                scene.dir.file_name().unwrap().to_string_lossy()
+            );
+            let quoted = |path: &Path| format!("\"{}\"", path.display());
+            let mut command = vec![
+                quoted(daemon_binary()),
+                "--endpoint".to_owned(),
+                quoted(Path::new(scene.endpoint.address())),
+            ];
+            command.extend(args.iter().map(|arg| quoted(arg)));
+            let unit = include_str!("../../crowbotd/resources/linux/systemd/crowbotd.service")
+                .lines()
+                .map(|line| match line.strip_prefix("ExecStart=") {
+                    Some(_) => format!("ExecStart={}\n", command.join(" ")),
+                    None => format!("{line}\n"),
+                })
+                .collect::<String>();
+            let file = folder.join(&name);
+            std::fs::write(&file, unit).unwrap();
+            assert!(systemctl(&["daemon-reload"]));
+            Some(Self {
+                service: Service::at(&file, &runtime),
+                file,
+            })
+        }
+
+        fn main_pid(&self) -> u32 {
+            let output = Command::new("systemctl")
+                .args([
+                    "--user",
+                    "show",
+                    self.service.unit(),
+                    "--property=MainPID",
+                    "--value",
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for TestUnit {
+        fn drop(&mut self) {
+            let systemctl = |args: &[&str]| {
+                Command::new("systemctl")
+                    .arg("--user")
+                    .args(args)
+                    .output()
+                    .ok();
+            };
+            systemctl(&["stop", self.service.unit()]);
+            std::fs::remove_file(&self.file).ok();
+            systemctl(&["daemon-reload"]);
+            systemctl(&["reset-failed", self.service.unit()]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unit_launcher(scene: &Scene, unit: &TestUnit) -> DaemonLauncher {
+        let mut launcher = scene.launcher("unit", daemon_binary());
+        launcher.service = Some(unit.service.clone());
+        launcher
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_client_starts_the_installed_unit_and_the_daemon_lives_in_its_control_group() {
+        let scene = Scene::new();
+        let db = scene.dir.join("crowbot.db");
+        let Some(unit) = TestUnit::install(&scene, &[Path::new("--db"), &db]) else {
+            return;
+        };
+        let (connection, mut events) = scene.client_with(Some(unit_launcher(&scene, &unit)));
+        let (launched, _) = until_connected(&mut events);
+        assert!(launched);
+        let pid = unit.main_pid();
+        let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+        assert!(
+            cgroup
+                .trim_end()
+                .ends_with(&format!("/{}", unit.service.unit())),
+            "{cgroup}"
+        );
+        let own = std::fs::read_to_string("/proc/self/cgroup").unwrap();
+        assert_ne!(own, cgroup);
+        // The unit, not the client, holds the log.
+        assert!(!scene.log("unit").exists());
+
+        // The client goes, and the daemon stays.
+        drop((connection, events));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(unit.main_pid(), pid);
+        let (_connection, mut later) = scene.client_with(None);
+        assert!(!until_connected(&mut later).0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_client_attaches_again_once_systemd_restarts_a_daemon_that_was_killed() {
+        let scene = Scene::new();
+        let db = scene.dir.join("crowbot.db");
+        let Some(unit) = TestUnit::install(&scene, &[Path::new("--db"), &db]) else {
+            return;
+        };
+        let (_connection, mut events) = scene.client_with(Some(unit_launcher(&scene, &unit)));
+        until_connected(&mut events);
+        let first = unit.main_pid();
+
+        // Right after the client started the unit, as a crash at once would.
+        signal(first, libc::SIGKILL);
+        until_connected(&mut events);
+        let second = unit.main_pid();
+        assert!(second != 0 && second != first, "{first} {second}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_unit_that_fails_is_reported_with_the_reason_from_its_exit_status_and_retried_on_request() {
+        let scene = Scene::new();
+        // A folder is not a database, so the daemon gives up when it opens it.
+        let Some(unit) = TestUnit::install(&scene, &[Path::new("--db"), &scene.dir]) else {
+            return;
+        };
+        let (connection, mut events) = scene.client_with(Some(unit_launcher(&scene, &unit)));
+        let reason = until_failed(&mut events);
+        assert!(reason.contains("unit did not start"), "{reason}");
+        assert!(reason.contains("exit status 1"), "{reason}");
+        assert!(reason.contains("[crowbotd] failed:"), "{reason}");
+        std::thread::sleep(IDLE_POLL + Duration::from_millis(500));
+        assert!(events.try_recv().is_err());
+
+        connection.retry();
+        let reason = until_failed(&mut events);
+        assert!(reason.contains("unit did not start"), "{reason}");
     }
 
     #[test]

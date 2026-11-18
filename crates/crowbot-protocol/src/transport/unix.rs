@@ -1,6 +1,6 @@
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::net::{UnixListener, UnixStream};
 
@@ -10,8 +10,24 @@ use crate::Endpoint;
 pub struct Listener {
     inner: UnixListener,
     owner: u32,
+    path: PathBuf,
+    /// The device and the inode of the socket file this listener bound.
+    file: (u64, u64),
     /// The lock of the socket, held for the life of the listener.
     _lock: std::fs::File,
+}
+
+/// A listener that ends removes its socket file, while it still holds the
+/// lock: no other daemon can have bound the path since, and a client then
+/// finds no socket rather than one that refuses it.
+impl Drop for Listener {
+    fn drop(&mut self) {
+        let ours = std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.file);
+        if ours {
+            std::fs::remove_file(&self.path).ok();
+        }
+    }
 }
 
 impl Listener {
@@ -22,6 +38,15 @@ impl Listener {
     /// that the first has bound and does not listen on yet. The lock file is
     /// never removed, so that every daemon locks the same file.
     pub fn bind(endpoint: &Endpoint) -> io::Result<Self> {
+        if let Some(length) = endpoint.too_long() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the socket path {endpoint} is {length} bytes long, over the limit of {}",
+                    crate::SOCKET_PATH_LIMIT
+                ),
+            ));
+        }
         let path = Path::new(endpoint.address());
         if let Some(parent) = path
             .parent()
@@ -55,10 +80,12 @@ impl Listener {
         }
         let inner = UnixListener::bind(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        let owner = std::fs::metadata(path)?.uid();
+        let metadata = std::fs::symlink_metadata(path)?;
         Ok(Self {
             inner,
-            owner,
+            owner: metadata.uid(),
+            path: path.to_owned(),
+            file: (metadata.dev(), metadata.ino()),
             _lock: lock,
         })
     }

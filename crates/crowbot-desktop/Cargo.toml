@@ -41,6 +41,9 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "0cfc4a48
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }
 

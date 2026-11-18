@@ -123,7 +123,18 @@ async fn the_agent_of_a_turn_ends_with_a_daemon_that_crashes() {
     client.until_reply("deaf").await;
     assert!(daemon.heartbeat().is_some());
 
+    #[cfg(target_os = "linux")]
+    assert!(!daemon.agent_processes().is_empty());
     daemon.kill();
+    // Every process of the agent's group is gone within a second.
+    #[cfg(target_os = "linux")]
+    assert!(
+        support::eventually(Duration::from_secs(1), || daemon
+            .agent_processes()
+            .is_empty()),
+        "the agent still runs a second after the daemon was killed: {:?}",
+        daemon.agent_processes()
+    );
     tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
     let after_kill = daemon.heartbeat();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;

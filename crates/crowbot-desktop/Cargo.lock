@@ -1168,6 +1168,7 @@ dependencies = [
  "futures-util",
  "gpui",
  "gpui_platform",
+ "libc",
  "pulldown-cmark",
  "resvg",
  "serde_json",

@@ -22,7 +22,7 @@ use crate::store::{
 };
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
-const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const PAGE_EVENTS: usize = 200;
 /// How many events a client gets in one answer so that an event it asked for
 /// joins the ones it holds. Past that, it gets a page around the event.
@@ -94,10 +94,12 @@ pub enum Command {
     },
     /// The bot moved to Full access: the approvals that wait are allowed.
     PermissionLevelChanged,
-    /// The bot is being deleted: the running turn stops, then the task ends
-    /// and tells so through `done`.
+    /// The bot is being deleted, or the daemon stops: the running turn stops,
+    /// then the task ends and tells so through `done`. An agent that has not
+    /// ended its turn after `patience` is closed.
     ShutDown {
         done: oneshot::Sender<()>,
+        patience: Duration,
     },
 }
 
@@ -385,7 +387,7 @@ impl Actor {
                 decision,
                 sink,
             } => self.resolve_approval(&approval_id, decision, &sink),
-            Command::Stop => self.stop(),
+            Command::Stop => self.stop(STOP_TIMEOUT),
             Command::EditQueued {
                 queue_id,
                 text,
@@ -395,7 +397,7 @@ impl Actor {
             Command::SendQueuedNow { queue_id, sink } => self.send_queued_now(queue_id, &sink),
             Command::ResumeQueue { sink } => self.resume_queue(&sink),
             Command::PermissionLevelChanged => self.permission_level_changed(),
-            Command::ShutDown { done } => self.shut_down(done),
+            Command::ShutDown { done, patience } => self.shut_down(done, patience),
         }
     }
 
@@ -458,10 +460,10 @@ impl Actor {
         self.sync();
     }
 
-    fn shut_down(&mut self, done: oneshot::Sender<()>) {
+    fn shut_down(&mut self, done: oneshot::Sender<()>, patience: Duration) {
         self.closing = Some(done);
         self.next_after_stop = false;
-        self.stop();
+        self.stop(patience);
         self.finish_closing();
     }
 
@@ -976,8 +978,15 @@ impl Actor {
         replies
     }
 
-    fn stop(&mut self) {
-        if !self.turn_active || self.stop_due.is_some() {
+    /// Stops the running turn. An agent that has not ended it after
+    /// `patience` is closed, and the turn is recorded as interrupted.
+    fn stop(&mut self, patience: Duration) {
+        if !self.turn_active {
+            return;
+        }
+        if let Some(due) = self.stop_due {
+            // A shorter patience, the one of a daemon that stops, wins.
+            self.stop_due = Some(due.min(Instant::now() + patience));
             return;
         }
         let approvals = self.close_approvals();
@@ -989,7 +998,7 @@ impl Actor {
                 .is_ok()
         });
         if asked {
-            self.stop_due = Some(Instant::now() + STOP_TIMEOUT);
+            self.stop_due = Some(Instant::now() + patience);
         } else {
             self.close_session();
             self.end_turn(Event::TurnInterrupted {
@@ -1130,7 +1139,7 @@ impl Actor {
         }
         if self.turn_active {
             self.next_after_stop = true;
-            self.stop();
+            self.stop(STOP_TIMEOUT);
         } else {
             self.start_next_queued();
         }

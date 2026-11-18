@@ -348,6 +348,27 @@ fn a_daemon_of_another_version_shows_both_versions_and_is_not_retried(cx: &mut T
 }
 
 #[gpui::test]
+fn a_daemon_that_was_stopped_is_shown_as_stopped_with_a_retry(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    daemon.connect(vec![summary(1, "Atlas", BotState::Idle)], cx);
+    daemon.link(
+        ConnectionEvent::Failed(crate::connection::STOPPED.to_owned()),
+        cx,
+    );
+    assert!(shown(cx, "connection-notice"));
+    assert!(shown(cx, "retry-connection"));
+    assert!(shown(cx, "inert"));
+    assert_eq!(
+        workspace.read_with(cx, |this, _| this.link.clone()),
+        Link::Failed(crate::connection::STOPPED.into())
+    );
+    daemon.sent();
+    click(cx, "retry-connection");
+    assert!(workspace.read_with(cx, |this, _| this.link
+        != Link::Failed(crate::connection::STOPPED.into())));
+}
+
+#[gpui::test]
 fn a_daemon_that_cannot_be_reached_at_start_offers_a_retry(cx: &mut TestAppContext) {
     let (workspace, daemon, cx) = open(cx);
     daemon.link(ConnectionEvent::Failed("no daemon answers".to_owned()), cx);

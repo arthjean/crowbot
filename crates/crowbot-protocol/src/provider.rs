@@ -118,6 +118,11 @@ pub struct DaemonInfo {
     pub daemon_version: String,
     pub protocol_version: u32,
     pub database: String,
+    /// Whether the daemon's computer keeps this user's services running with
+    /// no session (systemd's lingering). `Some(false)` means that the bots
+    /// stop when the user logs out. `None` where the notion does not apply.
+    #[serde(default)]
+    pub linger: Option<bool>,
 }
 
 #[cfg(test)]
