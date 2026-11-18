@@ -10,8 +10,8 @@
 # as a screen reader does, through libatspi, prints it, and fails unless the
 # window and its buttons read with their roles and labels.
 #
-#   sh scripts/accessibility-check.sh             check the client of target/debug
-#   sh scripts/accessibility-check.sh --release   check the client of target/release
+#   sh scripts/accessibility-check.sh             build, then check the client of target/debug
+#   sh scripts/accessibility-check.sh --release   build, then check the client of target/release
 #
 # Needs mutter, at-spi2-core, python3-gobject, and Mesa's lavapipe (Fedora:
 # mutter at-spi2-core python3-gobject mesa-vulkan-drivers).
@@ -39,10 +39,16 @@ target=${CARGO_TARGET_DIR:-$repo/target}
 client=$target/$profile/crowbot
 
 if [ "$inside" = false ]; then
-  [ -x "$client" ] && [ -x "$target/$profile/crowbotd" ] || {
-    echo "build the client and the daemon first: $client" >&2
-    exit 1
-  }
+  # Build both into one folder, so the check never reads a client older than
+  # the source: the client's workspace builds into a folder of its own.
+  release=
+  [ "$profile" = release ] && release=--release
+  (
+    cd "$repo"
+    export CARGO_TARGET_DIR="$target"
+    cargo build $release -p crowbotd
+    cargo build $release --manifest-path crates/crowbot-desktop/Cargo.toml
+  )
   for program in dbus-run-session mutter python3 /usr/libexec/at-spi-bus-launcher /usr/libexec/at-spi2-registryd; do
     command -v "$program" >/dev/null || { echo "missing: $program" >&2; exit 1; }
   done
