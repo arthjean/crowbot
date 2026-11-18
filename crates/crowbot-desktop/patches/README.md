@@ -80,11 +80,16 @@ cosmic-text it is pop-os/cosmic-text#446, and in swash dfrg/swash#21, both
 open; Linebender points to `glifo` (linebender/vello) as the coming
 rasterizer on skrifa, not ready yet.
 
-The changes are ported to Zed's `main` as three stacked branches of the
-local clone, each with its tests and test fonts (`crates/gpui_wgpu/test_fonts`):
-`gpui-fallback-families`, then `gpui-colrv1-emoji`, then
-`gpui-emoji-presentation`. On `main` the port uses skrifa 0.37, the version
-swash already pulls in. Zed's contribution policy accepts no pull request
-from an autonomous agent and asks the author to test by hand and to write
-the description: the owner opens them. When Zed takes one, it leaves the
-diff at the next rev bump, and the copy goes when the diff is empty.
+The changes are ported to Zed's `main` as three stacked branches, pushed to
+`arthjean/zed`, each with its tests and test fonts
+(`crates/gpui_wgpu/test_fonts`). On `main` the port uses skrifa 0.37, the
+version swash already pulls in.
+
+| Branch | Change | State on 2026-11-18 |
+|---|---|---|
+| `gpui-fallback-families` | fallback families with no Latin glyph | zed-industries/zed#67137, open |
+| `gpui-colrv1-emoji` | COLRv1 painter, color faces by their tables | asked in #42255 whether Zed takes it or waits for upstream |
+| `gpui-emoji-presentation` | variation selectors | waits for the two above |
+
+When Zed takes one, it leaves the diff at the next rev bump, and the copy goes
+when the diff is empty.
