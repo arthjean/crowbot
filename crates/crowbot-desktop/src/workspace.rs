@@ -434,6 +434,12 @@ impl Workspace {
                 }
             }),
             cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()),
+            cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    crate::reduced_motion::refresh(cx);
+                    cx.notify();
+                }
+            }),
             cx.on_app_quit(|this, cx| {
                 this.save_draft();
                 this.flush_panel(cx);

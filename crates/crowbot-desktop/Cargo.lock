@@ -1162,8 +1162,10 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 name = "crowbot-desktop"
 version = "0.1.0"
 dependencies = [
+ "ashpd",
  "chrono",
  "crowbot-protocol",
+ "futures-util",
  "gpui",
  "gpui_platform",
  "pulldown-cmark",
@@ -1171,6 +1173,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "unicode-segmentation",
+ "windows 0.62.2",
 ]
 
 [[package]]

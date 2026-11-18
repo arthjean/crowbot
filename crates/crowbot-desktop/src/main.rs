@@ -14,6 +14,7 @@ mod layout;
 mod markdown;
 mod mascot;
 mod menu;
+mod reduced_motion;
 mod reveal;
 mod sidebar;
 mod theme;
@@ -132,6 +133,7 @@ fn main() -> ExitCode {
                 eprintln!("cannot load the interface font: {error}");
             }
             theme::font::init(cx);
+            reduced_motion::follow(cx);
             composer::bind_keys(cx);
             workspace::bind_keys(cx);
             cx.on_window_closed(|cx, _| {

@@ -256,7 +256,9 @@ on. A provider with no logo shows two letters of its name.
 
 Motion explains a state change. Nothing animates for decoration, with one
 exception: a mascot is alive (5.12). Its life stands still when the system
-asks for reduced motion.
+asks for reduced motion. GPUI reads that wish from no system: the client sets
+it (`reduced_motion.rs`) from the portal's `reduced-motion` and GNOME's
+Animations switch on Linux, and from "Animation effects" on Windows.
 
 ## 5. Component contracts
 
