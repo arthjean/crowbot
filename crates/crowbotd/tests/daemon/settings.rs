@@ -363,6 +363,56 @@ async fn a_cancelled_sign_in_ends_its_process_and_the_processes_it_started() {
     assert!(!daemon.auth_file("").exists());
 }
 
+/// On Linux the page a sign-in opens, with `xdg-open` or with the program
+/// `BROWSER` names, reaches the clients: no browser starts in the process
+/// group that a cancel kills, and a daemon with no display variable still
+/// shows the page.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_page_a_sign_in_opens_reaches_the_clients_in_place_of_a_browser() {
+    for opener in ["xdg-open", "browser"] {
+        let daemon = Daemon::start();
+        let mut client = daemon.client().await;
+        provider(&mut client).await;
+        std::fs::write(daemon.auth_file("mode"), opener).unwrap();
+        client
+            .send(ClientMessage::SignIn {
+                provider: PROVIDER.to_owned(),
+                method: None,
+            })
+            .await;
+        let named = until_provider(&mut client, |status| {
+            status.signing_in && status.sign_in_url.is_some()
+        })
+        .await;
+        assert_eq!(
+            named.sign_in_url.as_deref(),
+            Some("https://login.example/oauth/authorize?state=FAKE"),
+            "{opener}"
+        );
+        // The opener told the sign-in that the page is open: it waits.
+        assert!(grows(&daemon.auth_file("beat")).await, "{opener}");
+
+        client
+            .send(ClientMessage::CancelSignIn {
+                provider: PROVIDER.to_owned(),
+            })
+            .await;
+        let ended = until_provider(&mut client, settled).await;
+        assert_eq!(ended.sign_in_url, None, "{opener}");
+        let caught = daemon
+            .data_dir()
+            .join("providers")
+            .join(PROVIDER)
+            .join("sign-in");
+        // The folder of the sign-in went with it.
+        assert!(
+            std::fs::read_dir(&caught).unwrap().next().is_none(),
+            "{opener}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_finished_sign_in_leaves_the_processes_it_started_alone() {
     let daemon = Daemon::start();

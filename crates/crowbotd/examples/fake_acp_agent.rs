@@ -83,7 +83,8 @@
 //! same name with the extension `mode`: `wait` never ends and starts a child
 //! that never ends either, `guest` signs in at once and leaves behind a child
 //! that goes on for a few seconds (as a sign-in leaves the browser it opened),
-//! `fail` exits with an error, a number waits that many milliseconds before it
+//! `fail` exits with an error, `xdg-open` and `browser` open a page with the
+//! program of that name, or the one `BROWSER` names, then wait, a number waits that many milliseconds before it
 //! signs in, and no file signs in at once. A run that waits rewrites a growing
 //! counter in the files with the extensions `beat` (itself) and `child` (its
 //! child).
@@ -104,6 +105,8 @@ const NO_ASK_MODE: &str = "FAKE_AGENT_NO_ASK_MODE";
 const NO_MODELS: &str = "FAKE_AGENT_NO_MODELS";
 const SIGNED_IN: &str = "authenticated";
 /// The page a Grok-like agent names for its sign-in.
+/// The page a `terminal` sign-in in the modes `xdg-open` and `browser` opens.
+const SIGN_IN_PAGE: &str = "https://login.example/oauth/authorize?state=FAKE";
 const GROK_SIGN_IN_PAGE: &str = "https://accounts.example/oauth2/device?user_code=FAKE-1234";
 const MODELS: [&str; 2] = ["fast", "smart"];
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(50);
@@ -1135,6 +1138,27 @@ fn sign_in(file: &Path) -> ! {
             std::process::exit(i32::from(written.is_err()))
         }
         "fail" => std::process::exit(1),
+        // Opens the page as an agent does, with `xdg-open` from `PATH` or with
+        // the program `BROWSER` names, then waits. Only the opener of a
+        // sign-in of the daemon is run: a test never opens a real browser.
+        opener @ ("xdg-open" | "browser") => {
+            if std::env::var_os("CROWBOT_SIGN_IN_PAGE").is_none() {
+                std::process::exit(5);
+            }
+            let program = if opener == "browser" {
+                std::env::var_os("BROWSER").unwrap_or_default()
+            } else {
+                "xdg-open".into()
+            };
+            let opened = std::process::Command::new(program)
+                .arg(SIGN_IN_PAGE)
+                .status()
+                .is_ok_and(|status| status.success());
+            if !opened {
+                std::process::exit(6);
+            }
+            beat(&file.with_extension("beat"), None)
+        }
         delay => {
             std::thread::sleep(Duration::from_millis(delay.parse().unwrap_or(0)));
             let written = std::fs::write(file, SIGNED_IN);

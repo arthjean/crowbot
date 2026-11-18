@@ -3,6 +3,7 @@
 //! it lists. A sign-in is the provider's own: the daemon starts it and reads
 //! whether it ended well, and nothing else.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -22,6 +23,8 @@ use crate::provider::acp::{
 };
 use crate::provider::{claude, codex, grok};
 use crate::runtime::{Installed, Progress, RuntimeError, RuntimeSpec};
+#[cfg(target_os = "linux")]
+use crate::sign_in_page::PageCatch;
 use crate::store::ProviderSetting;
 
 /// A sign-in that nobody finished ends after this long.
@@ -582,18 +585,20 @@ impl Daemon {
         let name = self.provider_name(id);
         let daemon = self.clone();
         match option.start {
-            SignInStart::Command(command) => {
+            SignInStart::Command(mut command) => {
+                let catch = self.catch_page(id, &mut command.environment);
                 let child = spawn_hidden(&command)
                     .map_err(|error| format!("Cannot start the sign-in of {name}: {error}"))?;
                 tokio::spawn(async move {
                     let end = wait_for_sign_in(child, cancelled).await;
+                    drop(catch);
                     daemon.sign_in_ended(id, &end);
                 });
             }
             SignInStart::Agent => {
                 let profile = self.agent_profile(id)?;
                 let setting = self.provider_setting(id)?;
-                let (launch, installed) = match self.launch_source(id, &profile, &setting)? {
+                let (mut launch, installed) = match self.launch_source(id, &profile, &setting)? {
                     Source::Ready(launch) => (launch, false),
                     Source::Installed(launch) => (launch, true),
                     Source::NotInstalled(_) | Source::Unsupported => {
@@ -601,10 +606,12 @@ impl Daemon {
                     }
                     Source::Refused(folder) => return Err(refused_programs(&name, &folder)),
                 };
+                let catch = self.catch_page(id, &mut launch.env);
                 let named = self.clone();
                 let on_page = move |page: String| named.sign_in_page(id, page);
                 tokio::spawn(async move {
                     if installed && daemon.verified(id).await.is_err() {
+                        drop(catch);
                         daemon.sign_in_ended(id, &SignInEnd::Finished(false));
                         return;
                     }
@@ -618,11 +625,50 @@ impl Daemon {
                         _ = cancelled => SignInEnd::Cancelled,
                         () = tokio::time::sleep(SIGN_IN_PATIENCE) => SignInEnd::TimedOut,
                     };
+                    // Before the end is known: a page that comes later would
+                    // be taken for one of the next sign-in.
+                    drop(catch);
                     daemon.sign_in_ended(id, &end);
                 });
             }
         }
         Ok(())
+    }
+
+    /// On Linux, leads the `xdg-open` and the `BROWSER` of a sign-in to the
+    /// daemon, which passes the page to the clients (`sign_in_page.rs`): the
+    /// browser then never starts in the process group that a cancel kills.
+    /// A sign-in whose page cannot be caught opens it itself, as elsewhere.
+    #[cfg(target_os = "linux")]
+    fn catch_page(
+        self: &Arc<Self>,
+        id: &'static str,
+        environment: &mut BTreeMap<String, String>,
+    ) -> Option<PageCatch> {
+        let folder = self.data_dir.join("providers").join(id).join("sign-in");
+        let named = self.clone();
+        match PageCatch::start(&folder, environment, move |page| {
+            named.sign_in_page(id, page)
+        }) {
+            Ok((catch, variables)) => {
+                environment.extend(variables);
+                Some(catch)
+            }
+            Err(error) => {
+                eprintln!("[crowbotd] the sign-in of {id} opens its page itself: {error}");
+                None
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::unused_self)]
+    fn catch_page(
+        self: &Arc<Self>,
+        _id: &'static str,
+        _environment: &mut BTreeMap<String, String>,
+    ) -> Option<()> {
+        None
     }
 
     /// The provider named the page where the running sign-in finishes. It

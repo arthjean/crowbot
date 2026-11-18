@@ -8,6 +8,8 @@ mod private;
 mod provider;
 mod runtime;
 mod server;
+#[cfg(target_os = "linux")]
+mod sign_in_page;
 mod stop;
 mod store;
 mod systemd;
@@ -299,6 +301,10 @@ fn open_store(db: &Path) -> Result<Store, String> {
 }
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if sign_in_page::started_as_opener() {
+        return sign_in_page::opener();
+    }
     systemd::take_notify_socket();
     #[cfg(unix)]
     {
