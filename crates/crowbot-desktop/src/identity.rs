@@ -187,7 +187,6 @@ mod tests {
                 format!("{} names org.example.Crow", inside.display()),
             ]
         );
-        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
@@ -309,14 +308,9 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let folder =
-            std::env::temp_dir().join(format!("crowbot-identity-{name}-{}", std::process::id()));
-        if folder.exists() {
-            std::fs::remove_dir_all(&folder).unwrap();
-        }
-        std::fs::create_dir_all(&folder).unwrap();
-        folder
+    /// A folder of the test, removed with it, also when the test fails.
+    fn scratch(name: &str) -> crowbot_protocol::scratch::Scratch {
+        crowbot_protocol::scratch::Scratch::new(&format!("crowbot-identity-{name}"))
     }
 
     #[cfg(target_os = "linux")]
@@ -407,6 +401,5 @@ mod tests {
 
         assert_eq!(files(&data), Vec::<PathBuf>::new());
         assert!(!home.join("state/crowbot/desktop-files").exists());
-        std::fs::remove_dir_all(home).unwrap();
     }
 }

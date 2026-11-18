@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn the_unit_counts_only_when_its_file_and_the_users_systemd_are_there() {
-        let dir = std::env::temp_dir().join(format!("crowbot-service-{}", std::process::id()));
+        let dir = crowbot_protocol::scratch::Scratch::new("crowbot-service");
         let unit = unit_path(&dir.join("config"));
         let runtime = dir.join("runtime");
         let service = Service::at(&unit, &runtime);
@@ -169,7 +169,6 @@ mod tests {
         std::fs::create_dir_all(runtime.join("systemd")).unwrap();
         std::fs::write(runtime.join("systemd").join("private"), "").unwrap();
         assert!(service.available());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

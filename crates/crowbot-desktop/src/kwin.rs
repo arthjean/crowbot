@@ -159,8 +159,7 @@ mod tests {
 
     #[test]
     fn the_first_file_that_sets_a_side_wins_and_a_missing_side_is_kwins_default() {
-        let dir = std::env::temp_dir().join(format!("crowbot-kwinrc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crowbot_protocol::scratch::Scratch::new("crowbot-kwinrc");
         let user = dir.join("user");
         let defaults = dir.join("defaults");
         std::fs::write(
@@ -174,7 +173,6 @@ mod tests {
         )
         .unwrap();
         let read = read(&[user, defaults, dir.join("missing")]);
-        std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(read, ("XA".to_owned(), String::new()));
         assert_eq!(
             super::read(&[]),
