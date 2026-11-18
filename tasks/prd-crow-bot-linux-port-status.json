@@ -41,10 +41,10 @@
     {
       "id": "EP-003",
       "title": "The daemon on Linux",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 6,
-      "stories_done": 0
+      "stories_done": 6
     },
     {
       "id": "EP-004",
@@ -218,71 +218,71 @@
       "id": "US-010",
       "title": "The daemon stops cleanly on a signal",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-011",
       "title": "The files sit in the XDG folders",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-012",
       "title": "A socket path that is too long is refused first",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "size": "S",
       "blocked_by": [
         "US-011"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-013",
       "title": "The daemon's files are private",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [
         "US-011"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-014",
       "title": "Agents end at once when the daemon dies",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-015",
       "title": "The daemon runs as a systemd user unit",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
@@ -290,9 +290,9 @@
         "US-010",
         "US-011"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-016",
