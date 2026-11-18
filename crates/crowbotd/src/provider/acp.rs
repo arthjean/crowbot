@@ -478,9 +478,14 @@ pub async fn authenticate(
                     }
                     std::future::pending::<Result<(), Error>>().await
                 };
+                // The page is polled first: when its answer and the end of the
+                // sign-in arrive together, the answers are handed out in the
+                // order the agent sent them, so the page is already there and
+                // reaches the clients before the end does.
                 tokio::select! {
-                    signed_in = signing_in => signed_in.map(|_| ()),
+                    biased;
                     failed = naming => failed,
+                    signed_in = signing_in => signed_in.map(|_| ()),
                 }
             },
         )

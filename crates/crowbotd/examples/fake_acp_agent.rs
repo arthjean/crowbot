@@ -60,7 +60,9 @@
 //! `authenticate`. With `GROK_HOME` it is Grok-like: no session mode, a
 //! sign-in named `grok.com` that must be accepted before each session and
 //! that ends only after the client asked `_x.ai/auth/get_url` for the page
-//! where the person signs in, and it
+//! where the person signs in (the answer that names the page and the end of
+//! the sign-in leave in one write, so that they reach the client at the same
+//! moment), and it
 //! asks before a write only when it was started with `--permission-mode
 //! default` and the `config.toml` of its home holds an `ask` rule for `Write`.
 //! A session opened with the `_meta` of the Claude profile offers the modes
@@ -201,6 +203,14 @@ impl Flavor {
         self.signed_in_file().is_none_or(|file| file.is_file())
     }
 
+    /// What the file `sign-in-mode` of the home says, if anything.
+    fn sign_in_mode(&self) -> String {
+        self.home()
+            .and_then(|home| std::fs::read_to_string(home.join("sign-in-mode")).ok())
+            .map(|mode| mode.trim().to_owned())
+            .unwrap_or_default()
+    }
+
     /// Runs the sign-in the agent offers. The file `sign-in-mode` of the home
     /// tells how it goes: `fail` ends with an error, `wait` never ends, and
     /// no file signs in at once. `false` means the sign-in failed.
@@ -208,8 +218,7 @@ impl Flavor {
         let Some(home) = self.home() else {
             return true;
         };
-        let mode = std::fs::read_to_string(home.join("sign-in-mode")).unwrap_or_default();
-        match mode.trim() {
+        match self.sign_in_mode().as_str() {
             "fail" => false,
             "wait" => loop {
                 std::thread::sleep(Duration::from_secs(1));
@@ -217,6 +226,19 @@ impl Flavor {
             _ => std::fs::write(home.join("signed-in"), method).is_ok(),
         }
     }
+}
+
+/// The answer to a request for the page of a Grok sign-in.
+fn sign_in_page_answer(id: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "auth_url": GROK_SIGN_IN_PAGE,
+            "external_provider": false,
+            "mode": "device"
+        }
+    })
 }
 
 /// The session modes of the Codex flavor and of a session that a Claude
@@ -239,6 +261,11 @@ struct Agent {
     authenticated: AtomicBool,
     /// The client asked for the address of the sign-in page.
     url_asked: AtomicBool,
+    /// A Grok sign-in waits for the client to ask for its page.
+    awaiting_page: AtomicBool,
+    /// The request for the page, held while a sign-in runs: it is answered
+    /// in the same write as the end of the sign-in.
+    held_page: Mutex<Option<Value>>,
     output: Mutex<()>,
     cancelled: AtomicBool,
     deaf: AtomicBool,
@@ -282,6 +309,22 @@ impl Agent {
 
     fn respond(&self, id: &Value, result: Value) {
         self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
+
+    /// Sends messages in one write, so that the client reads them together.
+    fn send_together(&self, messages: &[Value]) {
+        let _guard = self.output.lock().unwrap_or_else(PoisonError::into_inner);
+        let lines: String = messages
+            .iter()
+            .map(|message| format!("{message}\n"))
+            .collect();
+        let mut stdout = std::io::stdout().lock();
+        let written = stdout
+            .write_all(lines.as_bytes())
+            .and_then(|()| stdout.flush());
+        if written.is_err() && !self.deaf.load(Ordering::SeqCst) {
+            std::process::exit(0);
+        }
     }
 
     fn say(&self, session: &Value, text: &str) {
@@ -880,7 +923,9 @@ impl Agent {
                     }
                     // As Grok does, a sign-in ends only once the client asked for
                     // the page where the person signs in.
+                    let mut page = None;
                     if matches!(agent.flavor, Flavor::Grok(_)) && !agent.flavor.signed_in() {
+                        agent.awaiting_page.store(true, Ordering::SeqCst);
                         let deadline = std::time::Instant::now() + Duration::from_secs(60);
                         while !agent.url_asked.load(Ordering::SeqCst) {
                             if std::time::Instant::now() > deadline {
@@ -893,25 +938,45 @@ impl Agent {
                             }
                             std::thread::sleep(POLL_INTERVAL);
                         }
+                        page = agent
+                            .held_page
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .take()
+                            .map(|asked| sign_in_page_answer(&asked));
+                        // A sign-in that never ends still names its page.
+                        if agent.flavor.sign_in_mode() == "wait"
+                            && let Some(page) = page.take()
+                        {
+                            agent.send(&page);
+                        }
                     }
-                    if agent.flavor.signed_in() || agent.flavor.sign_in(&method) {
+                    let end = if agent.flavor.signed_in() || agent.flavor.sign_in(&method) {
                         agent.authenticated.store(true, Ordering::SeqCst);
-                        agent.respond(&id, json!({}));
+                        json!({ "jsonrpc": "2.0", "id": id, "result": {} })
                     } else {
-                        agent.error(&id, -32000, "Authentication required", Value::Null);
-                    }
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32000, "message": "Authentication required" }
+                        })
+                    };
+                    let mut messages: Vec<Value> = page.into_iter().collect();
+                    messages.push(end);
+                    agent.send_together(&messages);
                 });
             }
             "_x.ai/auth/get_url" if matches!(self.flavor, Flavor::Grok(_)) => {
-                self.url_asked.store(true, Ordering::SeqCst);
-                self.respond(
-                    &id,
-                    json!({
-                        "auth_url": GROK_SIGN_IN_PAGE,
-                        "external_provider": false,
-                        "mode": "device"
-                    }),
-                );
+                if self.awaiting_page.swap(false, Ordering::SeqCst) {
+                    *self
+                        .held_page
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(id);
+                    self.url_asked.store(true, Ordering::SeqCst);
+                } else {
+                    self.url_asked.store(true, Ordering::SeqCst);
+                    self.send(&sign_in_page_answer(&id));
+                }
             }
             "auth/status" if auth_file().is_some() => self.respond(
                 &id,
