@@ -507,8 +507,9 @@ pub fn allowed(named: impl Iterator<Item = Button>, controls: gpui::WindowContro
         .collect()
 }
 
-/// One Linux window button: a 46 wide slot of the band, with a round hover
-/// inside it, so no fill reaches the window's rounded corner.
+/// One Linux window button: a 46 wide slot of the band that takes the
+/// pointer, with a round button inside it that takes the keyboard focus and
+/// shows the hover, so no fill reaches the window's rounded corner.
 pub fn button(button: Button, maximized: bool, theme: &Theme) -> Stateful<Div> {
     use crate::assets::Icon;
     use crate::theme::icon as icon_size;
@@ -540,15 +541,13 @@ pub fn button(button: Button, maximized: bool, theme: &Theme) -> Stateful<Div> {
             WindowRequest::Close,
         ),
     };
-    let hover = theme.hover;
+    let (hover, focus) = (theme.hover, theme.border_focus);
     let group = id;
     div()
         .id(id)
         .debug_selector(move || id.into())
         .group(group)
         .occlude()
-        .role(gpui::Role::Button)
-        .aria_label(label)
         .flex_none()
         .w(layout::CAPTION_BUTTON)
         .h_full()
@@ -562,12 +561,30 @@ pub fn button(button: Button, maximized: bool, theme: &Theme) -> Stateful<Div> {
         })
         .child(
             div()
+                .id("button")
+                .focusable()
+                .tab_stop(true)
+                .role(gpui::Role::Button)
+                .aria_label(label)
                 .size(chrome::BUTTON_HOVER)
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_full()
+                .border_1()
+                .border_color(gpui::transparent_black())
                 .group_hover(group, move |style| style.bg(hover))
+                .focus_visible(move |style| style.border_color(focus))
+                // Only the keyboard focuses a window button: a click leaves
+                // the focus where it was, so a key typed next does not press
+                // the button again.
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(move |event, window, cx| {
+                    if event.is_keyboard() {
+                        cx.stop_propagation();
+                        self::request(window, cx, request);
+                    }
+                })
                 .child(ui::icon(glyph, icon_size::MD, theme.text_secondary)),
         )
 }

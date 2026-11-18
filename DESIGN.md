@@ -643,8 +643,11 @@ for client decorations and draws the chrome itself.
   the sidebar topbar; right buttons close it. Each is a 46 by 38 slot
   holding a 24 round hover of `hover` behind a 16 Lucide-style icon in
   `text_secondary` (`window_minimize`, `window_maximize`, `window_restore`,
-  `window_close`), so no fill reaches the rounded corner. Each has the
-  Button role and its label.
+  `window_close`), so no fill reaches the rounded corner. The slot takes the
+  pointer; the round is the button: a tab stop with the Button role and its
+  label, which Enter or Space presses, and whose 1 px edge turns
+  `border_focus` when the keyboard brings the focus there. A click presses
+  it and leaves the focus where it was.
 - **A compositor that decorates** (`Decorations::Server`: X11 with no
   compositing manager, or KDE when it keeps its own decorations) gets no
   buttons, frame, shadow, rounding, or resize zone from the client; the band

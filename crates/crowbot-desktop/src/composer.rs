@@ -318,7 +318,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: String::new(),
             placeholder: placeholder.into(),
             selected_range: 0..0,

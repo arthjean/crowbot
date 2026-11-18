@@ -236,3 +236,63 @@ fn the_chrome_follows_the_decorations_with_no_restart(cx: &mut TestAppContext) {
     assert!(shown(cx, "window-frame"));
     assert!(shown(cx, "window-close"));
 }
+
+fn composer_focused(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        workspace
+            .read(cx)
+            .composer
+            .focus_handle(cx)
+            .is_focused(window)
+    })
+}
+
+/// The number of Tab presses that bring the focus from the composer back to
+/// it, which fails when the composer leaves the Tab order once left.
+fn tab_cycle(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+    workspace.update_in(cx, |this, window, cx| this.focus_composer(window, cx));
+    cx.run_until_parked();
+    for presses in 1..=200 {
+        cx.simulate_keystrokes("tab");
+        if composer_focused(workspace, cx) {
+            return presses;
+        }
+    }
+    panic!("Tab never brought the focus back to the composer");
+}
+
+#[gpui::test]
+fn tab_reaches_each_window_button_and_comes_back_to_the_composer(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    daemon.connect(vec![summary(1, "Ada", BotState::Idle)], cx);
+    // A compositor that decorates gets no window buttons from the client.
+    decorate(cx, Decorations::Server);
+    let without_buttons = tab_cycle(&workspace, cx);
+    client(cx);
+    let with_buttons = tab_cycle(&workspace, cx);
+    assert_eq!(with_buttons, without_buttons + 3);
+    cx.simulate_keystrokes("shift-tab");
+    cx.simulate_keystrokes("tab");
+    assert!(composer_focused(&workspace, cx));
+}
+
+#[gpui::test]
+fn a_click_on_a_window_button_acts_and_leaves_the_focus_where_it_was(cx: &mut TestAppContext) {
+    let (workspace, mut daemon, cx) = open(cx);
+    daemon.connect(vec![summary(1, "Ada", BotState::Idle)], cx);
+    client(cx);
+    take_requests();
+    workspace.update_in(cx, |this, window, cx| this.focus_composer(window, cx));
+    cx.run_until_parked();
+    // The center of the slot is on the round, the part that takes the focus
+    // from the keyboard.
+    click(cx, "window-maximize");
+    assert_eq!(take_requests(), [WindowRequest::Zoom]);
+    assert!(
+        composer_focused(&workspace, cx),
+        "a click on a window button took the focus from the composer"
+    );
+    // So a space typed next goes to the composer, not to the button.
+    cx.simulate_keystrokes("space");
+    assert_eq!(take_requests(), []);
+}
