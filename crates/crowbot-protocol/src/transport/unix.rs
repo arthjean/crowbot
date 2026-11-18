@@ -106,9 +106,14 @@ impl Listener {
 /// Connects to the daemon, and checks that it runs as this user before
 /// anything is sent: a socket another account bound could read every message.
 pub async fn connect(endpoint: &Endpoint) -> io::Result<BoxedStream> {
-    let stream = UnixStream::connect(endpoint.address()).await?;
     // SAFETY: `geteuid` has no preconditions.
-    let user = unsafe { libc::geteuid() };
+    connect_as(endpoint, unsafe { libc::geteuid() }).await
+}
+
+/// Connects as `user`: the account the daemon must run as. Tests give
+/// another one, so that the check runs with no second account.
+async fn connect_as(endpoint: &Endpoint, user: u32) -> io::Result<BoxedStream> {
+    let stream = UnixStream::connect(endpoint.address()).await?;
     let server = stream.peer_cred()?.uid();
     if server != user {
         return Err(io::Error::new(
@@ -117,4 +122,121 @@ pub async fn connect(endpoint: &Endpoint) -> io::Result<BoxedStream> {
         ));
     }
     Ok(Box::new(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::scratch::Scratch;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    fn me() -> u32 {
+        // SAFETY: `geteuid` has no preconditions.
+        unsafe { libc::geteuid() }
+    }
+
+    #[tokio::test]
+    async fn the_socket_and_its_lock_are_private_and_so_is_a_folder_the_listener_made() {
+        let scratch = Scratch::new("crowbot-unix-test");
+        let folder = scratch.join("made");
+        let socket = folder.join("crowbotd.sock");
+        let endpoint = Endpoint::new(socket.to_string_lossy().into_owned());
+        let _listener = Listener::bind(&endpoint).unwrap();
+        assert_eq!(mode(&socket), 0o600);
+        assert_eq!(mode(&folder.join("crowbotd.sock.lock")), 0o600);
+        assert_eq!(mode(&folder), 0o700);
+    }
+
+    /// The listener is told it runs as another account, so the connection of
+    /// the test, from the real one, comes from another user.
+    #[tokio::test]
+    async fn a_peer_of_another_user_is_dropped_before_anything_is_read() {
+        let scratch = Scratch::new("crowbot-unix-test");
+        let endpoint = scratch.endpoint();
+        let mut listener = Listener::bind(&endpoint).unwrap();
+        listener.owner = me().wrapping_add(1);
+        let accepting = tokio::spawn(async move {
+            let accepted = listener.accept().await.map(|_| ());
+            (accepted, listener)
+        });
+        let address = endpoint.address().to_owned();
+        let ended = tokio::task::spawn_blocking(move || {
+            let mut peer = std::os::unix::net::UnixStream::connect(address).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            // The listener never reads this: it closes the connection first.
+            peer.write_all(b"{\"type\":\"hello\",\"protocol_version\":1}\n")
+                .ok();
+            let mut answer = [0_u8; 1];
+            match peer.read(&mut answer) {
+                Ok(0) => Ok(()),
+                Ok(_) => Err("the listener answered".to_owned()),
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => Ok(()),
+                Err(error) => Err(format!("the connection stayed open: {error}")),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ended, Ok(()));
+        // The listener goes on waiting for a peer of its own account.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!accepting.is_finished(), "the foreign peer was accepted");
+        accepting.abort();
+    }
+
+    #[tokio::test]
+    async fn a_peer_of_the_same_user_is_accepted() {
+        let scratch = Scratch::new("crowbot-unix-test");
+        let endpoint = scratch.endpoint();
+        let mut listener = Listener::bind(&endpoint).unwrap();
+        let accepting = tokio::spawn(async move { listener.accept().await.map(|_| ()) });
+        let _peer = UnixStream::connect(endpoint.address()).await.unwrap();
+        let accepted = tokio::time::timeout(Duration::from_secs(10), accepting).await;
+        assert!(matches!(accepted, Ok(Ok(Ok(())))), "{accepted:?}");
+    }
+
+    /// The client is told it runs as another account, so the server of the
+    /// test, from the real one, runs as another user.
+    #[tokio::test]
+    async fn a_client_closes_a_server_of_another_user_before_it_sends_anything() {
+        let scratch = Scratch::new("crowbot-unix-test");
+        let path = scratch.join("server.sock");
+        let server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let endpoint = Endpoint::new(path.to_string_lossy().into_owned());
+        let refused = connect_as(&endpoint, me().wrapping_add(1)).await;
+        let error = refused.err().expect("the client kept the connection");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("another account"), "{error}");
+        let (mut accepted, _) = server.accept().unwrap();
+        accepted
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut received = Vec::new();
+        accepted.read_to_end(&mut received).unwrap();
+        assert!(received.is_empty(), "the client sent {received:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_with_no_lock_holder_is_replaced() {
+        let scratch = Scratch::new("crowbot-unix-test");
+        let endpoint = scratch.endpoint();
+        drop(std::os::unix::net::UnixListener::bind(endpoint.address()).unwrap());
+        assert!(Path::new(endpoint.address()).exists());
+        let mut listener = Listener::bind(&endpoint).unwrap();
+        let accepting = tokio::spawn(async move { listener.accept().await.map(|_| ()) });
+        let _peer = UnixStream::connect(endpoint.address()).await.unwrap();
+        let accepted = tokio::time::timeout(Duration::from_secs(10), accepting).await;
+        assert!(matches!(accepted, Ok(Ok(Ok(())))), "{accepted:?}");
+    }
 }
