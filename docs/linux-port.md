@@ -50,7 +50,7 @@ Each item names its evidence. The order inside a group is the order of dependenc
 4. **Write the Linux chrome into `DESIGN.md`**, in the same commit as the code (the design contract rule). `DESIGN.md:92` covers Windows and macOS only. The window corner radius must enter the concentric radii rule, and the rule that no fill reaches a rounded corner now applies to the window itself.
 5. **Fail in words.** GPUI panics when the display server cannot be reached, and opening a window fails when no GPU adapter works. `main.rs:129-132` quits with no message. Print the reason and exit with a failure status. Decide whether software rendering deserves a notice (`gpu_specs().is_software_emulated`); a virtual machine with `mesa-vulkan-drivers` renders on the CPU.
 6. **Check the fonts.** Inter is embedded and registered, so the main text is safe. The fallbacks in `theme.rs:290` name `.SystemUIFont`, which is "IBM Plex Sans" on Linux and absent from Fedora, and `Segoe UI`. Name Linux families (Adwaita Sans, Noto Sans, Cantarell, DejaVu Sans), and check that the `monospace` alias of `theme.rs:295` resolves, and that Arabic, CJK, and emoji draw.
-7. **Do the visual pass** once items 1 to 3 exist: light and dark, fractional scaling at 125% and 150%, two monitors, the composer with an input method and an AZERTY layout, the clipboard, the sign-in page opened through `cx.open_url`, reduced motion, KDE on Wayland, and an X11 window under Xwayland.
+7. **Do the visual pass** once items 1 to 3 exist: light and dark, fractional scaling at 125% and 150%, two monitors, the composer with an input method and an AZERTY layout, the clipboard, the sign-in page opened through `cx.open_url`, reduced motion, KDE on Wayland, and an X11 window under Xwayland. Done in US-007: see [Visual pass on real desktops](#visual-pass-on-real-desktops-us-007).
 
 ### B. Identity on the desktop
 
@@ -102,14 +102,44 @@ Each item names its evidence. The order inside a group is the order of dependenc
 | Distribution (group E) | Now, or after the product works | Decided 2026-11-16: later. No package, release build, or repository is prepared until the product works as its owner intends on its target systems. Group E and item 20 stay here as research for that PRD |
 | Scope of "done on Fedora" | GNOME on Wayland only, or also KDE and Xwayland | GNOME and KDE on Wayland; X11 as best effort |
 
+## Visual pass on real desktops (US-007)
+
+Run on 2026-11-18 on the computer above: a real GNOME Shell 51.1 session (Mutter 51.1) on two 2560 by 1440 monitors, with the AZERTY layout `fr+oss`, IBus 1.5.35 with Anthy 1.5.18, Orca 51.1, and xdg-desktop-portal 1.22.1. KDE ran as KWin 6.8.3 nested in that session (`kwin_wayland --wayland-display`), on a D-Bus session of its own with xdg-desktop-portal-kde 6.8.3 and a configuration folder of its own; Sway 1.12 ran nested on a D-Bus session that can start no service; 150% ran on a headless GNOME Shell with a 1920 by 1080 virtual monitor, captured through Mutter's ScreenCast API. The client ran on a throwaway daemon with the scripted agent of the tests (`fake_acp_agent`). Keys were sent as evdev key codes through Mutter's RemoteDesktop API, so the layout itself turned them into characters. The captures are in [`linux-port/us-007/`](linux-port/us-007/).
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| GNOME at 100%, 125%, 133%, and 167%, light and dark | Holds. Mutter offers no 150% on a 2560 by 1440 monitor (its scales are 100, 125, 133, 167, 200), so 133% and 167% stand around it. The compositor sends `preferred_scale` 120, 150, 160, and 200, and the window is 1080 by 760 times the scale | `gnome-{light,dark}-{100,125,133,167}.png` |
+| GNOME at 150%, light and dark | Holds on the headless shell (`preferred_scale(180)`). Its logical screen, 1280 by 720, is smaller than the window, so GNOME maximizes it | `gnome-headless-{light,dark}-150.png` |
+| Two monitors at 167% and 100% | The window moved with Super+Shift+arrow redraws at each scale: on the 167% monitor it gets `preferred_scale(200)` and draws into 1853 by 1320 buffers, back on the 100% one `preferred_scale(120)` and 1112 by 792. Its text is drawn at the scale, not stretched | `gnome-two-monitors-wayland-trace.txt`, `gnome-two-monitors-text-at-167.png` |
+| AZERTY shortcuts and characters | Every shortcut of the client acts on its AZERTY key (Ctrl+A, X, V, C, Backspace, K, comma; Shift+Enter, Enter, Escape, Tab). The composer takes `é è ç à ù`, and the dead keys give `ê ô ï`. Ctrl+C in the composer copied nothing: fixed (below) | `gnome-azerty-composer-keys.png`, `gnome-azerty-workspace-keys.png` |
+| IBus with Anthy | The marked text shows underlined in place, converts, and commits | `gnome-ibus-anthy-preedit-convert-commit.png` |
+| A sign-in page | Grok's sign-in (scripted) opens the page in the default browser (Helium), started through the systemd user manager | `gnome-sign-in-opens-default-browser.png` |
+| Reduced motion | Failed: GPUI holds the flag but reads it from no system, so the mascots always moved. Fixed (below); with GNOME's Reduce Animation (`org.freedesktop.appearance reduced-motion`) or Animations off, a working mascot is still to the pixel, and it moves again when the setting goes back | `gnome-reduced-motion-mascot.png` |
+| KDE on Wayland and Xwayland on GNOME: one title bar, the buttons act | Holds. KWin accepts client decorations (`zxdg_toplevel_decoration_v1.configure(1)`); Maximize, Restore, Minimize, and Close act under KWin, and under Xwayland Mutter adds no frame (`_MOTIF_WM_HINTS` without decorations, `_GTK_FRAME_EXTENTS` of 16) and each button changes `_NET_WM_STATE` or `WM_STATE` | `kwin-light-one-title-band.png`, `kwin-maximized.png`, `xwayland-gnome-dark-100.png`, `xwayland-gnome-maximized.png` |
+| KDE's button layout | Failed: GPUI reads the layout only from the GNOME key the portal serves, which holds KWin's setting only when kde-gtk-config copies it there; this computer does not have it, and the KDE portal serves no KWin setting. Fixed (below): the client follows `kwinrc` on KDE | `kwin-kwinrc-layout-followed.png` |
+| Sway with no portal | Starts in the light theme, with no failure, while GNOME is dark | `sway-no-portal-light.png`, `sway-no-portal-bus.txt` |
+| Emoji in the transcript | `👍 🐦‍⬛ ❤️ 1️⃣ 👍🏽 🇫🇷` draw in color and a plain `❤` in the text color. The preview of the bot list cut the flag in half: fixed (below) | `gnome-emoji-dark-100.png`, `gnome-emoji-message-zoom.png`, `gnome-preview-split-flag-before-fix.png`, `gnome-preview-cut-between-graphemes.png` |
+| Orca | Each window button, each bot of the list, and the composer read with their role and label, and a label that changes (Maximize, Restore) is spoken. The window buttons and the composer were out of the Tab order: fixed (below). Orca ran muted, with an extension that wrote what it would say; libatspi logged no "unknown signature" warning in this session | `gnome-orca-focus-cycle.txt`, `gnome-window-button-focus.png` |
+| The identity of the window | With the desktop files installed (`scripts/desktop-files.sh`), the GNOME overview and the dock show Crow Bot's icon | `gnome-overview-identity.png` |
+
+Defects found and fixed in the same story:
+
+- **Reduced motion** (`reduced_motion.rs`). The client sets GPUI's flag from the portal's `reduced-motion` and GNOME's `enable-animations`, and follows their changes; on Windows it reads "Animation effects" (`SPI_GETCLIENTAREAANIMATION`) each time the window becomes active. The Windows path was type-checked for `x86_64-pc-windows-msvc`, not run.
+- **The composer left the Tab order once left.** A focus handle tracked with `track_focus` ignores the element's `.tab_stop(true)`; the composer's handle is now a tab stop.
+- **The window buttons took no keyboard focus.** The round inside each slot is now the button: a tab stop with the Button role and its label, pressed by Enter or Space, with a `border_focus` edge (`DESIGN.md` 5.13). A click presses it and leaves the focus where it was, as GTK's window buttons do: the first version moved the focus there, so a space typed next pressed the button again (found in the review).
+- **Ctrl+C in the composer copied the transcript's selection, or nothing.** GPUI ranks a key bound with no context as deep as the focused element, so the workspace's copy key won over the composer's. The workspace's keys now live in its own context.
+- **A cut line could split a grapheme.** GPUI's truncation sums the advance of each character and cuts between two of them. Every one-line truncation of the client now goes through `truncated.rs`, which shapes the line and cuts at the last grapheme boundary that leaves room for the ellipsis. The text clamped to several lines (`line_clamp` in the creation form) still uses GPUI's.
+- **KDE's button layout** (`kwin.rs`). On a KDE desktop the client reads `ButtonsOnLeft` and `ButtonsOnRight` of `[org.kde.kdecoration2]` in `kwinrc` (the user's file, then `kdedefaults`, then `XDG_CONFIG_DIRS`), with KWin's defaults, and reads them again when its window becomes active.
+
 ## Not verified
 
-- No picture of the window was taken, on Wayland or on X11.
 - No sign-in and no real turn ran on Linux.
-- Nothing ran on aarch64, on musl, on KDE, on a computer with no GPU driver, or on macOS.
+- Nothing ran on aarch64, on musl, in a full Plasma session (KDE ran as a nested KWin, with no Plasma shell), on a computer with no GPU driver, or on macOS.
 - No release build was made; sizes and glibc needs come from debug builds.
 - The execute bit after a zip unpack (Codex, Bun) was not checked; the tar path (Claude) works.
-- The identity of the window (items 8 and 9) was checked on headless compositors only: GNOME Shell 51.1 ties it to `io.github.arthjean.CrowBot.desktop` and shows its name and icon, sway reports its `app_id`, and Xvfb its `WM_CLASS`. GPUI sends `set_app_id` after `get_toplevel`, so a window preview that GNOME builds before the ID arrives (the overview open when the shell starts) keeps the generic icon until the overview opens again. A real session is US-007's.
+- 150% was checked on a headless GNOME only: no monitor of the computer offers it. A drag of the window between monitors was done with the keyboard (Super+Shift+arrow): Wayland refuses a synthetic pointer.
+- The Windows reading of reduced motion was not run.
+- GPUI sends `set_app_id` after `get_toplevel`, so a window preview that GNOME builds before the ID arrives (the overview open when the shell starts) keeps the generic icon until the overview opens again.
 
 The two sections below are the research this list rests on, each claim with its source.
 

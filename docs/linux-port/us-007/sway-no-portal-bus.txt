@@ -1,0 +1,4 @@
+sock=wayland-1
+NAME                     PID PROCESS     USER   CONNECTION UNIT              SESSION DESCRIPTION
+:1.0                 2364949 busctl      arthur :1.0       user@1000.service -       -
+org.freedesktop.DBus 2364779 dbus-daemon arthur -          user@1000.service -       -
