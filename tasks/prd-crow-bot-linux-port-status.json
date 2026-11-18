@@ -33,10 +33,10 @@
     {
       "id": "EP-007",
       "title": "Validation on real desktops",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "stories_total": 1,
-      "stories_done": 0
+      "stories_done": 1
     },
     {
       "id": "EP-003",
@@ -173,7 +173,7 @@
       "id": "US-007",
       "title": "Validate assumption: the chrome and the interface hold on real desktops",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "size": "M",
       "blocked_by": [
@@ -182,9 +182,9 @@
         "US-009",
         "US-026"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-18",
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-008",
