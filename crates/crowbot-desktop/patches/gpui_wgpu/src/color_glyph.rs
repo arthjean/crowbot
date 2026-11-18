@@ -587,26 +587,37 @@ struct Painter<'a> {
     layers: Vec<Layer>,
 }
 
+/// The first palette of the CPAL table, in premultiplied RGBA.
+fn first_palette(font: &FontRef<'_>) -> Vec<Rgba> {
+    let Ok(cpal) = font.cpal() else {
+        return Vec::new();
+    };
+    let (Some(Ok(records)), Some(first)) = (
+        cpal.color_records_array(),
+        cpal.color_record_indices().first(),
+    ) else {
+        return Vec::new();
+    };
+    let first = usize::from(first.get());
+    let count = usize::from(cpal.num_palette_entries());
+    records
+        .get(first..first + count)
+        .unwrap_or_default()
+        .iter()
+        .map(|color| {
+            Rgba::premultiplied(
+                f32::from(color.red) / 255.,
+                f32::from(color.green) / 255.,
+                f32::from(color.blue) / 255.,
+                f32::from(color.alpha) / 255.,
+            )
+        })
+        .collect()
+}
+
 impl<'a> Painter<'a> {
     fn new(font: &'a FontRef<'a>, root: Affine, width: usize, height: usize) -> Self {
-        let palette = font
-            .color_palettes()
-            .get(0)
-            .map(|palette| {
-                palette
-                    .colors()
-                    .iter()
-                    .map(|color| {
-                        Rgba::premultiplied(
-                            f32::from(color.red) / 255.,
-                            f32::from(color.green) / 255.,
-                            f32::from(color.blue) / 255.,
-                            f32::from(color.alpha) / 255.,
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let palette = first_palette(font);
         Self {
             font,
             palette,
