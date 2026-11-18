@@ -1,0 +1,140 @@
+# The six quality gates of the repository on every push and pull request, on
+# Fedora (a container job, since GitHub has no Fedora image) and on Ubuntu,
+# each on x86_64 and on arm64; then, on Fedora, the real client opens a window
+# on a headless compositor (scripts/window-test.sh). No step signs in to a
+# provider, downloads a provider runtime, or holds a credential: the tests run
+# the scripted agent of the daemon.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # One toolchain everywhere, so that the lints are the same on every system.
+  RUST_TOOLCHAIN: "1.100.0"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # No debug information: a smaller cache and a faster link.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  linux:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Fedora 45, x86_64
+            system: fedora
+            arch: x86_64
+            runner: ubuntu-24.04
+            container: registry.fedoraproject.org/fedora:45
+          - name: Fedora 45, arm64
+            system: fedora
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            container: registry.fedoraproject.org/fedora:45
+          - name: Ubuntu 24.04, x86_64
+            system: ubuntu
+            arch: x86_64
+            runner: ubuntu-24.04
+          - name: Ubuntu 24.04, arm64
+            system: ubuntu
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Git for the checkout
+        if: matrix.system == 'fedora'
+        run: dnf install -y --setopt=install_weak_deps=False git-core
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: System packages
+        run: sh scripts/linux-packages.sh ${{ matrix.system == 'fedora' && '--window-test' || '' }}
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          if ! command -v rustup >/dev/null; then
+            dnf install -y --setopt=install_weak_deps=False rustup
+            rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.system }}
+          workspaces: |
+            . -> target
+            crates/crowbot-desktop -> crates/crowbot-desktop/target
+
+      - name: "Root workspace: format"
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check
+
+      - name: "Root workspace: lints"
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets --no-deps -- -D warnings
+
+      - name: "Root workspace: tests"
+        if: ${{ !cancelled() }}
+        run: cargo test --locked
+
+      - name: "Client workspace: format"
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check --manifest-path crates/crowbot-desktop/Cargo.toml
+
+      - name: "Client workspace: lints"
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets --no-deps --manifest-path crates/crowbot-desktop/Cargo.toml -- -D warnings
+
+      - name: "Client workspace: tests"
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --manifest-path crates/crowbot-desktop/Cargo.toml
+
+      - name: "Window: build"
+        if: ${{ !cancelled() && matrix.system == 'fedora' }}
+        run: |
+          cargo build --locked -p crowbotd
+          cargo build --locked --manifest-path crates/crowbot-desktop/Cargo.toml
+
+      - name: "Window: Wayland"
+        if: ${{ !cancelled() && matrix.system == 'fedora' }}
+        run: >-
+          sh scripts/window-test.sh
+          --client crates/crowbot-desktop/target/debug/crowbot --daemon target/debug/crowbotd
+
+      - name: "Window: X11"
+        if: ${{ !cancelled() && matrix.system == 'fedora' }}
+        run: >-
+          sh scripts/window-test.sh --x11
+          --client crates/crowbot-desktop/target/debug/crowbot --daemon target/debug/crowbotd
+
+      # The test must fail on a client that holds no display backend, or it
+      # proves nothing.
+      - name: "Window: a client with no display backend is caught"
+        if: ${{ !cancelled() && matrix.system == 'fedora' && matrix.arch == 'x86_64' }}
+        run: |
+          cargo build --locked --no-default-features --manifest-path crates/crowbot-desktop/Cargo.toml --target-dir "$RUNNER_TEMP/no-display"
+          if sh scripts/window-test.sh --client "$RUNNER_TEMP/no-display/debug/crowbot" --daemon target/debug/crowbotd 2>"$RUNNER_TEMP/no-display.log"; then
+            echo "the window test passed on a client with no display backend" >&2
+            exit 1
+          fi
+          grep "no window opened" "$RUNNER_TEMP/no-display.log"

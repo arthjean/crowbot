@@ -34,10 +34,15 @@ pulldown-cmark = { version = "0.13.6", default-features = false }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 unicode-segmentation = "1"
 
-# The display backends exist on Linux only. A target table keeps every Wayland
-# and X11 crate out of the Windows and macOS builds.
+[features]
+default = ["display"]
+# The Wayland and X11 backends of GPUI, which exist on Linux only: gpui_platform
+# builds gpui_linux for Linux alone, so the feature changes nothing elsewhere. A
+# build with `--no-default-features` opens no window on Linux; it exists so that
+# `scripts/window-test.sh` can prove that it notices.
+display = ["gpui_platform/wayland", "gpui_platform/x11"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "0cfc4a483dfab6ca171df0ceedaaa2a9f7954d0e", features = ["wayland", "x11"] }
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
