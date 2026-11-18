@@ -31,7 +31,7 @@ Everything in this table was run on the computer above.
 | SELinux (enforcing) | No denial in the journals. The daemon and the runtimes run as `unconfined_t` |
 | The 9 pinned Linux archives (3 providers, x86_64 and aarch64) | All answer and match their SHA-256 |
 
-The visual pass was not done. The portal that takes screenshots on Wayland holds a stored refusal for the terminal the session ran in, GPUI exposes no accessibility tree to `agent-desktop`, and Wayland refuses synthetic pointer input. What follows about the look of the window comes from the GPUI source and from the X11 properties of the test window, not from a picture.
+The visual pass was not done. The portal that takes screenshots on Wayland holds a stored refusal for the terminal the session ran in, GPUI exposed no accessibility tree to `agent-desktop`, and Wayland refuses synthetic pointer input. (Found later, in US-026: GPUI publishes its tree to AT-SPI only once `org.a11y.Status.IsEnabled` is true, which Orca sets when it starts; that session had it false. `scripts/accessibility-check.sh` checks the tree with it on.) What follows about the look of the window comes from the GPUI source and from the X11 properties of the test window, not from a picture.
 
 ## The work to do
 
