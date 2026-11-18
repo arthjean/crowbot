@@ -49,10 +49,10 @@
     {
       "id": "EP-004",
       "title": "Tests and continuous integration",
-      "status": "IN_REVIEW",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 4,
-      "stories_done": 0
+      "stories_done": 4
     },
     {
       "id": "EP-005",
@@ -298,45 +298,45 @@
       "id": "US-016",
       "title": "The tests pass in any environment",
       "epic": "EP-004",
-      "status": "IN_REVIEW",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
       "started_at": "2026-11-18",
-      "completed_at": null,
-      "reviewed_at": null
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-017",
       "title": "The Unix transport has tests of its own",
       "epic": "EP-004",
-      "status": "IN_REVIEW",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [],
       "started_at": "2026-11-18",
-      "completed_at": null,
-      "reviewed_at": null
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-018",
       "title": "Every push is built and tested on Linux",
       "epic": "EP-004",
-      "status": "IN_REVIEW",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-016"
       ],
       "started_at": "2026-11-18",
-      "completed_at": null,
-      "reviewed_at": null
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-019",
       "title": "A real window opens in the pipeline",
       "epic": "EP-004",
-      "status": "IN_REVIEW",
+      "status": "DONE",
       "priority": "P1",
       "size": "M",
       "blocked_by": [
@@ -344,8 +344,8 @@
         "US-018"
       ],
       "started_at": "2026-11-18",
-      "completed_at": null,
-      "reviewed_at": null
+      "completed_at": "2026-11-18",
+      "reviewed_at": "2026-11-18"
     },
     {
       "id": "US-020",
