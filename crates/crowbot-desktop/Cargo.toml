@@ -9,6 +9,9 @@ publish = false
 
 [workspace]
 resolver = "3"
+# The GPUI crates this repository changes are Zed's code, built with Zed's own
+# lints, not members of this workspace.
+exclude = ["patches"]
 
 [[bin]]
 name = "crowbot"
@@ -46,6 +49,12 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 async-task = { git = "https://github.com/smol-rs/async-task", rev = "41fd3359c75e221bd8b187a8ee361aa309c1714c" }
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+
+# GPUI crates changed in this repository, at the rev above: see
+# `patches/README.md`. Only Linux builds `gpui_wgpu`; Windows and macOS draw
+# text with their own system and never compile it.
+[patch."https://github.com/zed-industries/zed"]
+gpui_wgpu = { path = "patches/gpui_wgpu" }
 
 [profile.dev.package]
 gpui_macros = { opt-level = 3 }

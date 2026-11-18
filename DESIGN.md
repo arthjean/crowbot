@@ -205,9 +205,11 @@ Color Emoji on Linux. Code is set in Consolas (Windows), Menlo (macOS), or on
 Linux the family fontconfig resolves for `monospace`, then Adwaita Mono, Noto
 Sans Mono, DejaVu Sans Mono, Ubuntu Mono, Liberation Mono, and Inter when the
 system has none (`font::init`). A family must name a font exactly: the text
-system does not know fontconfig's aliases. On Linux, GPUI at the pinned rev
-drops a fallback family that has no Latin `m` and draws no COLRv1 glyph, so
-Fedora's emoji draw empty until US-026 of the Linux port PRD.
+system does not know fontconfig's aliases. On Linux the fallbacks are used in
+the order named, including families with no Latin glyph (Arabic, emoji), and
+a grapheme that ends in the emoji selector U+FE0F, such as `❤️`, takes the
+first color family that covers it. Emoji draw in color from COLRv1 fonts such
+as Fedora's Noto Color Emoji (`patches/gpui_wgpu` of the client).
 
 | Step | Size / line | Use |
 | --- | --- | --- |

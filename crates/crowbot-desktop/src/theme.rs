@@ -1410,13 +1410,59 @@ mod system_fonts {
         assert!(missing.is_empty(), "nothing drawn for {missing:?}");
     }
 
-    /// GPUI at the pinned rev draws no COLRv1 glyph, the format of Fedora's
-    /// "Noto Color Emoji", so this fails there until US-026.
+    /// Fedora's "Noto Color Emoji" is COLRv1, which swash does not draw:
+    /// `patches/gpui_wgpu` draws it.
     #[test]
-    #[ignore = "reads the fonts this computer has; fails on Fedora 45 until US-026"]
+    #[ignore = "reads the fonts this computer has; run on the target desktop"]
     fn an_emoji_draws_a_glyph() {
-        let missing = undrawn("🐦‍⬛ 👍", &font::sans());
+        let missing = undrawn("🐦‍⬛ 👍 ❤️", &font::sans());
         assert!(missing.is_empty(), "nothing drawn for {missing:?}");
+    }
+
+    #[test]
+    #[ignore = "reads the fonts this computer has; run on the target desktop"]
+    fn an_emoji_draws_in_color() {
+        let platform = gpui_platform::current_platform(true);
+        let system = platform.text_system();
+        system.add_fonts(crate::assets::fonts()).unwrap();
+        let id = system.font_id(&font::sans()).unwrap();
+        let text = "👍 ❤️";
+        let layout = system.layout_line(
+            text,
+            px(13.),
+            &[FontRun {
+                len: text.len(),
+                font_id: id,
+            }],
+        );
+        let emoji = layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.font_id, glyph)))
+            .filter(|(_, glyph)| !text[glyph.index..].starts_with(' '))
+            .collect::<Vec<_>>();
+        assert_eq!(emoji.len(), 2);
+        for (font_id, glyph) in emoji {
+            assert!(glyph.is_emoji, "{:?}", &text[glyph.index..]);
+            let params = gpui::RenderGlyphParams {
+                font_id,
+                glyph_id: glyph.id,
+                font_size: px(13.),
+                subpixel_variant: gpui::Point::default(),
+                scale_factor: 2.,
+                is_emoji: true,
+                subpixel_rendering: false,
+                dilation: 0,
+            };
+            let bounds = system.glyph_raster_bounds(&params).unwrap();
+            let (_, bgra) = system.rasterize_glyph(&params, bounds).unwrap();
+            let colored = bgra
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|&[b, g, r, a]| a > 200 && r.max(g).max(b) - r.min(g).min(b) > 100);
+            assert!(colored, "{:?} is not in color", &text[glyph.index..]);
+        }
     }
 
     #[test]
@@ -1437,5 +1483,172 @@ mod system_fonts {
             .advance(id, system.glyph_for_char(id, 'W').unwrap())
             .unwrap();
         assert_eq!(narrow.width, wide.width, "{family} is not monospaced");
+    }
+}
+
+/// The text system of Linux, the one the window draws with, on the fonts of
+/// `fixtures/fonts`: subsets of Fedora's fonts under family names no system
+/// has, so the result does not depend on the computer.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+mod text_system {
+    use std::{borrow::Cow, sync::Arc};
+
+    use gpui::{FontFallbacks, FontRun, PlatformTextSystem, ShapedGlyph, px};
+
+    const COLOR_EMOJI: &str = "Crow Test Color Emoji";
+    const TEXT_EMOJI: &str = "Crow Test Text Emoji";
+    /// Arabic letters and no Latin glyph.
+    const ARABIC: &str = "Crow Test Arabic";
+    /// Arabic letters and a Latin `m`.
+    const LATIN_ARABIC: &str = "Crow Test Latin Arabic";
+
+    fn system() -> Arc<dyn PlatformTextSystem> {
+        let system = gpui_platform::current_platform(true).text_system();
+        let mut fonts = crate::assets::fonts();
+        fonts.extend([
+            Cow::Borrowed(include_bytes!("../fixtures/fonts/CrowTestColorEmoji.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../fixtures/fonts/CrowTestTextEmoji.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../fixtures/fonts/CrowTestArabic.ttf").as_slice()),
+            Cow::Borrowed(include_bytes!("../fixtures/fonts/CrowTestLatinArabic.ttf").as_slice()),
+        ]);
+        system.add_fonts(fonts).unwrap();
+        system
+    }
+
+    /// Inter, the client's own family, then `fallbacks` in that order.
+    fn inter_then(fallbacks: &[&str]) -> gpui::Font {
+        let mut font = gpui::font(super::font::SANS);
+        font.fallbacks = Some(FontFallbacks::from_fonts(
+            fallbacks.iter().map(|family| family.to_string()).collect(),
+        ));
+        font
+    }
+
+    /// Each glyph of `text` set in `font`, with the font it came from.
+    fn shape(
+        system: &dyn PlatformTextSystem,
+        text: &str,
+        font: &gpui::Font,
+    ) -> Vec<(gpui::FontId, ShapedGlyph)> {
+        let id = system.font_id(font).unwrap();
+        let layout = system.layout_line(
+            text,
+            px(32.),
+            &[FontRun {
+                len: text.len(),
+                font_id: id,
+            }],
+        );
+        layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| (run.font_id, glyph.clone())))
+            .collect()
+    }
+
+    /// The glyph as the atlas receives it: BGRA for an emoji, one alpha byte
+    /// per pixel otherwise.
+    fn raster(
+        system: &dyn PlatformTextSystem,
+        font_id: gpui::FontId,
+        glyph: &ShapedGlyph,
+    ) -> Vec<u8> {
+        let params = gpui::RenderGlyphParams {
+            font_id,
+            glyph_id: glyph.id,
+            font_size: px(32.),
+            subpixel_variant: gpui::Point::default(),
+            scale_factor: 2.,
+            is_emoji: glyph.is_emoji,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let bounds = system.glyph_raster_bounds(&params).unwrap();
+        system.rasterize_glyph(&params, bounds).unwrap().1
+    }
+
+    /// Whether some opaque pixel of a BGRA image is far from gray.
+    fn has_color(bgra: &[u8]) -> bool {
+        bgra.as_chunks::<4>().0.iter().any(|&[b, g, r, a]| {
+            let high = r.max(g).max(b);
+            let low = r.min(g).min(b);
+            a > 200 && high - low > 100
+        })
+    }
+
+    #[test]
+    fn a_colrv1_emoji_draws_in_color() {
+        let system = system();
+        let glyphs = shape(&*system, "👍", &inter_then(&[COLOR_EMOJI]));
+        assert_eq!(glyphs.len(), 1);
+        let (font_id, glyph) = &glyphs[0];
+        assert!(glyph.is_emoji, "a face with color glyphs draws emoji");
+        let pixels = raster(&*system, *font_id, glyph);
+        assert!(
+            has_color(&pixels),
+            "the thumb is drawn in its palette colors"
+        );
+        // The thumb of Noto Color Emoji is yellow, from a gradient.
+        let yellow = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|&&[b, g, r, a]| a > 200 && r > 200 && g > 140 && b < 90);
+        assert!(yellow.count() > 200);
+    }
+
+    #[test]
+    fn emoji_fallbacks_with_no_latin_glyph_are_used_in_the_order_named() {
+        let system = system();
+        for (chain, color) in [
+            ([COLOR_EMOJI, TEXT_EMOJI], true),
+            ([TEXT_EMOJI, COLOR_EMOJI], false),
+        ] {
+            let glyphs = shape(&*system, "👍", &inter_then(&chain));
+            assert_eq!(glyphs.len(), 1, "{chain:?}");
+            assert_eq!(glyphs[0].1.is_emoji, color, "{chain:?}");
+        }
+    }
+
+    #[test]
+    fn an_arabic_fallback_with_no_latin_glyph_comes_before_a_later_one() {
+        let system = system();
+        let latin_arabic = system
+            .font_metrics(system.font_id(&gpui::font(LATIN_ARABIC)).unwrap())
+            .units_per_em;
+        let arabic_upem = |chain: [&str; 2]| {
+            let glyphs = shape(&*system, "مرحبا", &inter_then(&chain));
+            assert!(!glyphs.is_empty());
+            let ems = glyphs
+                .iter()
+                .map(|(font_id, _)| system.font_metrics(*font_id).units_per_em)
+                .collect::<Vec<_>>();
+            assert!(ems.windows(2).all(|pair| pair[0] == pair[1]), "{chain:?}");
+            ems[0]
+        };
+        // Noto Sans Arabic has 1000 units per em and Vazirmatn 2048: the
+        // em size tells which face drew the word.
+        assert_ne!(arabic_upem([ARABIC, LATIN_ARABIC]), latin_arabic);
+        assert_eq!(arabic_upem([LATIN_ARABIC, ARABIC]), latin_arabic);
+    }
+
+    #[test]
+    fn a_family_with_no_latin_glyph_never_becomes_a_primary_font() {
+        let system = system();
+        // Named as a fallback first, then asked for as the font itself: it
+        // has no `m` to measure, so it is not one.
+        let _ = shape(&*system, "👍", &inter_then(&[COLOR_EMOJI]));
+        assert!(system.font_id(&gpui::font(COLOR_EMOJI)).is_err());
+    }
+
+    #[test]
+    fn a_variation_selector_picks_the_presentation() {
+        let system = system();
+        let font = inter_then(&[TEXT_EMOJI, COLOR_EMOJI]);
+        let emoji = shape(&*system, "\u{2764}\u{FE0F}", &font);
+        assert!(emoji.iter().any(|(_, glyph)| glyph.is_emoji));
+        let text = shape(&*system, "\u{2764}", &font);
+        assert!(text.iter().all(|(_, glyph)| !glyph.is_emoji));
     }
 }

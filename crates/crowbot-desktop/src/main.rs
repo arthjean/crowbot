@@ -7,6 +7,8 @@ mod composer;
 mod connection;
 mod display;
 mod frames;
+#[cfg(test)]
+mod gpui_patches;
 mod identity;
 mod layout;
 mod markdown;
