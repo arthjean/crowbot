@@ -132,9 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_lock_on_one_database_is_held_and_names_the_first() {
-        let dir = std::env::temp_dir().join(format!("crowbotd-instance-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crowbot_protocol::scratch::Scratch::new("crowbotd-instance");
         let db = dir.join("crowbot.db");
         let endpoint = Endpoint::new("first-endpoint");
         let first = lock_database(&db, &endpoint).await;
@@ -151,6 +149,5 @@ mod tests {
         // The lock ends with its holder.
         drop(first);
         assert!(lock_database(&db, &endpoint).await.is_ok());
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

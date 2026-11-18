@@ -93,10 +93,29 @@ fn serve(mut stream: TcpStream, body: &[u8], pause: Duration) {
     }
 }
 
-/// A port of this computer that nothing listens on.
-fn closed_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+/// A port of this computer that refuses connections: a socket bound to it
+/// that does not listen. The test holds it, so no other test, of this run or
+/// of another one, can listen on it meanwhile, as one could on a port that
+/// was only found free.
+struct ClosedPort {
+    socket: tokio::net::TcpSocket,
+    port: u16,
+}
+
+impl ClosedPort {
+    fn new() -> Self {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = socket.local_addr().unwrap().port();
+        Self { socket, port }
+    }
+
+    /// The network is back: the same port listens.
+    fn listen(self) -> TcpListener {
+        let listener = self.socket.listen(64).unwrap().into_std().unwrap();
+        listener.set_nonblocking(false).unwrap();
+        listener
+    }
 }
 
 fn manifest(port: u16, sha256: &str, bytes: usize) -> Value {
@@ -360,6 +379,10 @@ async fn a_runtime_changed_after_its_install_is_downloaded_again_before_it_runs(
 
 #[tokio::test]
 async fn a_changed_runtime_that_cannot_be_removed_does_not_run() {
+    // The marker is kept by a folder its owner cannot change, which root can.
+    if support::skipped_as_root("root can change a folder of mode 0555") {
+        return;
+    }
     let publisher = Publisher::start(Duration::ZERO);
     let mut daemon = daemon(&publisher);
     let mut client = daemon.client().await;
@@ -464,10 +487,12 @@ async fn a_stop_during_the_download_ends_the_turn() {
 
 #[tokio::test]
 async fn offline_the_turn_fails_by_the_name_of_the_runtime_and_works_once_the_network_is_back() {
-    let port = closed_port();
+    let closed = ClosedPort::new();
     let runtime = runtime();
-    let daemon =
-        Daemon::start_with_providers(&manifest(port, &sha256(&runtime), runtime.len()), &[]);
+    let daemon = Daemon::start_with_providers(
+        &manifest(closed.port, &sha256(&runtime), runtime.len()),
+        &[],
+    );
     let mut client = daemon.client().await;
     let conversation = claude_bot(&mut client).await;
 
@@ -482,8 +507,7 @@ async fn offline_the_turn_fails_by_the_name_of_the_runtime_and_works_once_the_ne
     assert!(!installed(&daemon).exists());
 
     // The network is back: the same bot answers.
-    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
-    let publisher = Publisher::on(listener, Duration::ZERO);
+    let publisher = Publisher::on(closed.listen(), Duration::ZERO);
     let online = turn(&mut client, conversation, "say caw").await;
     assert_eq!(online.end, Event::TurnEnded(TurnEnd::Completed));
     assert_eq!(online.reply, "caw");

@@ -151,6 +151,11 @@ async fn deleting_a_bot_stops_its_running_turn_first() {
     client.open(conversation).await;
     client.say(conversation, "stream 3000 20").await;
     client.until_reply("w0").await;
+    // The agent writes its heartbeat from a thread of its own, which may
+    // come after the first word.
+    assert!(support::eventually(Duration::from_secs(10), || daemon
+        .heartbeat()
+        .is_some()));
 
     client
         .send(ClientMessage::DeleteBot { bot_id: bot.bot.id })
@@ -411,7 +416,6 @@ async fn a_migration_that_fails_leaves_the_database_as_it_was_at_each_start() {
         );
     }
     drop(database);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 // US-007: a bot's instructions, folder, and model reach the agent.
@@ -1166,7 +1170,16 @@ async fn a_read_mark_for_something_that_does_not_exist_is_an_error_and_changes_n
     assert!(client.until_error().await.contains("no finished turn"));
 
     client.ask(conversation, "say one").await;
-    let before = client.bot(id).await;
+    // The bot leaves its working state a moment after the end of the turn.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let before = loop {
+        let bot = client.bot(id).await;
+        if bot.state != BotState::Working {
+            break bot;
+        }
+        assert!(std::time::Instant::now() < deadline, "the bot still works");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(before.unread, 1);
     for missing in [
         ClientMessage::MarkRead {

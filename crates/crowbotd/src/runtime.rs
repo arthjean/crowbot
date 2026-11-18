@@ -607,12 +607,9 @@ fn resolve(pattern: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    fn folder(name: &str) -> PathBuf {
-        let folder =
-            std::env::temp_dir().join(format!("crowbotd-runtime-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&folder).ok();
-        std::fs::create_dir_all(&folder).unwrap();
-        folder
+    /// A folder of the test, removed with it.
+    fn folder(name: &str) -> crowbot_protocol::scratch::Scratch {
+        crowbot_protocol::scratch::Scratch::new(&format!("crowbotd-runtime-{name}"))
     }
 
     fn spec(program: &str) -> RuntimeSpec {
@@ -777,8 +774,8 @@ mod tests {
         let manifest = || Some(HashMap::from([("claude".to_owned(), pinned.clone())]));
         // Each daemon has its own lock between its own callers.
         let (first, second) = (
-            Runtimes::new(root.clone(), manifest()),
-            Runtimes::new(root.clone(), manifest()),
+            Runtimes::new(root.to_path_buf(), manifest()),
+            Runtimes::new(root.to_path_buf(), manifest()),
         );
         let quiet: Progress = Arc::new(|_, _| {});
         let (one, two) = tokio::join!(

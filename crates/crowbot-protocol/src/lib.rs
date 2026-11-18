@@ -5,6 +5,8 @@ mod folders;
 mod message;
 mod preferences;
 mod provider;
+#[cfg(any(test, feature = "scratch"))]
+pub mod scratch;
 mod search;
 #[cfg(feature = "transport")]
 pub mod transport;

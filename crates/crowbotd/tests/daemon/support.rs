@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+pub use crowbot_protocol::scratch::Scratch;
 use crowbot_protocol::transport::{self, MessageReader, MessageWriter};
 use crowbot_protocol::{
     BotDraft, BotPatch, BotSummary, ClientMessage, ConversationSnapshot, ConversationSummary,
@@ -30,10 +31,26 @@ pub fn test_endpoint(dir: &Path) -> Endpoint {
     }
 }
 
-pub fn test_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(unique("crowbotd-test"));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A folder of its own for a test, removed when it is dropped. It sits where
+/// a socket inside it fits, whatever `TMPDIR` is (`crowbot_protocol::scratch`).
+pub fn test_dir() -> Scratch {
+    Scratch::new("crowbotd-test")
+}
+
+/// Whether the test runs as root, as a container job does. A test that root
+/// cannot run says so, with `why`, and does nothing.
+pub fn skipped_as_root(why: &str) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: the test runs as root, and {why}");
+            return true;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = why;
+    false
 }
 
 pub fn fake_agent() -> &'static Path {
@@ -46,7 +63,14 @@ pub fn fake_agent() -> &'static Path {
         // Built each time: a test filter skips the examples, and an agent left
         // by an earlier build would answer with an older script.
         let built = Command::new(env!("CARGO"))
-            .args(["build", "-p", "crowbotd", "--example", "fake_acp_agent"])
+            .args([
+                "build",
+                "--locked",
+                "-p",
+                "crowbotd",
+                "--example",
+                "fake_acp_agent",
+            ])
             .status()
             .unwrap();
         assert!(built.success(), "cannot build the scripted agent");
@@ -145,7 +169,7 @@ pub fn run_daemon(dir: &Path, endpoint: &Endpoint) -> Output {
 }
 
 pub struct Daemon {
-    dir: PathBuf,
+    dir: Scratch,
     endpoint: Endpoint,
     child: Option<Child>,
     agent: Agent,
@@ -341,10 +365,15 @@ impl Daemon {
     }
 }
 
+/// The daemon is killed, and its agents are let end, before its folder, a
+/// field, is removed: an agent still alive would write in it meanwhile.
 impl Drop for Daemon {
     fn drop(&mut self) {
         self.kill();
-        std::fs::remove_dir_all(&self.dir).ok();
+        #[cfg(target_os = "linux")]
+        eventually(Duration::from_secs(10), || {
+            self.agent_processes().is_empty()
+        });
     }
 }
 

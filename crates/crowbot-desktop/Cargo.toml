@@ -48,6 +48,7 @@ libc = "0.2"
 windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+crowbot-protocol = { path = "../crowbot-protocol", features = ["scratch", "transport"] }
 resvg = "0.46"
 serde_json = "1"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "0cfc4a483dfab6ca171df0ceedaaa2a9f7954d0e", features = ["test-support"] }

@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crowbot_protocol::Endpoint;
 use crowbot_protocol::transport;
@@ -47,7 +47,7 @@ fn quoted(path: &Path) -> String {
 struct Unit {
     name: String,
     file: PathBuf,
-    dir: PathBuf,
+    dir: support::Scratch,
     endpoint: Endpoint,
 }
 
@@ -83,8 +83,10 @@ impl Unit {
         let folder = Path::new(&runtime).join("systemd").join("user");
         std::fs::create_dir_all(&folder).unwrap();
         let file = folder.join(&name);
+        // No `daemon-reload`: systemd reads a unit file it never loaded when
+        // the unit is first named, and a reload would read every unit of the
+        // user's manager again, for each test of each run.
         std::fs::write(&file, text).unwrap();
-        assert!(systemctl(&["daemon-reload"]).status.success());
         Self {
             name,
             file,
@@ -111,16 +113,34 @@ impl Drop for Unit {
     fn drop(&mut self) {
         systemctl(&["stop", &self.name]);
         std::fs::remove_file(&self.file).ok();
-        systemctl(&["daemon-reload"]);
+        // A stopped unit whose file is gone is unloaded once it holds no
+        // failed state.
         systemctl(&["reset-failed", &self.name]);
-        std::fs::remove_dir_all(&self.dir).ok();
     }
 }
 
 /// Whether the endpoint answers at the first try.
 fn answers(endpoint: &Endpoint) -> bool {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(transport::connect(endpoint)).is_ok()
+}
+
+/// `CLOCK_MONOTONIC` in microseconds: the clock of systemd's `…Monotonic`
+/// timestamps.
+fn monotonic_micros() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid `timespec` for the call to fill.
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut now) },
+        0
+    );
+    u64::try_from(now.tv_sec).unwrap() * 1_000_000 + u64::try_from(now.tv_nsec).unwrap() / 1_000
 }
 
 #[test]
@@ -147,19 +167,49 @@ fn the_unit_is_ready_only_once_the_daemon_listens_and_systemd_restarts_it_after_
         "{cgroup}"
     );
 
+    let killed = monotonic_micros();
     // SAFETY: `kill` takes plain integers.
     unsafe {
         libc::kill(i32::try_from(first).unwrap(), libc::SIGKILL);
     }
-    let killed = Instant::now();
+    // The socket is asked first, and systemd only once it answers: the
+    // manager starts queued units only when no request waits, so a test that
+    // asks it in a tight loop, with others doing the same, would starve the
+    // very restart it waits for.
     assert!(
-        support::eventually(Duration::from_secs(5), || {
-            let now = unit.main_pid();
-            now != 0 && now != first && answers(&unit.endpoint)
+        support::eventually(Duration::from_secs(20), || {
+            answers(&unit.endpoint) && {
+                let now = unit.main_pid();
+                now != 0 && now != first
+            }
         }),
-        "systemd did not start the daemon again within 5 seconds"
+        "systemd did not start the daemon again"
     );
-    assert!(killed.elapsed() < Duration::from_secs(5));
+    // The bound of 5 seconds is read on systemd's own clock, whatever time
+    // the test took to see the restart. It is what the unit and the daemon
+    // decide: the restart delay of the unit, then the daemon's start until
+    // READY=1. The time the user manager takes to run the restart job is
+    // left out: on a computer loaded with 24 test runs at once, that alone
+    // went past 5 seconds.
+    let timestamp = |name: &str| -> u64 { unit.property(name).parse().unwrap() };
+    let started = timestamp("ExecMainStartTimestampMonotonic");
+    let ready = timestamp("ActiveEnterTimestampMonotonic");
+    assert!(
+        started > killed,
+        "systemd shows the first daemon as the main process"
+    );
+    assert!(
+        ready >= started,
+        "systemd kept the readiness of the first daemon"
+    );
+    assert_eq!(unit.property("RestartUSec"), "1s");
+    let restarted = Duration::from_secs(1) + Duration::from_micros(ready - started);
+    assert!(
+        restarted < Duration::from_secs(5),
+        "the daemon was ready {:?} after it started, and {:?} after it was killed",
+        Duration::from_micros(ready - started),
+        Duration::from_micros(ready - killed),
+    );
 
     // A stop is a signal: the daemon ends cleanly, and systemd sees success.
     assert!(systemctl(&["stop", &unit.name]).status.success());
@@ -234,20 +284,19 @@ async fn the_daemon_reports_whether_the_users_services_outlive_the_session() {
             _ => None,
         })
         .await;
-    let expected = Path::new("/run/systemd/system").is_dir().then(|| {
-        let user = std::env::var("USER").unwrap();
-        Path::new("/var/lib/systemd/linger").join(user).exists()
-    });
+    // The account the test runs as, which `USER` may not name: a container
+    // job sets none, and a user namespace keeps the one of its creator.
+    let account = Command::new("id").arg("-un").output().unwrap();
+    assert!(account.status.success());
+    let user = String::from_utf8(account.stdout).unwrap().trim().to_owned();
+    let expected = Path::new("/run/systemd/system")
+        .is_dir()
+        .then(|| Path::new("/var/lib/systemd/linger").join(&user).exists());
     assert_eq!(info.linger, expected);
     // What `loginctl` says agrees.
     if let Some(linger) = expected
         && let Ok(output) = Command::new("loginctl")
-            .args([
-                "show-user",
-                &std::env::var("USER").unwrap(),
-                "--property=Linger",
-                "--value",
-            ])
+            .args(["show-user", &user, "--property=Linger", "--value"])
             .output()
         && output.status.success()
     {

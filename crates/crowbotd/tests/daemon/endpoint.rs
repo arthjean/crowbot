@@ -61,7 +61,6 @@ async fn a_client_that_speaks_another_protocol_version_is_refused() {
     let closed = reader.read::<ServerMessage>().await.unwrap();
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    std::fs::remove_dir_all(&dir).ok();
     let Some(ServerMessage::Error { message }) = refusal else {
         panic!("expected a refusal, got {refusal:?}");
     };
@@ -90,7 +89,6 @@ async fn a_daemon_does_not_serve_an_endpoint_that_another_process_holds() {
     let _holder = Listener::bind(&endpoint).unwrap();
 
     let output = support::run_daemon(&dir, &endpoint);
-    std::fs::remove_dir_all(&dir).ok();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -616,11 +616,11 @@ mod tests {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use crowbot_protocol::scratch::Scratch;
+
     use super::*;
 
     const PATIENCE: Duration = Duration::from_secs(20);
-
-    static NEXT: AtomicU32 = AtomicU32::new(0);
 
     /// Builds the real daemon from the root workspace and returns its path.
     fn daemon_binary() -> &'static Path {
@@ -628,7 +628,8 @@ mod tests {
         DAEMON.get_or_init(|| {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
             let output = Command::new(env!("CARGO"))
-                .args(["build", "--package", "crowbotd", "--message-format", "json"])
+                .args(["build", "--locked", "--package", "crowbotd"])
+                .args(["--message-format", "json"])
                 .arg("--manifest-path")
                 .arg(root)
                 .stderr(Stdio::inherit())
@@ -648,25 +649,15 @@ mod tests {
     }
 
     struct Scene {
-        dir: PathBuf,
+        dir: Scratch,
         endpoint: Endpoint,
         daemons: Vec<u32>,
     }
 
     impl Scene {
         fn new() -> Self {
-            let unique = format!(
-                "crowbot-client-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            );
-            let dir = std::env::temp_dir().join(&unique);
-            std::fs::create_dir_all(&dir).unwrap();
-            let endpoint = if cfg!(windows) {
-                Endpoint::new(format!(r"\\.\pipe\{unique}"))
-            } else {
-                Endpoint::new(dir.join("crowbotd.sock").to_string_lossy().into_owned())
-            };
+            let dir = Scratch::new("crowbot-client-test");
+            let endpoint = dir.endpoint();
             Self {
                 dir,
                 endpoint,
@@ -731,8 +722,8 @@ mod tests {
                 };
                 killed.ok();
             }
+            // The folder, a field, is removed once the daemons are gone.
             std::thread::sleep(Duration::from_millis(100));
-            std::fs::remove_dir_all(&self.dir).ok();
         }
     }
 
@@ -883,7 +874,7 @@ mod tests {
         // A folder is not a database, so the daemon gives up when it opens it.
         launcher
             .args
-            .extend(["--db".into(), scene.dir.clone().into()]);
+            .extend(["--db".into(), scene.dir.to_path_buf().into()]);
         let (connection, mut events) = scene.client_with(Some(launcher));
         let reason = until_failed(&mut events);
         assert!(reason.contains("stopped as soon as it started"), "{reason}");

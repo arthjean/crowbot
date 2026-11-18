@@ -109,6 +109,7 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+    use crate::scratch::Scratch;
     use crate::{ClientMessage, ServerMessage};
 
     fn pair(limit: usize) -> (MessageReader, tokio::io::DuplexStream) {
@@ -162,7 +163,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_and_a_listener_exchange_messages() {
-        let endpoint = test_endpoint();
+        let scratch = Scratch::new("crowbot-transport-test");
+        let endpoint = scratch.endpoint();
         let mut listener = Listener::bind(&endpoint).unwrap();
         let serving = tokio::spawn(async move {
             let (mut reader, mut writer) = listener.accept().await.unwrap();
@@ -200,29 +202,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_listener_on_the_same_endpoint_is_refused() {
-        let endpoint = test_endpoint();
+        let scratch = Scratch::new("crowbot-transport-test");
+        let endpoint = scratch.endpoint();
         let _first = Listener::bind(&endpoint).unwrap();
         assert!(Listener::bind(&endpoint).is_err());
-    }
-
-    fn test_endpoint() -> Endpoint {
-        let unique = format!(
-            "crowbot-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        if cfg!(windows) {
-            Endpoint::new(format!(r"\\.\pipe\{unique}"))
-        } else {
-            Endpoint::new(
-                std::env::temp_dir()
-                    .join(format!("{unique}.sock"))
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
     }
 }

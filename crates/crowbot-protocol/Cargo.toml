@@ -12,6 +12,8 @@ workspace = true
 
 [features]
 transport = ["dep:tokio", "dep:windows-sys", "dep:libc"]
+# Folders for the tests of the daemon and the client (`scratch.rs`).
+scratch = []
 
 [dependencies]
 serde.workspace = true

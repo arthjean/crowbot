@@ -100,7 +100,6 @@ fn a_daemon_that_finds_its_database_locked_does_not_touch_it() {
         "the daemon opened a database another one holds"
     );
     drop(lock);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[tokio::test]
@@ -112,7 +111,6 @@ async fn a_daemon_whose_database_fails_never_claims_its_endpoint() {
     // A folder is not a database.
     let output = run(&dir, &endpoint);
     let said = stderr(&output);
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(output.status.code(), Some(1), "{said}");
     assert!(said.contains("[crowbotd] failed:"), "{said}");
     assert!(!said.contains("endpoint"), "{said}");
@@ -126,7 +124,6 @@ fn a_daemon_on_a_held_endpoint_exits_with_its_own_status() {
     let holder = runtime.block_on(async { Listener::bind(&endpoint).unwrap() });
     let output = run(&dir.join("crowbot.db"), &endpoint);
     drop(holder);
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         output.status.code(),
         Some(i32::from(EXIT_ENDPOINT_HELD)),
@@ -145,7 +142,9 @@ mod unix {
     use std::time::{Duration, Instant};
 
     use crowbot_protocol::transport::Listener;
-    use crowbot_protocol::{EXIT_ENDPOINT_TOO_LONG, Endpoint, SOCKET_PATH_LIMIT};
+    use crowbot_protocol::{
+        EXIT_ENDPOINT_HELD, EXIT_ENDPOINT_TOO_LONG, Endpoint, SOCKET_PATH_LIMIT,
+    };
 
     use crate::support;
 
@@ -205,9 +204,11 @@ mod unix {
             let deadline = Instant::now() + Duration::from_secs(20);
             loop {
                 let said = self.said();
-                if said.contains("listening on")
-                    || self.child.try_wait().unwrap().is_some()
-                    || Instant::now() > deadline
+                // The line is read whole: the daemon may be writing it.
+                let listens = said
+                    .split_inclusive('\n')
+                    .any(|line| line.ends_with('\n') && line.contains("listening on"));
+                if listens || self.child.try_wait().unwrap().is_some() || Instant::now() > deadline
                 {
                     return said;
                 }
@@ -238,6 +239,21 @@ mod unix {
             }
             self.child.wait().ok();
         }
+    }
+
+    /// A socket file that nothing listens on, as a daemon that died leaves
+    /// it. The test waits until it refuses connections: a process that
+    /// another test thread forks at that moment holds the listener until it
+    /// runs its program.
+    fn stale_socket(path: &Path) {
+        drop(std::os::unix::net::UnixListener::bind(path).unwrap());
+        assert!(
+            support::eventually(Duration::from_secs(10), || {
+                std::os::unix::net::UnixStream::connect(path).is_err()
+            }),
+            "the socket still listens"
+        );
+        assert!(path.exists(), "the test left no stale socket");
     }
 
     fn mode(path: &Path) -> u32 {
@@ -296,7 +312,6 @@ mod unix {
         assert!(!home.join("relative").exists());
         drop(daemon);
         assert!(!socket.exists(), "the stopped daemon left its socket");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[cfg(target_os = "linux")]
@@ -323,7 +338,6 @@ mod unix {
         assert_eq!(mode(&data_home.join("crowbot/run")), 0o700);
         assert!(data_home.join("crowbot/crowbot.db").is_file());
         drop(daemon);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -383,7 +397,6 @@ mod unix {
         let said = daemon.listening();
         assert!(said.contains("listening on"), "{said}");
         drop((refused, daemon));
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -414,7 +427,6 @@ mod unix {
             assert_eq!(mode(&beside(&db, suffix)), 0o600, "{suffix}");
         }
         drop(daemon);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -450,16 +462,11 @@ mod unix {
             assert_eq!(mode(&beside(&db, suffix)), 0o600, "{suffix}");
         }
         drop(daemon);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
     fn a_database_folder_of_another_account_is_refused() {
-        // SAFETY: `geteuid` has no preconditions.
-        if unsafe { libc::geteuid() } == 0 {
-            eprintln!(
-                "skipped: as root, the root folder belongs to the account that runs the test"
-            );
+        if support::skipped_as_root("the root folder belongs to the account of the test") {
             return;
         }
         let home = support::test_dir();
@@ -484,20 +491,17 @@ mod unix {
         );
         assert!(!said.contains("listening on"), "{said}");
         drop(daemon);
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn a_stale_socket_is_replaced_under_the_lock() {
         let dir = support::test_dir();
         let path = dir.join("crowbotd.sock");
-        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-        assert!(path.exists(), "the test left no stale socket");
+        stale_socket(&path);
         let endpoint = Endpoint::new(path.to_string_lossy().into_owned());
         let listener = Listener::bind(&endpoint);
         assert!(listener.is_ok(), "{:?}", listener.err());
         drop(listener);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A daemon that holds the lock of a socket may have bound it and not
@@ -506,15 +510,67 @@ mod unix {
     async fn a_held_socket_lock_keeps_the_socket_file() {
         let dir = support::test_dir();
         let path = dir.join("crowbotd.sock");
-        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        stale_socket(&path);
         let lock = std::fs::File::create(dir.join("crowbotd.sock.lock")).unwrap();
         lock.lock().unwrap();
         let endpoint = Endpoint::new(path.to_string_lossy().into_owned());
         let refused = Listener::bind(&endpoint).err().map(|error| error.kind());
         let kept = path.exists();
         drop(lock);
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(refused, Some(std::io::ErrorKind::AddrInUse));
         assert!(kept, "the socket of the lock holder was removed");
+    }
+
+    /// The arguments that start a daemon on its own database, in `home`, and
+    /// on `endpoint`.
+    fn on(home: &Path, endpoint: &Endpoint) -> Vec<std::ffi::OsString> {
+        vec![
+            "--db".into(),
+            home.join("crowbot.db").into(),
+            "--endpoint".into(),
+            endpoint.address().into(),
+        ]
+    }
+
+    fn started(home: &Path, endpoint: &Endpoint) -> Started {
+        let args = on(home, endpoint);
+        let args: Vec<&OsStr> = args.iter().map(std::ffi::OsString::as_os_str).collect();
+        Started::new(home, &[], &args, None)
+    }
+
+    #[test]
+    fn a_daemon_replaces_a_stale_socket_and_listens() {
+        let home = support::test_dir();
+        let endpoint = support::test_endpoint(&home);
+        // A socket file that no program listens on, and whose lock nobody holds.
+        stale_socket(Path::new(endpoint.address()));
+        let mut daemon = started(&home, &endpoint);
+        let said = daemon.listening();
+        assert!(said.contains("listening on"), "{said}");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(support::Client::connect(&endpoint));
+    }
+
+    #[test]
+    fn of_two_daemons_that_start_at_once_on_one_socket_exactly_one_listens() {
+        let endpoint_home = support::test_dir();
+        let endpoint = support::test_endpoint(&endpoint_home);
+        for _ in 0..5 {
+            let homes = [support::test_dir(), support::test_dir()];
+            let mut daemons = [started(&homes[0], &endpoint), started(&homes[1], &endpoint)];
+            let said: Vec<String> = daemons.iter_mut().map(Started::listening).collect();
+            let listening: Vec<usize> = (0..2)
+                .filter(|&index| said[index].contains("listening on"))
+                .collect();
+            assert_eq!(listening.len(), 1, "{said:?}");
+            let other = 1 - listening[0];
+            assert_eq!(
+                daemons[other].exit(),
+                Some(i32::from(EXIT_ENDPOINT_HELD)),
+                "{}",
+                said[other]
+            );
+            drop(daemons);
+        }
     }
 }

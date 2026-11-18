@@ -195,9 +195,7 @@ mod linux {
 
         #[test]
         fn a_compositor_that_does_not_answer_is_named() {
-            let folder =
-                std::env::temp_dir().join(format!("crowbot-display-{}", std::process::id()));
-            std::fs::create_dir_all(&folder).unwrap();
+            let folder = crowbot_protocol::scratch::Scratch::new("crowbot-display");
             let runtime = folder.to_string_lossy().into_owned();
             let error = check(&environment(Some("wayland-gone"), None, &runtime)).unwrap_err();
             assert!(
@@ -212,7 +210,6 @@ mod linux {
                 Ok(())
             );
             drop(listener);
-            std::fs::remove_dir_all(&folder).unwrap();
         }
 
         #[test]

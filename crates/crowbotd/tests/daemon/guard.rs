@@ -91,6 +91,12 @@ fn a_daemon_that_died_before_the_first_check_still_ends_the_agent() {
         .unwrap();
     drop(reader);
     let leader = child.id();
+    // The second is counted from the moment the guard is the daemon's program:
+    // the time the computer takes to start a process is not the guard's.
+    let program = std::fs::canonicalize(env!("CARGO_BIN_EXE_crowbotd")).unwrap();
+    support::eventually(Duration::from_secs(20), || {
+        std::fs::read_link(format!("/proc/{leader}/exe")).map_or(true, |exe| exe == program)
+    });
     let status = exited_within(&mut child, Duration::from_secs(1))
         .expect("the guard still runs a second after it started");
     assert!(!status.success(), "{status}");

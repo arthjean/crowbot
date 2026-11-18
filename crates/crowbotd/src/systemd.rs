@@ -106,15 +106,13 @@ mod tests {
 
     #[test]
     fn the_readiness_message_reaches_a_socket_path_and_an_abstract_name() {
-        let dir = std::env::temp_dir().join(format!("crowbotd-notify-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crowbot_protocol::scratch::Scratch::new("crowbotd-notify");
         let path = dir.join("notify");
         let listener = UnixDatagram::bind(&path).unwrap();
         send(path.as_os_str(), "READY=1").unwrap();
         let mut buffer = [0_u8; 64];
         let length = listener.recv(&mut buffer).unwrap();
         assert_eq!(&buffer[..length], b"READY=1");
-        std::fs::remove_dir_all(&dir).ok();
 
         use std::os::linux::net::SocketAddrExt;
         let name = format!("crowbotd-notify-{}", std::process::id());

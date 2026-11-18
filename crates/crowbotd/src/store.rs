@@ -1615,7 +1615,8 @@ mod tests {
 
     #[test]
     fn opening_twice_keeps_the_data() {
-        let path = std::env::temp_dir().join(format!("crowbot-store-test-{}.db", now_ms()));
+        let dir = crowbot_protocol::scratch::Scratch::new("crowbot-store-test");
+        let path = dir.join("crowbot.db");
         let id = {
             let store = Store::open(&path).unwrap();
             let id = conversation(&store);
@@ -1629,9 +1630,5 @@ mod tests {
             reopened.events(id).unwrap(),
             vec![Event::UserText("kept".to_owned())]
         );
-        drop(reopened);
-        for suffix in ["", "-wal", "-shm"] {
-            std::fs::remove_file(format!("{}{suffix}", path.display())).ok();
-        }
     }
 }

@@ -23,6 +23,10 @@ tar = { version = "0.4.46", default-features = false }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 
+[dev-dependencies]
+crowbot-protocol = { workspace = true, features = ["scratch", "transport"] }
+tokio = { workspace = true, features = ["net"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

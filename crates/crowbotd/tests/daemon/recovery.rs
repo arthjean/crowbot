@@ -23,7 +23,24 @@ async fn a_killed_daemon_keeps_the_text_streamed_until_half_a_second_before() {
     let id = client.new_conversation().await;
     client.say(id, "stream 2000 10").await;
 
+    // The window opens with the first word: the agent may take a while to
+    // start on a busy computer, and the test needs a long enough stream.
     let mut received = Vec::new();
+    let asked = Instant::now();
+    loop {
+        assert!(
+            asked.elapsed() < Duration::from_secs(20),
+            "the stream never started"
+        );
+        if let Some(ServerMessage::ConversationEvent {
+            event: Event::MessageText(text),
+            ..
+        }) = client.next_within(Duration::from_millis(50)).await
+        {
+            received.push((Instant::now(), text));
+            break;
+        }
+    }
     let streaming = Instant::now();
     while streaming.elapsed() < Duration::from_millis(1800) {
         if let Some(ServerMessage::ConversationEvent {
@@ -121,7 +138,11 @@ async fn the_agent_of_a_turn_ends_with_a_daemon_that_crashes() {
     // A deaf agent ignores the end of its input: only its own end stops it.
     client.say(id, "deaf").await;
     client.until_reply("deaf").await;
-    assert!(daemon.heartbeat().is_some());
+    // The agent writes its first heartbeat from a thread of its own, which
+    // may come after the reply.
+    assert!(support::eventually(Duration::from_secs(10), || daemon
+        .heartbeat()
+        .is_some()));
 
     #[cfg(target_os = "linux")]
     assert!(!daemon.agent_processes().is_empty());
