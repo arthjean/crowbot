@@ -1,13 +1,13 @@
 # Provider sign-in: how the daemon reads the state and starts a sign-in
 
-> Status: finding of US-025, amended by US-030 and US-032 on 2026-11-15 (see "What changed since") | Observed on 2026-11-14, Windows 11, Bun 1.4.4
+> Status: finding of US-025, amended by US-030 and US-032 on 2026-11-15 (see "What changed since"), and by EP-005 of the Linux port on 2026-11-18 (see "Linux runs") | Observed on 2026-11-14, Windows 11, Bun 1.4.4
 
 This note answers one question: how can `crowbotd` tell whether a provider is ready, signed out, or missing its runtime, and how can it start the provider's own sign-in without touching a credential. Every line marked "observed" comes from a run on the author's computer. What was not run is listed at the end.
 
 ## Terms
 
-- **Adapter**: the program that speaks the Agent Client Protocol (ACP) for a provider. For Claude it is `@agentclientprotocol/claude-agent-acp`, started through `bunx`.
-- **Runtime**: what must exist on the computer before the adapter can start. For Claude today it is Bun (the `bunx` launcher) and the adapter package.
+- **Adapter**: the program that speaks the Agent Client Protocol (ACP) for a provider. For Claude it is `claude-agent-acp`, from the standalone archive the daemon installs (`crates/crowbotd/src/runtime/pins.rs`). The runs of 2026-11-14 below started it through `bunx`, the launcher of that time.
+- **Runtime**: the files the daemon downloads, checks, and starts for a provider, at a pinned version: for Claude the adapter and the `claude` program it holds, with no Bun or Node.js on the computer. On 2026-11-14 it was Bun (the `bunx` launcher) and the adapter package.
 - **Auth method**: an entry of `authMethods` in the answer to the ACP `initialize` request. A method of type `terminal` is a command the client runs; a method of type `agent` (the default) is handled by the agent through the ACP `authenticate` request.
 
 ## Claude
@@ -20,7 +20,7 @@ One short ACP connection, with no session, answers all three states.
 
 | State | What the daemon does | What it gets (observed) |
 |---|---|---|
-| Runtime missing | Starts `bunx @agentclientprotocol/claude-agent-acp@0.107.0` | The process cannot start. A daemon run with Bun taken out of `PATH` fails the turn of a Claude bot with `Internal error: "program not found"`. |
+| Runtime missing | Started `bunx @agentclientprotocol/claude-agent-acp@0.107.0` (the launcher of that time; see "What changed since") | The process cannot start. A daemon run with Bun taken out of `PATH` fails the turn of a Claude bot with `Internal error: "program not found"`. |
 | Signed in | Sends `initialize` with `clientCapabilities.auth.terminal = true`, then the request `auth/status` with empty parameters | `{"state":"authenticated","accounts":[{"label":"Claude Ultra","active":true,"email":…,"organization":…}]}`, 2.6 s after the process started |
 | Signed out | The same two requests | `{"state":"unauthenticated"}`, 1.9 s after the process started |
 
@@ -67,7 +67,7 @@ The `claude` binary on `PATH` answers the same command the same way (observed).
 
 Limits of the fallback:
 
-- It needs the runtime too: with no Bun it fails like the adapter.
+- It needs the runtime too: when the runtime does not start, it fails like the adapter.
 - It reads the credential store only. It cannot tell an expired or revoked sign-in from a valid one; neither can `auth/status`, whose `authenticated` means "credentials are configured".
 - Its output holds the email and the organization: only the exit status and `loggedIn` may be read.
 - A `claude` found on `PATH` may be another install than the one the adapter runs. The form with `--cli` avoids this.
@@ -114,12 +114,28 @@ US-030 and US-032 changed the method above. The observations above stay as they 
 - **Grok opens no browser over ACP** (observed with Grok 1.0.77 on 2026-11-15). During `authenticate`, it picks a transport (`device` by default, from its remote config; `loopback` when the request carries `_meta.use_oauth`) and waits. It names the page where the person signs in only when the client asks `_x.ai/auth/get_url`, which answers `{"auth_url", "mode"}`; in `device` mode the address already holds the code to confirm. The Grok profile names that request (`sign_in_page`): while the sign-in runs, the daemon asks it, puts the address in the provider's status (`sign_in_url`, never stored), and the window that started the sign-in opens it. Every window shows "Open the page" for it.
 - **How the state is read**, in this order (`probe` in `provider/acp.rs`): the request `auth/status` when the agent advertises it (Claude); else the pushed status update when the agent announces `authStatus` in the `_meta` of its capabilities (Codex); else, for an agent that wants its sign-in named before each session (Grok, method `grok.com`), **signed out** until a sign-in started from Crow Bot ended well, then one `authenticate` request with that method, which the agent accepts or refuses.
 - **Several sign-in methods** are listed to the client by name, and the client starts the one picked. The Codex method `api-key` is not listed: it would need the daemon to hold a key.
+- **On Linux the clients open every sign-in page** (EP-005, `crates/crowbotd/src/sign_in_page.rs`). Observed: under GNOME, `xdg-open` starts the browser in the process group of its caller, so a cancel, which kills the group of the sign-in, killed a browser the sign-in had started. Claude runs `$BROWSER`, else `xdg-open`, in that group; `codex-acp` runs `xdg-open` in a session of its own (the npm package `open` with `detached`); a daemon with no display variable could open nothing, and the address went to an output nobody reads. So while a sign-in runs, its `BROWSER` and the first `xdg-open` on its `PATH` are the daemon's own program, which opens nothing: it passes the address, an `http` or `https` page of at most 8 KB on one line, to the daemon over an abstract socket of that sign-in that only the daemon's account is heard on. The daemon puts it in `sign_in_url`, as for Grok, and the window that started the sign-in opens it in its own session. Windows and macOS keep the browser the agent opens.
+
+## Linux runs (EP-005)
+
+Run on 2026-11-18 on Fedora Linux 45 Workstation, GNOME Shell 51.1 on Wayland, kernel 7.3.4, bubblewrap 0.13.1, Helium as the default browser. Runtimes installed by the daemon: `claude-agent-acp` 0.107.0 with Claude Code 2.1.323, `codex-acp` 2.6.0 on Bun 1.4.4 with `codex-cli` 0.166.0, and Grok 1.0.77.
+
+- **Runtimes.** Every program the three runtimes unpack has its execute bit, Bun from its zip archive included (`claude`, `claude-agent-acp`, `bun`, `codex`, `rg`, `bwrap`, `grok`). Every pinned address of every platform answers with the pinned SHA-256 (the ignored test `every_pinned_address_serves_its_pinned_file`, 24 artifacts in 44 s).
+- **Sign-in from the client, daemon under the systemd unit.** The unit's daemon has `DISPLAY`, `WAYLAND_DISPLAY`, and `XDG_CURRENT_DESKTOP` on GNOME. ChatGPT and Grok were signed in from the client: each page opened in the running browser, the person finished it, and the provider showed as ready. A ChatGPT sign-in that was cancelled, then started again, opened a second page; finishing the first page then still signed in, which matches an authorization that the provider keeps per browser, since no process of the cancelled sign-in was left. Grok gives each sign-in its own device code: only the page of the last sign-in finishes.
+- **Claude** was signed in from a second client, on a daemon of its own with an empty `CLAUDE_CONFIG_DIR`, so that the author's own `~/.claude` stayed as it was (the profile still shares it, an open decision of `AGENTS.md`). With the browser closed, the sign-in opened it; a cancel left it open, in the process group of the client and not of the sign-in; a second sign-in finished, and Claude showed as ready.
+- **No display.** On a daemon started with no `DISPLAY` and no `WAYLAND_DISPLAY`, the sign-ins of Claude, ChatGPT, and Grok each put their address (`claude.com/cai/oauth/authorize`, `auth.openai.com/oauth/authorize`, `accounts.x.ai/oauth2/device`) in the provider's status, and a cancel ended each one.
+- **Files.** After the sign-ins, `auth.json` of Codex and of Grok is 0600 under `<data>/providers/<id>/home`, in folders that are 0700; the files the agents write beside it with the user's umask stay in those folders. The daemon reads no file of those homes: it writes `config.toml` and removes the listed layers.
+- **Turns** (US-021), each on a bot that asks first, unless noted. A write declined leaves no file and records the declined request; a write allowed once is written, and the next write of the same turn asks again; a bot on Full access is allowed once by the daemon, which records `permission_level`. All three held for Claude, ChatGPT, and Grok. Codex ran a shell command under `bwrap --as-pid-1 --new-session --die-with-parent --ro-bind / / …` and `codex-linux-sandbox`, from the system's `bwrap`. With the author's own `~/.codex` at `approval_policy = "never"` and `sandbox_mode = "danger-full-access"`, a Claude config whose `settings.json` allows every tool in `bypassPermissions`, and a home whose `.grok/config.toml` sets `yolo = true`, every write still asked.
+- **No user namespaces.** In a user namespace whose limit of new user namespaces is 0 and with no capability, as on a computer that disables them, `bwrap` fails with "Creating new namespace failed: Operation not permitted". The daemon starts the `bwrap` Codex picks once before each Codex session, and the turn fails with "ChatGPT's sandbox needs user namespaces, which this computer disables (…)" (`codex::check_sandbox`, test `a_codex_turn_on_a_computer_without_user_namespaces_names_the_cause`).
 
 ## Not run
 
-- A Claude sign-in carried to its end. It needs a person in the browser. The start, the browser opening, and the wait were observed; the exit status 0 after approval is what the ACP schema states for `terminal` methods.
-- The sign-in on a computer with no browser. The link printed for that case expects a code pasted into a terminal, which a hidden process does not have. It belongs to the servers PRD.
+- A Claude sign-in carried to its end on Windows. It was carried to its end on Linux (see "Linux runs").
+- A Claude sign-in into the author's own `~/.claude` from Crow Bot: it would replace the credential the author's other Claude sessions use.
+- The sign-in on a computer with no browser at all, such as a server. On Linux the client opens the page; a page whose last step redirects to `localhost` must then be on the computer of the daemon. It belongs to the servers PRD.
+- A sign-in stopped by its timeout of 10 minutes. It ends the same way as a cancel (`wait_for_sign_in`).
+- KDE: whether the unit's daemon gets the display variables there. The page no longer depends on them, since the client opens it.
 - The push of `auth/status_update` at the start of each prompt, described in the adapter's source (`dist/auth-status.js`).
 - A state where the adapter answers `unknown`.
-- Codex and Grok: a sign-in carried to its end in the home of the daemon, and a real turn after it. Both need a person in the browser. The flow is tested with the scripted agent (`crates/crowbotd/tests/daemon/providers.rs`).
-- macOS and Linux.
+- Codex and Grok on Windows: a sign-in carried to its end in the home of the daemon, and a real turn after it. Both were run on Linux (see "Linux runs").
+- macOS.
