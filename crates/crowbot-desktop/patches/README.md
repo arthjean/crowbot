@@ -73,7 +73,18 @@ with upstream's at the new rev, since it is written out by hand.
 
 ## Upstream
 
-The changes are written to be offered to Zed (issues 58287, 61660, and 51171
-were closed with no fix). They are not offered yet: that needs the owner's go.
-When Zed takes one, it leaves the diff at the next rev bump, and the copy goes
-when the diff is empty.
+Zed tracks the emoji problem as #42255 (open, labeled `meta:upstream`);
+#58287, #61660, and #51171 were closed as its duplicates or as done, and
+`main` at `5b282ac` (2026-11-18) still has none of these changes. In
+cosmic-text it is pop-os/cosmic-text#446, and in swash dfrg/swash#21, both
+open; Linebender points to `glifo` (linebender/vello) as the coming
+rasterizer on skrifa, not ready yet.
+
+The changes are ported to Zed's `main` as three stacked branches of the
+local clone, each with its tests and test fonts (`crates/gpui_wgpu/test_fonts`):
+`gpui-fallback-families`, then `gpui-colrv1-emoji`, then
+`gpui-emoji-presentation`. On `main` the port uses skrifa 0.37, the version
+swash already pulls in. Zed's contribution policy accepts no pull request
+from an autonomous agent and asks the author to test by hand and to write
+the description: the owner opens them. When Zed takes one, it leaves the
+diff at the next rev bump, and the copy goes when the diff is empty.
