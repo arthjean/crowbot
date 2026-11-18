@@ -3,7 +3,7 @@
 //! it lists. A sign-in is the provider's own: the daemon starts it and reads
 //! whether it ended well, and nothing else.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,6 +66,9 @@ enum Source {
     NotInstalled(RuntimeSpec),
     /// No runtime is pinned for this computer, and the user set no executable.
     Unsupported,
+    /// The folder of the runtimes is on a file system mounted `noexec`, so no
+    /// runtime can start, and none is downloaded.
+    Refused(PathBuf),
 }
 
 fn launch_of(installed: Installed) -> Launch {
@@ -79,6 +82,14 @@ fn launch_of(installed: Installed) -> Launch {
 fn unsupported(name: &str) -> String {
     format!(
         "Crow Bot installs no {name} runtime on this computer. Set the path of its executable in the settings."
+    )
+}
+
+/// Why no runtime can start: its folder is on a file system mounted `noexec`.
+fn refused_programs(name: &str, folder: &Path) -> String {
+    format!(
+        "The folder of the runtimes does not allow running programs (noexec): {}. Start the daemon with --data-dir elsewhere, or set the path of the {name} executable in the settings.",
+        folder.display()
     )
 }
 
@@ -181,6 +192,9 @@ impl Daemon {
                 Launch::of(PathBuf::from(executable)).with(profile),
             ));
         }
+        if let Some(folder) = self.runtimes.refusing_programs() {
+            return Ok(Source::Refused(folder.to_owned()));
+        }
         if let Some(installed) = self.runtimes.installed(id) {
             return Ok(Source::Installed(launch_of(installed).with(profile)));
         }
@@ -209,6 +223,12 @@ impl Daemon {
             Source::Installed(launch) => self.verified(id).await.ok().map(|()| launch),
             Source::NotInstalled(_) => None,
             Source::Unsupported => return Err(SessionFailure::plain(unsupported(profile.name))),
+            Source::Refused(folder) => {
+                return Err(SessionFailure::plain(refused_programs(
+                    profile.name,
+                    &folder,
+                )));
+            }
         };
         let launch = match ready {
             Some(launch) => launch,
@@ -294,6 +314,7 @@ impl Daemon {
             // it can then be installed again.
             Source::Ready(_) | Source::Installed(_) => return self.check_provider(id),
             Source::Unsupported => return Err(unsupported(profile.name)),
+            Source::Refused(folder) => return Err(refused_programs(profile.name, &folder)),
             Source::NotInstalled(_) => {}
         }
         let daemon = self.clone();
@@ -395,6 +416,13 @@ impl Daemon {
             entry.status.executable.clone_from(&setting.executable);
             entry.status.runtime = runtime;
             let launch = match source {
+                Source::Refused(folder) => {
+                    entry.rest(
+                        ProviderState::RuntimeMissing,
+                        refused_programs(profile.name, &folder),
+                    );
+                    None
+                }
                 Source::Ready(launch) => {
                     entry.status.checking = true;
                     Some((launch, false))
@@ -565,6 +593,7 @@ impl Daemon {
                     Source::NotInstalled(_) | Source::Unsupported => {
                         return Err(format!("The {name} runtime is not installed."));
                     }
+                    Source::Refused(folder) => return Err(refused_programs(&name, &folder)),
                 };
                 let named = self.clone();
                 let on_page = move |page: String| named.sign_in_page(id, page);
@@ -719,6 +748,7 @@ impl Daemon {
                 return Err(format!("The {name} runtime is not installed yet."));
             }
             Source::Unsupported => return Err(unsupported(name)),
+            Source::Refused(folder) => return Err(refused_programs(name, &folder)),
         };
         let folder = self.data_dir.join("providers").join(id).join("models");
         profile

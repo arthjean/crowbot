@@ -580,6 +580,88 @@ async fn an_executable_the_user_set_runs_in_place_of_the_runtime() {
     assert_eq!(cleared.state, ProviderState::NotInstalled);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_runtime_folder_mounted_noexec_fails_the_turn_and_names_the_option() {
+    let publisher = Publisher::start(Duration::ZERO);
+    let runtime = runtime();
+    let manifest = manifest(publisher.port, &sha256(&runtime), runtime.len());
+    let Some(daemon) =
+        Daemon::start_with_providers_confined(&manifest, support::Confinement::NoexecRuntimes)
+    else {
+        eprintln!("skipped: this computer allows no user namespace to mount a noexec folder in");
+        return;
+    };
+    let mut client = daemon.client().await;
+    let status = providers(&mut client)
+        .await
+        .into_iter()
+        .find(|status| status.id == CLAUDE)
+        .unwrap();
+    let status = if status.checking || status.state == ProviderState::Unknown {
+        client
+            .until(|message| match message {
+                ServerMessage::ProviderChanged(status)
+                    if status.id == CLAUDE && !status.checking =>
+                {
+                    Some(status)
+                }
+                _ => None,
+            })
+            .await
+    } else {
+        status
+    };
+    assert_eq!(status.state, ProviderState::RuntimeMissing);
+    assert!(status.detail.unwrap().contains("(noexec)"));
+
+    let conversation = claude_bot(&mut client).await;
+    let refused = turn(&mut client, conversation, "say caw").await;
+    let (message, provider) = failure(&refused);
+    assert!(
+        message
+            .starts_with("The folder of the runtimes does not allow running programs (noexec): "),
+        "{message}"
+    );
+    assert_eq!(provider, Some(CLAUDE));
+    // Nothing was downloaded onto a folder where it could not run.
+    assert_eq!(publisher.requests(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_executable_with_no_execute_bit_is_not_found_and_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+    let publisher = Publisher::start(Duration::ZERO);
+    let daemon = daemon(&publisher);
+    let mut client = daemon.client().await;
+    let own = daemon.folder("own").join(program());
+    std::fs::copy(support::fake_agent(), &own).unwrap();
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o644)).unwrap();
+    client
+        .send(ClientMessage::SetProviderExecutable {
+            provider: CLAUDE.to_owned(),
+            path: Some(own.to_string_lossy().into_owned()),
+        })
+        .await;
+    let status = client
+        .until(|message| match message {
+            ServerMessage::ProviderChanged(status)
+                if status.id == CLAUDE && status.executable.is_some() && !status.checking =>
+            {
+                Some(status)
+            }
+            _ => None,
+        })
+        .await;
+    assert_eq!(status.state, ProviderState::RuntimeMissing);
+    let detail = status.detail.unwrap();
+    assert!(
+        detail.contains("was not found") && detail.contains("no execute permission"),
+        "{detail}"
+    );
+}
+
 #[tokio::test]
 async fn a_runtime_can_be_installed_before_the_first_turn() {
     let publisher = Publisher::start(Duration::ZERO);

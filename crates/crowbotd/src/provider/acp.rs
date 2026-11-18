@@ -149,34 +149,71 @@ impl Launch {
         )
     }
 
-    /// Whether the system would find the program: a path as it is written, a
-    /// bare name in the folders of `PATH` and next to the daemon.
-    pub fn program_exists(&self) -> bool {
+    /// Why the system would not start the program, or `None` when it would
+    /// find it: a path as it is written, a bare name in the folders of `PATH`
+    /// and next to the daemon. On Unix a file with no execute bit is skipped,
+    /// as the system skips it, and named when no other file is found.
+    pub fn program_missing(&self) -> Option<String> {
         let program = self.program.as_path();
-        let named = |folder: &Path| {
+        let mut not_runnable = None;
+        let mut found = |folder: &Path| {
             let path = folder.join(program);
-            path.is_file()
-                || (cfg!(windows)
-                    && path.extension().is_none()
-                    && path.with_extension("exe").is_file())
+            let windows_exe =
+                (cfg!(windows) && path.extension().is_none()).then(|| path.with_extension("exe"));
+            [Some(path), windows_exe]
+                .into_iter()
+                .flatten()
+                .filter(|path| path.is_file())
+                .any(|path| {
+                    let runs = runnable(&path);
+                    if !runs {
+                        not_runnable.get_or_insert(path);
+                    }
+                    runs
+                })
         };
-        if program.components().count() > 1 {
-            return named(Path::new(""));
+        let exists = if program.components().count() > 1 {
+            found(Path::new(""))
+        } else {
+            let path = self
+                .env
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+                .map(|(_, value)| value.into())
+                .or_else(|| std::env::var_os("PATH"))
+                .unwrap_or_default();
+            let beside = std::env::current_exe()
+                .ok()
+                .and_then(|daemon| daemon.parent().map(Path::to_owned));
+            std::env::split_paths(&path)
+                .chain(beside)
+                .any(|folder| found(&folder))
+        };
+        if exists {
+            return None;
         }
-        let path = self
-            .env
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
-            .map(|(_, value)| value.into())
-            .or_else(|| std::env::var_os("PATH"))
-            .unwrap_or_default();
-        let beside = std::env::current_exe()
-            .ok()
-            .and_then(|daemon| daemon.parent().map(Path::to_owned));
-        std::env::split_paths(&path)
-            .chain(beside)
-            .any(|folder| named(&folder))
+        let program = self.program.display();
+        Some(match not_runnable {
+            Some(path) => format!(
+                "The program `{program}` was not found on this computer: no execute permission on {}.",
+                path.display()
+            ),
+            None => format!("The program `{program}` was not found on this computer."),
+        })
     }
+}
+
+/// Whether a file may run as a program: on Unix, one of its execute bits is
+/// set.
+#[cfg(unix)]
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn runnable(_path: &Path) -> bool {
+    true
 }
 
 fn client_info() -> Implementation {
@@ -335,14 +372,8 @@ async fn asked_status(connection: &ConnectionTo<Agent>) -> Status {
 /// tells that a sign-in started from the daemon ended well: an agent that
 /// reports nothing is then asked to accept the sign-in it holds.
 pub async fn probe(profile: &AgentProfile, launch: &Launch, signed_in: bool) -> Probe {
-    if !launch.program_exists() {
-        return Probe::without_answer(
-            ProviderState::RuntimeMissing,
-            format!(
-                "The program `{}` was not found on this computer.",
-                launch.program.display()
-            ),
-        );
+    if let Some(missing) = launch.program_missing() {
+        return Probe::without_answer(ProviderState::RuntimeMissing, missing);
     }
     let (pushed, mut pushes) = tokio::sync::mpsc::unbounded_channel();
     let session_auth = profile.session_auth;
@@ -1295,6 +1326,47 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_with_no_execute_bit_is_skipped_on_the_path_and_named_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crowbot_protocol::scratch::Scratch::new("crowbotd-program");
+        let (plain, runs) = (root.join("plain"), root.join("runs"));
+        for (folder, mode) in [(&plain, 0o644), (&runs, 0o755)] {
+            std::fs::create_dir_all(folder).unwrap();
+            let program = folder.join("agent");
+            std::fs::write(&program, "").unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let on_path = |folders: &[&Path]| {
+            let mut launch = Launch::of(PathBuf::from("agent"));
+            let path = std::env::join_paths(folders).unwrap();
+            launch
+                .env
+                .insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+            launch.program_missing()
+        };
+        assert_eq!(on_path(&[&plain, &runs]), None);
+        let missing = on_path(&[&plain]).unwrap();
+        assert!(missing.contains("was not found"), "{missing}");
+        assert!(
+            missing.contains(&format!(
+                "no execute permission on {}",
+                plain.join("agent").display()
+            )),
+            "{missing}"
+        );
+        assert_eq!(Launch::of(runs.join("agent")).program_missing(), None);
+        assert!(
+            Launch::of(plain.join("agent"))
+                .program_missing()
+                .unwrap()
+                .contains("no execute permission")
+        );
+        let nowhere = Launch::of(root.join("none")).program_missing().unwrap();
+        assert!(!nowhere.contains("permission"), "{nowhere}");
+    }
 
     fn request(kinds: &[PermissionOptionKind]) -> RequestPermissionRequest {
         let options = kinds

@@ -157,6 +157,31 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
     command
 }
 
+/// The same command, run in a user namespace of its own under `confinement`:
+/// `runtimes` is the folder mounted `noexec`.
+fn confined(command: Command, runtimes: &Path, confinement: Confinement) -> Command {
+    let script = match confinement {
+        Confinement::NoexecRuntimes => {
+            r#"mkdir -p "$0" && mount -t tmpfs -o noexec,mode=0700 tmpfs "$0" && exec "$@""#
+        }
+    };
+    let mut wrapped = Command::new("unshare");
+    wrapped
+        .args(["--user", "--map-root-user", "--mount", "sh", "-c", script])
+        .arg(runtimes)
+        .arg(command.get_program())
+        .args(command.get_args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    for (name, value) in command.get_envs() {
+        match value {
+            Some(value) => wrapped.env(name, value),
+            None => wrapped.env_remove(name),
+        };
+    }
+    wrapped
+}
+
 /// Runs a daemon that is expected to exit on its own.
 pub fn run_daemon(dir: &Path, endpoint: &Endpoint) -> Output {
     let agent = Agent::Scripted {
@@ -173,6 +198,17 @@ pub struct Daemon {
     endpoint: Endpoint,
     child: Option<Child>,
     agent: Agent,
+    /// The daemon runs in a user namespace of its own, which takes something
+    /// from it.
+    confinement: Option<Confinement>,
+}
+
+/// What a daemon in a user namespace of its own goes without. Its account
+/// maps to the test's.
+#[derive(Clone, Copy)]
+pub enum Confinement {
+    /// The folder of its runtimes is a file system mounted `noexec`.
+    NoexecRuntimes,
 }
 
 impl Daemon {
@@ -224,6 +260,29 @@ impl Daemon {
         daemon
     }
 
+    /// The daemon of `start_with_providers`, run in a user namespace of its
+    /// own under `confinement`; `None` when this computer cannot make one.
+    #[cfg(target_os = "linux")]
+    pub fn start_with_providers_confined(
+        manifest: &serde_json::Value,
+        confinement: Confinement,
+    ) -> Option<Self> {
+        let scratch = test_dir();
+        let probe = confined(Command::new("true"), &scratch.join("runtimes"), confinement)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !probe.is_ok_and(|status| status.success()) {
+            return None;
+        }
+        let mut daemon = Self::stopped(Agent::Providers(&[]));
+        daemon.confinement = Some(confinement);
+        std::fs::write(daemon.dir.join("manifest.json"), manifest.to_string()).unwrap();
+        daemon.spawn();
+        Some(daemon)
+    }
+
     /// The folder the daemon keeps its runtimes and the files of providers in.
     pub fn data_dir(&self) -> &Path {
         &self.dir
@@ -254,6 +313,7 @@ impl Daemon {
             endpoint,
             child: None,
             agent,
+            confinement: None,
         }
     }
 
@@ -281,12 +341,11 @@ impl Daemon {
             .append(true)
             .open(self.dir.join("daemon.log"))
             .unwrap();
-        self.child = Some(
-            daemon_command(&self.dir, &self.endpoint, self.agent)
-                .stderr(log)
-                .spawn()
-                .unwrap(),
-        );
+        let mut command = daemon_command(&self.dir, &self.endpoint, self.agent);
+        if let Some(confinement) = self.confinement {
+            command = confined(command, &self.dir.join("runtimes"), confinement);
+        }
+        self.child = Some(command.stderr(log).spawn().unwrap());
     }
 
     /// The endpoint the daemon listens on.

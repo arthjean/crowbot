@@ -574,3 +574,53 @@ mod unix {
         }
     }
 }
+
+/// Runs the daemon with `args` alone, with no database or endpoint given.
+fn command_line(args: &[&str]) -> Output {
+    let dir = support::test_dir();
+    Command::new(env!("CARGO_BIN_EXE_crowbotd"))
+        .args(args)
+        // A daemon that started by mistake would put nothing in the user's
+        // own folders.
+        .env("HOME", dir.join("home"))
+        .env("XDG_DATA_HOME", dir.join("data"))
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn the_version_and_the_usage_print_on_standard_output() {
+    let output = command_line(&["--version"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("crowbotd {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
+    for flag in ["--help", "-h"] {
+        let output = command_line(&[flag]);
+        assert_eq!(output.status.code(), Some(0), "{flag}");
+        let usage = String::from_utf8(output.stdout).unwrap();
+        assert!(usage.starts_with("usage: crowbotd"), "{usage}");
+        assert!(usage.contains("Exit status:"), "{usage}");
+        assert!(output.stderr.is_empty(), "{flag}");
+    }
+}
+
+#[test]
+fn a_wrong_argument_exits_2_on_the_error_stream() {
+    for args in [&["--no-such-flag"][..], &["--db"][..]] {
+        let output = command_line(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(!output.stderr.is_empty(), "{args:?}");
+    }
+    let error = String::from_utf8(command_line(&["--no-such-flag"]).stderr).unwrap();
+    assert!(
+        error.starts_with("unexpected argument: --no-such-flag"),
+        "{error}"
+    );
+    assert!(error.contains("usage: crowbotd"), "{error}");
+}

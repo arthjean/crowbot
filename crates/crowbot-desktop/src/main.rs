@@ -42,12 +42,20 @@ use crate::workspace::Workspace;
 
 const USAGE: &str =
     "usage: crowbot [--endpoint <address>] [--daemon <path>] [-- <daemon arguments>]
+       crowbot --help | --version
 
 The client attaches to the daemon on the endpoint. When none listens, it starts
 `crowbotd` from the folder of its own executable, or from --daemon <path>, and
 passes it the endpoint and the arguments that follow `--`. On Linux, with none of
 these options and the systemd user unit crowbotd.service installed, it asks the
 user's systemd to start that unit instead.";
+
+/// What the arguments ask for: a window to open, or a text to print.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Run(Args),
+    Print(String),
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Args {
@@ -56,7 +64,7 @@ struct Args {
     daemon_args: Vec<OsString>,
 }
 
-fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
+fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = Args::default();
     while let Some(arg) = raw.next() {
         match arg.as_str() {
@@ -72,11 +80,17 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
                 args.daemon_args = raw.map(OsString::from).collect();
                 break;
             }
-            "--help" | "-h" => return Err(USAGE.to_owned()),
+            "--help" | "-h" => return Ok(Command::Print(USAGE.to_owned())),
+            "--version" | "-V" => {
+                return Ok(Command::Print(format!(
+                    "crowbot {}",
+                    env!("CARGO_PKG_VERSION")
+                )));
+            }
             _ => return Err(format!("unexpected argument: {arg}\n\n{USAGE}")),
         }
     }
-    Ok(args)
+    Ok(Command::Run(args))
 }
 
 /// How to start the daemon that serves `endpoint`, when its binary and a place
@@ -122,7 +136,11 @@ fn window_options(bounds: Bounds<Pixels>, x11: bool) -> WindowOptions {
 
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(args) => args,
+        Ok(Command::Run(args)) => args,
+        Ok(Command::Print(text)) => {
+            println!("{text}");
+            return ExitCode::SUCCESS;
+        }
         Err(message) => {
             eprintln!("{message}");
             return ExitCode::from(2);
@@ -196,7 +214,10 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Args, String> {
-        parse_args(args.iter().map(|arg| (*arg).to_owned()))
+        match parse_args(args.iter().map(|arg| (*arg).to_owned()))? {
+            Command::Run(args) => Ok(args),
+            Command::Print(text) => Err(text),
+        }
     }
 
     #[test]

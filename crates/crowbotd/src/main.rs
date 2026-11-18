@@ -33,6 +33,7 @@ use crate::store::{SharedStore, Store};
 const USAGE: &str =
     "usage: crowbotd [--db <path>] [--bots-dir <dir>] [--data-dir <dir>] [--agent <command>]
                 [--runtime-manifest <file>] [--endpoint <address>]
+       crowbotd --help | --version
 
 The daemon listens on a local endpoint and serves Crow Bot clients until it is stopped.
 SIGTERM, SIGINT, or SIGHUP stops it: the running turns end, then it exits with
@@ -50,6 +51,12 @@ Exit status: 1 when the daemon cannot start, 2 for a wrong argument, 3 when anot
 crowbotd uses the database, 4 when another program holds the endpoint, 5 when the
 path of the socket is too long.";
 
+/// What the arguments ask for: a daemon to run, or a text to print.
+enum Command {
+    Run(Args),
+    Print(String),
+}
+
 struct Args {
     db: Option<PathBuf>,
     bots_dir: Option<PathBuf>,
@@ -59,7 +66,7 @@ struct Args {
     endpoint: Option<Endpoint>,
 }
 
-fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
+fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = Args {
         db: None,
         bots_dir: None,
@@ -92,11 +99,16 @@ fn parse_args(mut raw: impl Iterator<Item = String>) -> Result<Args, String> {
                     raw.next().ok_or("--endpoint needs an address")?,
                 ));
             }
-            "--help" | "-h" => return Err(USAGE.to_owned()),
+            "--help" | "-h" => return Ok(Command::Print(USAGE.to_owned())),
+            "--version" | "-V" => return Ok(Command::Print(version())),
             _ => return Err(format!("unexpected argument: {arg}\n\n{USAGE}")),
         }
     }
-    Ok(args)
+    Ok(Command::Run(args))
+}
+
+fn version() -> String {
+    format!("crowbotd {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Where the bots that were given no folder get one of their own.
@@ -296,6 +308,17 @@ fn main() -> ExitCode {
             return lifetime::guard(raw);
         }
     }
+    let args = match parse_args(std::env::args().skip(1)) {
+        Ok(Command::Run(args)) => args,
+        Ok(Command::Print(text)) => {
+            println!("{text}");
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::from(2);
+        }
+    };
     // Before any process starts: each one is then bound to the daemon.
     if let Err(error) = lifetime::bind_children() {
         eprintln!("[crowbotd] the agents will not end with the daemon: {error}");
@@ -310,20 +333,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let status = runtime.block_on(serve());
+    let status = runtime.block_on(serve(args));
     // A task that still blocks a thread does not hold the exit back.
     runtime.shutdown_timeout(Duration::from_millis(500));
     status
 }
 
-async fn serve() -> ExitCode {
-    let args = match parse_args(std::env::args().skip(1)) {
-        Ok(args) => args,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::from(2);
-        }
-    };
+async fn serve(args: Args) -> ExitCode {
     let (message, status) = match run(args).await {
         Ok(()) => return ExitCode::SUCCESS,
         Err(StartError::Failed(message)) => (message, ExitCode::FAILURE),

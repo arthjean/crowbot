@@ -179,6 +179,13 @@ impl Runtimes {
         Ok(manifest)
     }
 
+    /// The folder of the runtimes, when the file system that holds it does
+    /// not let programs run (mounted `noexec`): no runtime could start there,
+    /// so none is downloaded or started.
+    pub fn refusing_programs(&self) -> Option<&Path> {
+        refuses_programs(&self.root).then_some(self.root.as_path())
+    }
+
     pub fn spec(&self, provider: &str) -> Option<RuntimeSpec> {
         match &self.manifest {
             Some(manifest) => manifest.get(provider).cloned(),
@@ -422,6 +429,33 @@ fn make_executable(path: &Path) -> std::io::Result<()> {
 #[allow(clippy::unnecessary_wraps)]
 fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Whether the file system of `path`, or of the nearest folder above it that
+/// exists, is mounted `noexec`.
+#[cfg(target_os = "linux")]
+fn refuses_programs(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Some(folder) = path.ancestors().find(|folder| folder.exists()) else {
+        return false;
+    };
+    let Ok(name) = std::ffi::CString::new(folder.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: `name` is a C string that lives through the call, and `stat`
+    // has room for the `statvfs` that the call fills.
+    if unsafe { libc::statvfs(name.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: the call succeeded, so it filled `stat`.
+    let stat = unsafe { stat.assume_init() };
+    stat.f_flag & libc::ST_NOEXEC != 0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn refuses_programs(_path: &Path) -> bool {
+    false
 }
 
 /// A path of the manifest, kept inside the folder it is relative to.
@@ -790,6 +824,102 @@ mod tests {
             BODY
         );
         assert!(first.verify("claude").is_ok());
+    }
+
+    /// Downloads each artifact of `specs` once and names every one that its
+    /// address does not serve as pinned: no answer, another size, or another
+    /// SHA-256. Four downloads run at a time, each removed once checked.
+    async fn unserved(specs: Vec<(String, RuntimeSpec)>, folder: &Path) -> Vec<String> {
+        let mut artifacts = BTreeMap::new();
+        for (label, spec) in specs {
+            for artifact in spec.artifacts {
+                artifacts
+                    .entry(artifact.url.clone())
+                    .or_insert((label.clone(), artifact));
+            }
+        }
+        let slots = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut downloads = tokio::task::JoinSet::new();
+        for (index, (label, artifact)) in artifacts.into_values().enumerate() {
+            let (slots, download) = (slots.clone(), folder.join(format!("{index}.download")));
+            downloads.spawn(async move {
+                let _slot = slots.acquire_owned().await.ok();
+                let quiet: Progress = Arc::new(|_, _| {});
+                let fetched = fetch(&artifact, &download, 0, artifact.bytes, &quiet).await;
+                tokio::fs::remove_file(&download).await.ok();
+                fetched
+                    .err()
+                    .map(|error| format!("{label}: {} ({error})", artifact.url))
+            });
+        }
+        let mut failures: Vec<String> = downloads.join_all().await.into_iter().flatten().collect();
+        failures.sort();
+        failures
+    }
+
+    fn every_pin() -> Vec<(String, RuntimeSpec)> {
+        ["claude", "codex", "grok"]
+            .into_iter()
+            .flat_map(|provider| {
+                pins::PLATFORMS.into_iter().filter_map(move |platform| {
+                    pins::spec_for(provider, platform)
+                        .map(|spec| (format!("{provider} {platform}"), spec))
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "downloads every pinned artifact of every platform (about 3 GB)"]
+    async fn every_pinned_address_serves_its_pinned_file() {
+        let root = folder("pins");
+        let failures = unserved(every_pin(), &root).await;
+        assert!(
+            failures.is_empty(),
+            "{} pinned artifact(s) are not served as pinned:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_check_of_the_pins_names_an_address_that_is_silent_or_serves_another_file() {
+        const BODY: &[u8] = &[7; 4096];
+        let (url, _) = publisher(BODY);
+        let silent = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/agent", listener.local_addr().unwrap());
+            drop(listener);
+            url
+        };
+        let pinned = |url: &str, sha256: String| RuntimeSpec {
+            artifacts: vec![Artifact {
+                url: url.to_owned(),
+                sha256,
+                bytes: BODY.len() as u64,
+                unpack: Unpack::File,
+                into: String::new(),
+                file: Some("agent".to_owned()),
+            }],
+            ..spec("agent")
+        };
+        let good = hex(&Sha256::digest(BODY));
+        let root = folder("check-pins");
+        let specs = vec![
+            ("served".to_owned(), pinned(&url, good.clone())),
+            ("silent".to_owned(), pinned(&silent, good)),
+            (
+                "changed".to_owned(),
+                pinned(&format!("{url}?changed"), "0".repeat(64)),
+            ),
+        ];
+        let failures = unserved(specs, &root).await;
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(failures[0].starts_with("changed: "), "{failures:?}");
+        assert!(failures[0].contains("the pinned value is"), "{failures:?}");
+        assert!(failures[1].starts_with("silent: "), "{failures:?}");
+        assert!(failures[1].contains("cannot be reached"), "{failures:?}");
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
     }
 
     #[test]
