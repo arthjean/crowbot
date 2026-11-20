@@ -3,6 +3,8 @@ mod chrome;
 mod conversation;
 mod providers;
 mod setup;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use crowbot_protocol::{
     Appearance, BotPatch, BotState, BotSummary, ClientMessage, ConversationSnapshot,

@@ -1213,6 +1213,30 @@ mod tests {",
         );
     }
 
+    /// The stacks Windows drew with before the Linux port, family by family.
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn windows_keeps_the_font_stacks_it_had_before_the_linux_port(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| font::init(cx));
+        let stack = |font: Font| {
+            let mut stack = vec![font.family.to_string()];
+            stack.extend(font.fallbacks.unwrap().fallback_list().iter().cloned());
+            stack
+        };
+        assert_eq!(
+            stack(font::sans()),
+            ["Inter", ".SystemUIFont", "Segoe UI", "Noto Sans Arabic"]
+        );
+        assert_eq!(
+            stack(font::mono()),
+            ["Consolas", "SF Mono", "Menlo", "Consolas", "monospace"]
+        );
+        assert_eq!(
+            stack(font::window_glyphs()),
+            ["Segoe Fluent Icons", "Segoe MDL2 Assets"]
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_names_its_own_families_and_no_segoe_one() {

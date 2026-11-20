@@ -624,3 +624,81 @@ fn a_wrong_argument_exits_2_on_the_error_stream() {
     );
     assert!(error.contains("usage: crowbotd"), "{error}");
 }
+
+/// Windows keeps the folders and the endpoint it had before the Linux port:
+/// everything in `~/.crowbot`, the bots in `~/CrowBot/Bots`, and the pipe of
+/// the user's name.
+#[cfg(windows)]
+mod windows {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    use crowbot_protocol::{ClientMessage, Endpoint, ServerMessage};
+
+    use crate::support::{self, Client};
+
+    /// A daemon started with no flag, as the client starts the default one.
+    /// It ends with the test.
+    struct Started(std::process::Child);
+
+    impl Drop for Started {
+        fn drop(&mut self) {
+            self.0.kill().ok();
+            self.0.wait().ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn with_no_flag_the_daemon_keeps_its_files_in_the_home_folder_and_listens_on_the_pipe_of_the_user()
+     {
+        let home = support::test_dir();
+        // A home folder and a user name of the test: the daemon reads both
+        // from the environment, as `std::env::home_dir` and the pipe do.
+        let user = format!("crowbot-test-{}", std::process::id());
+        let log = home.join("daemon.log");
+        let daemon = Started(
+            Command::new(env!("CARGO_BIN_EXE_crowbotd"))
+                .env("USERPROFILE", home.path())
+                .env("USERNAME", &user)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap())
+                .spawn()
+                .unwrap(),
+        );
+        let endpoint = Endpoint::new(format!(r"\\.\pipe\crowbotd-{user}"));
+        let mut client = Client::connect(&endpoint).await;
+
+        let folder = home.join(".crowbot");
+        client.send(ClientMessage::GetDaemonInfo).await;
+        let info = client
+            .until(|message| match message {
+                ServerMessage::DaemonInfo(info) => Some(info),
+                _ => None,
+            })
+            .await;
+        assert_eq!(Path::new(&info.database), folder.join("crowbot.db"));
+        // Lingering is systemd's: it means nothing on Windows.
+        assert_eq!(info.linger, None);
+        for file in ["crowbot.db", "crowbot.db.lock", "crowbot.db.owner"] {
+            assert!(folder.join(file).is_file(), "{file}");
+        }
+
+        let bot = client.new_bot("Paths").await;
+        assert_eq!(
+            Path::new(&bot.bot.workspace),
+            home.join("CrowBot").join("Bots").join("paths")
+        );
+
+        // Nothing goes in the XDG folders of Linux, or anywhere else.
+        let mut entries: Vec<String> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [".crowbot", "CrowBot", "daemon.log"]);
+        drop(daemon);
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(said.contains(&format!("listening on {endpoint}")), "{said}");
+    }
+}

@@ -263,6 +263,60 @@ mod tests {
         }
     }
 
+    /// Windows opens the window it opened before the Linux port. Its GPUI
+    /// backend reads neither `app_id` nor `window_decorations`
+    /// (`gpui_windows`, the default no-op `set_app_id` and
+    /// `request_decorations` of `PlatformWindow`), so the options it reads are
+    /// compared with the ones of that time, written out.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_opens_the_window_it_opened_before_the_linux_port() {
+        use gpui::{px, size};
+
+        let before_bounds = Bounds::new(gpui::point(px(0.), px(0.)), size(px(1080.), px(760.)));
+        let before = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(before_bounds)),
+            window_min_size: Some(size(px(640.), px(420.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Crow Bot".into()),
+                appears_transparent: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bounds = Bounds::new(gpui::point(px(0.), px(0.)), chrome::default_size());
+        let now = window_options(bounds, display::x11());
+
+        assert_eq!(now.window_bounds, before.window_bounds);
+        assert_eq!(now.window_min_size, before.window_min_size);
+        let (now_bar, before_bar) = (now.titlebar.unwrap(), before.titlebar.unwrap());
+        assert_eq!(now_bar.title, before_bar.title);
+        assert_eq!(now_bar.appears_transparent, before_bar.appears_transparent);
+        assert_eq!(
+            now_bar.traffic_light_position,
+            before_bar.traffic_light_position
+        );
+        assert_eq!(now.kind, before.kind);
+        assert_eq!(now.is_movable, before.is_movable);
+        assert_eq!(now.is_resizable, before.is_resizable);
+        assert_eq!(now.is_minimizable, before.is_minimizable);
+        assert_eq!(now.show, before.show);
+        assert_eq!(now.focus, before.focus);
+        assert_eq!(now.display_id, before.display_id);
+        assert_eq!(now.window_background, before.window_background);
+        assert_eq!(now.app_owns_titlebar_drag, before.app_owns_titlebar_drag);
+        assert_eq!(now.inactive_frame_interval, before.inactive_frame_interval);
+        assert_eq!(
+            now.low_power_frame_interval,
+            before.low_power_frame_interval
+        );
+        assert_eq!(now.thermal_frame_interval, before.thermal_frame_interval);
+        // What Windows does not read stays as Linux needs it, and asks for no
+        // decorations of the client's own.
+        assert_eq!(now.window_decorations, None);
+        assert!(!display::x11());
+    }
+
     #[test]
     fn the_daemon_is_started_on_the_endpoint_of_the_client() {
         let endpoint = Endpoint::new("here");
