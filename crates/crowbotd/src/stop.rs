@@ -5,8 +5,9 @@
 
 use std::fmt;
 
-/// A signal that stops the daemon.
+/// A signal that stops the daemon. Windows receives none.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub enum StopSignal {
     Terminate,
     Interrupt,

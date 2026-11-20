@@ -112,7 +112,7 @@ impl Service {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub fn unit(&self) -> &str {
         &self.unit
     }

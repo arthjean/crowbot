@@ -208,8 +208,9 @@ pub struct Daemon {
 }
 
 /// What a daemon in a user namespace of its own goes without. Its account
-/// maps to the test's.
+/// maps to the test's. Only Linux tests confine a daemon.
 #[derive(Clone, Copy)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum Confinement {
     /// The folder of its runtimes is a file system mounted `noexec`.
     NoexecRuntimes,
@@ -356,11 +357,15 @@ impl Daemon {
     }
 
     /// The endpoint the daemon listens on.
+    // Read by the tests of the stop signals, which Unix alone sends.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
     }
 
     /// The process of the daemon, while it runs.
+    // Read by the tests of the stop signals, which Unix alone sends.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn pid(&self) -> u32 {
         self.child.as_ref().expect("the daemon is not running").id()
     }
@@ -375,6 +380,8 @@ impl Daemon {
 
     /// Waits for the daemon to exit, and returns its status and how long it
     /// took, or `None` when it still runs after `patience`.
+    // Read by the tests of the stop signals, which Unix alone sends.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn wait_exit(
         &mut self,
         patience: Duration,
@@ -392,6 +399,8 @@ impl Daemon {
     }
 
     /// What the daemon wrote to its standard error.
+    // Read by the tests of the stop signals, which Unix alone sends.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn log(&self) -> String {
         std::fs::read_to_string(self.dir.join("daemon.log")).unwrap_or_default()
     }
@@ -476,6 +485,8 @@ impl Client {
     }
 
     /// Reads until the daemon closes the connection, and returns what it sent.
+    // Read by the tests of the stop signals, which Unix alone sends.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub async fn until_closed(&mut self) -> Vec<ServerMessage> {
         let mut messages = Vec::new();
         loop {

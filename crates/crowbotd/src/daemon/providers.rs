@@ -27,6 +27,11 @@ use crate::runtime::{Installed, Progress, RuntimeError, RuntimeSpec};
 use crate::sign_in_page::PageCatch;
 use crate::store::ProviderSetting;
 
+/// Where no page is caught, a sign-in holds no catch: the `PageCatch` that a
+/// sign-in holds until its end on Linux has no value elsewhere.
+#[cfg(not(target_os = "linux"))]
+enum NoPageCatch {}
+
 /// A sign-in that nobody finished ends after this long.
 const SIGN_IN_PATIENCE: Duration = Duration::from_secs(600);
 /// How long a provider gets to open the session that lists its models.
@@ -576,6 +581,9 @@ impl Daemon {
         Ok(())
     }
 
+    // The `drop` of the page catch marks when it ends; where none exists,
+    // the stand-in has nothing to drop.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::drop_non_drop))]
     fn start_sign_in(
         self: &Arc<Self>,
         id: &'static str,
@@ -661,13 +669,14 @@ impl Daemon {
         }
     }
 
+    /// Elsewhere a sign-in opens its page itself.
     #[cfg(not(target_os = "linux"))]
     #[allow(clippy::unused_self)]
     fn catch_page(
         self: &Arc<Self>,
         _id: &'static str,
         _environment: &mut BTreeMap<String, String>,
-    ) -> Option<()> {
+    ) -> Option<NoPageCatch> {
         None
     }
 

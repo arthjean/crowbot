@@ -127,6 +127,7 @@ fn private_folder(folder: &Path) -> std::io::Result<()> {
 
 /// Options that create a file only its user may read, on Unix.
 fn private_file() -> std::fs::OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut options = std::fs::OpenOptions::new();
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);

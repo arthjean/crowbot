@@ -46,11 +46,15 @@ mod tests {
         found
     }
 
+    /// The path of a resource under the resources folder, with `/` between
+    /// its parts on every system.
     fn relative(path: &Path) -> String {
         path.strip_prefix(resources())
             .unwrap()
-            .to_string_lossy()
-            .into_owned()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
     }
 
     fn scalable_icon() -> PathBuf {

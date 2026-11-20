@@ -35,6 +35,7 @@ pub async fn create_folder_async(folder: &Path) -> std::io::Result<()> {
 
 /// Options that create a file only its user may read, on Unix.
 pub fn options() -> OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
