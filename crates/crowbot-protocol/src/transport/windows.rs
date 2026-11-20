@@ -298,7 +298,9 @@ fn runs_as_current_user(process_id: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW,
+    };
     use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
     use super::*;
@@ -355,15 +357,40 @@ mod tests {
         ))
     }
 
+    /// Whether a trustee of an SDDL text names the account of this process.
+    /// SDDL writes some accounts with an alias, as `LA` for the built-in
+    /// administrator that GitHub's Windows runners use, so the SIDs themselves
+    /// are compared.
+    fn names_this_account(trustee: &str) -> bool {
+        let text: Vec<u16> = trustee.encode_utf16().chain([0]).collect();
+        let mut sid: PSID = ptr::null_mut();
+        // SAFETY: `text` is NUL-terminated and `sid` is a valid out pointer.
+        let converted = unsafe { ConvertStringSidToSidW(text.as_ptr(), &raw mut sid) };
+        assert_ne!(converted, 0, "{trustee} is not a SID");
+        let ours = UserSid::of_current_process().unwrap();
+        // SAFETY: both SIDs are valid; `sid` comes from `LocalAlloc` and is
+        // freed once.
+        unsafe {
+            let same = EqualSid(sid, ours.as_psid()) != 0;
+            LocalFree(sid.cast());
+            same
+        }
+    }
+
     #[tokio::test]
     async fn the_pipe_grants_access_to_the_current_user_only() {
         let listener = Listener::bind(&test_endpoint("acl")).unwrap();
-        let sid = UserSid::of_current_process().unwrap().to_sddl().unwrap();
         let sddl = access_list(&listener.next);
         assert!(sddl.starts_with("D:P"), "{sddl}");
         assert_eq!(sddl.matches('(').count(), 1, "{sddl}");
         assert!(sddl.contains("(A;;"), "{sddl}");
-        assert!(sddl.ends_with(&format!(";;;{sid})")), "{sddl}");
+        let trustee = sddl
+            .strip_suffix(')')
+            .and_then(|entry| entry.rsplit(";;;").next())
+            .unwrap();
+        assert!(names_this_account(trustee), "{sddl}");
+        // The comparison refuses another account.
+        assert!(!names_this_account("SY"));
     }
 
     #[tokio::test]
