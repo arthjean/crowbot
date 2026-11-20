@@ -1,7 +1,10 @@
 # The six quality gates of the repository on every push and pull request, on
 # Fedora (a container job, since GitHub has no Fedora image) and on Ubuntu,
-# each on x86_64 and on arm64; then, on Fedora, the real client opens a window
-# on a headless compositor (scripts/window-test.sh). No step signs in to a
+# each on x86_64 and on arm64, and on Windows, so that a Linux change that
+# breaks Windows is seen the day it is written; then, on Fedora, the real
+# client opens a window on a headless compositor (scripts/window-test.sh).
+# Each gate is a step of its own: a red one names its system and its gate.
+# No step signs in to a
 # provider, downloads a provider runtime, or holds a credential: the tests run
 # the scripted agent of the daemon.
 name: CI
@@ -138,3 +141,53 @@ jobs:
             exit 1
           fi
           grep "no window opened" "$RUNNER_TEMP/no-display.log"
+
+  # The Windows build the Linux port must not change (FR-16 of
+  # tasks/prd-crow-bot-linux-port.md). GitHub's hosted Windows image has the
+  # MSVC toolchain and the Windows SDK that GPUI's DirectX backend needs.
+  windows:
+    name: Windows Server 2025, x86_64
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: windows
+          workspaces: |
+            . -> target
+            crates/crowbot-desktop -> crates/crowbot-desktop/target
+
+      - name: "Root workspace: format"
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check
+
+      - name: "Root workspace: lints"
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets --no-deps -- -D warnings
+
+      - name: "Root workspace: tests"
+        if: ${{ !cancelled() }}
+        run: cargo test --locked
+
+      - name: "Client workspace: format"
+        if: ${{ !cancelled() }}
+        run: cargo fmt --all --check --manifest-path crates/crowbot-desktop/Cargo.toml
+
+      - name: "Client workspace: lints"
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked --all-targets --no-deps --manifest-path crates/crowbot-desktop/Cargo.toml -- -D warnings
+
+      - name: "Client workspace: tests"
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --manifest-path crates/crowbot-desktop/Cargo.toml
