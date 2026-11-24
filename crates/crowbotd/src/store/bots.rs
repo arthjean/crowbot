@@ -273,6 +273,7 @@ impl Store {
     /// Removes a bot with its conversations, their events, and their queues.
     pub fn delete_bot(&self, id: i64) -> Result<bool, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
+        self.forget_work(id)?;
         for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
@@ -285,6 +286,11 @@ impl Store {
         transaction.execute("DELETE FROM conversations WHERE bot_id = ?1", params![id])?;
         transaction.execute("DELETE FROM bot_models WHERE bot_id = ?1", params![id])?;
         transaction.execute("DELETE FROM approval_rules WHERE bot_id = ?1", params![id])?;
+        transaction.execute(
+            "DELETE FROM harness_settings WHERE bot_id = ?1",
+            params![id],
+        )?;
+        transaction.execute("DELETE FROM turn_refusals WHERE bot_id = ?1", params![id])?;
         transaction.execute(
             "DELETE FROM memory_changes WHERE entry_id IN
                 (SELECT id FROM memory WHERE scope = 'bot' AND bot_id = ?1)",
@@ -309,6 +315,7 @@ impl Store {
         let Some(current) = self.insert_conversation(bot_id)? else {
             return Ok(None);
         };
+        self.forget_work(bot_id)?;
         for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
@@ -324,6 +331,22 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(Some(current))
+    }
+
+    /// Removes what the conversations of a bot taught about its work: its
+    /// reviews and the figures of the skills its turns loaded. Called inside
+    /// the transaction that removes the conversations.
+    fn forget_work(&self, bot_id: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "DELETE FROM skill_uses WHERE turn_event_id IN
+                (SELECT turn_event_id FROM skill_turns WHERE bot_id = ?1)",
+            params![bot_id],
+        )?;
+        self.connection
+            .execute("DELETE FROM skill_turns WHERE bot_id = ?1", params![bot_id])?;
+        self.connection
+            .execute("DELETE FROM reviews WHERE bot_id = ?1", params![bot_id])?;
+        Ok(())
     }
 
     pub fn conversation_ids(&self, bot_id: i64) -> Result<Vec<i64>, StoreError> {

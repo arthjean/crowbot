@@ -1,6 +1,9 @@
 mod bots;
+mod figures;
+mod harness;
 mod memory;
 mod preferences;
+mod reviews;
 mod rules;
 mod search;
 mod sessions;
@@ -8,7 +11,10 @@ mod skills;
 mod usage;
 
 pub use bots::{BotRow, NewBot};
+pub use figures::SkillUse;
+pub use harness::TurnEndKind;
 pub use memory::{MemoryWriter, OperationResult};
+pub use reviews::ReviewRow;
 pub use search::{HistorySearch, HistoryWindow};
 pub use sessions::{ProviderSession, ProviderSetting, session_fingerprint};
 pub use skills::{Expected, SkillPlan, SkillRow, SkillWriter, changed as skill_changed};
@@ -25,7 +31,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -359,6 +365,52 @@ CREATE TABLE skill_changes (
 CREATE INDEX skill_changes_by_skill ON skill_changes(skill_id);
 ";
 
+/// What the daemon may start on its own for each bot, as JSON; the turns it
+/// did not start, and why; the reviews, each a conversation of its bot; and
+/// the turns that ended while the skills index listed a skill, with the
+/// versions of the skills they loaded.
+const SCHEMA_V14: &str = "
+CREATE TABLE harness_settings (
+    bot_id INTEGER PRIMARY KEY REFERENCES bots(id),
+    settings TEXT NOT NULL
+);
+CREATE TABLE turn_refusals (
+    id INTEGER PRIMARY KEY,
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    conversation_id INTEGER,
+    origin TEXT NOT NULL,
+    cause TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX turn_refusals_by_bot ON turn_refusals(bot_id, created_at_ms);
+CREATE TABLE reviews (
+    conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id),
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    reviewed_conversation_id INTEGER NOT NULL,
+    after_event_id INTEGER NOT NULL,
+    skills INTEGER NOT NULL,
+    memory INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX reviews_by_bot ON reviews(bot_id);
+CREATE TABLE skill_turns (
+    turn_event_id INTEGER PRIMARY KEY,
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    indexed INTEGER NOT NULL,
+    end_kind TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX skill_turns_by_bot ON skill_turns(bot_id);
+CREATE TABLE skill_uses (
+    turn_event_id INTEGER NOT NULL REFERENCES skill_turns(turn_event_id),
+    skill_id INTEGER NOT NULL REFERENCES skills(id),
+    version TEXT NOT NULL,
+    PRIMARY KEY (turn_event_id, skill_id, version)
+);
+CREATE INDEX skill_uses_by_skill ON skill_uses(skill_id, version);
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -526,6 +578,9 @@ impl Store {
         }
         if version < 13 {
             transaction.execute_batch(SCHEMA_V13)?;
+        }
+        if version < 14 {
+            transaction.execute_batch(SCHEMA_V14)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -1021,6 +1076,8 @@ fn kind(event: &Event) -> &'static str {
         Event::MemoryChanged { .. } => "memory_changed",
         Event::SkillChanged { .. } => "skill_changed",
         Event::SkillUnavailable { .. } => "skill_unavailable",
+        Event::TurnNotStarted { .. } => "turn_not_started",
+        Event::ReviewApplied { .. } => "review_applied",
     }
 }
 

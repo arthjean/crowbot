@@ -12,6 +12,7 @@ mod memory;
 mod private;
 mod prompt;
 mod provider;
+mod review;
 mod runtime;
 mod scan;
 mod server;

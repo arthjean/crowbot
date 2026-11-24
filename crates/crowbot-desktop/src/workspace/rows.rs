@@ -4,7 +4,7 @@ use std::time::Instant;
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use crowbot_protocol::{
     ApprovalDecision, ApprovalReason, FailureCause, MemoryAuthor, MemoryChange, MemoryChangeKind,
-    ProviderState, SkillAuthor, SkillChange, SkillChangeKind, TurnOrigin,
+    ProviderState, SkillAuthor, SkillChange, SkillChangeKind, TurnOrigin, TurnRefusal,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
@@ -195,7 +195,45 @@ pub(super) fn notice_text(notice: &Notice) -> String {
         Notice::SkillUnavailable { name, message } => {
             format!("The bot started without its skill {name}: {message}.")
         }
+        Notice::TurnNotStarted { origin, cause } => not_started_text(*origin, *cause),
+        Notice::ReviewApplied { memory, skills, .. } => review_text(memory, skills),
     }
+}
+
+/// Why a turn the daemon would have started did not start.
+fn not_started_text(origin: TurnOrigin, cause: TurnRefusal) -> String {
+    let what = match origin {
+        TurnOrigin::Retry => "Crow Bot did not send the message again",
+        TurnOrigin::Budget => "Crow Bot did not ask for a summary",
+        TurnOrigin::Review => "Crow Bot did not review the bot's work",
+        TurnOrigin::Routine => "Crow Bot did not run the routine",
+        TurnOrigin::Goal => "Crow Bot did not continue toward the goal",
+        TurnOrigin::Delegation => "Crow Bot did not run the delegated task",
+        TurnOrigin::User => "The turn did not start",
+    };
+    let why = match cause {
+        TurnRefusal::Paused => "Crow Bot is paused",
+        TurnRefusal::SwitchOff => "this kind of turn is off for the bot",
+        TurnRefusal::TurnLimit => "the bot reached its daily limit of turns",
+        TurnRefusal::TokenLimit => "the bot reached its daily limit of tokens",
+        TurnRefusal::Other => "its settings could not be read",
+    };
+    format!("{what}: {why}.")
+}
+
+/// What a review changed, in the words of the person who reads it.
+fn review_text(memory: &[MemoryChange], skills: &[SkillChange]) -> String {
+    let mut parts = Vec::new();
+    if !memory.is_empty() {
+        parts.push(memory_text(MemoryAuthor::Review, memory));
+    }
+    if !skills.is_empty() {
+        parts.push(skill_text(SkillAuthor::Review, skills));
+    }
+    format!(
+        "{} The review is a conversation of the bot.",
+        parts.join(" ")
+    )
 }
 
 /// What a change of memory did, in the words of the person who reads it.
@@ -901,6 +939,9 @@ fn approval_outcome(
         (ApprovalState::Declined, Some(ApprovalReason::NotRecorded)) => {
             ("Denied: the answer could not be saved", Tone::Denied)
         }
+        (ApprovalState::Declined, Some(ApprovalReason::ReviewSession)) => {
+            ("Denied: a review uses Crow Bot's tools only", Tone::Denied)
+        }
         (ApprovalState::Declined, _) => ("Denied", Tone::Denied),
         (ApprovalState::Cancelled, _) => ("Cancelled", Tone::Closed),
         (ApprovalState::Expired, _) => ("Not answered", Tone::Closed),
@@ -998,6 +1039,26 @@ mod tests {
                 ],
             }),
             "The bot changed its memory: kept \u{201c}Lives in Lyon\u{201d}; corrected #1 to \u{201c}Uses bun\u{201d}."
+        );
+        assert_eq!(
+            notice_text(&Notice::TurnNotStarted {
+                origin: TurnOrigin::Retry,
+                cause: TurnRefusal::TurnLimit,
+            }),
+            "Crow Bot did not send the message again: the bot reached its daily limit of turns."
+        );
+        assert_eq!(
+            notice_text(&Notice::ReviewApplied {
+                review_conversation_id: 9,
+                memory: Vec::new(),
+                skills: vec![SkillChange {
+                    name: "deploy".to_owned(),
+                    kind: SkillChangeKind::Created,
+                    old_hash: None,
+                    new_hash: Some("a".to_owned()),
+                }],
+            }),
+            "The bot's review changed its skills: wrote deploy. The review is a conversation of the bot."
         );
         assert_eq!(
             notice_text(&Notice::ModelUnavailable {

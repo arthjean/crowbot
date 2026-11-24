@@ -4,7 +4,7 @@ use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
     Interruption, MemoryAuthor, MemoryChange, SkillAuthor, SkillChange, TimedEvent, ToolEffect,
-    ToolKind, ToolStatus, TurnEnd, TurnOrigin, UserMessage,
+    ToolKind, ToolStatus, TurnEnd, TurnOrigin, TurnRefusal, UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -99,6 +99,18 @@ pub enum Notice {
     SkillUnavailable {
         name: String,
         message: String,
+    },
+    /// A turn the daemon would have started here did not start.
+    TurnNotStarted {
+        origin: TurnOrigin,
+        cause: TurnRefusal,
+    },
+    /// A review of the bot's work, in the conversation it names, changed
+    /// its memory or its skills.
+    ReviewApplied {
+        review_conversation_id: i64,
+        memory: Vec<MemoryChange>,
+        skills: Vec<SkillChange>,
     },
 }
 
@@ -698,6 +710,22 @@ impl Transcript {
             Event::SkillUnavailable { name, message } => {
                 self.notice(seq, at_ms, Notice::SkillUnavailable { name, message })
             }
+            Event::TurnNotStarted { origin, cause } => {
+                self.notice(seq, at_ms, Notice::TurnNotStarted { origin, cause })
+            }
+            Event::ReviewApplied {
+                review_conversation_id,
+                memory,
+                skills,
+            } => self.notice(
+                seq,
+                at_ms,
+                Notice::ReviewApplied {
+                    review_conversation_id,
+                    memory,
+                    skills,
+                },
+            ),
         }
     }
 
@@ -1498,6 +1526,11 @@ pub mod tests {
             (
                 ApprovalDecision::Declined,
                 ApprovalReason::NotRecorded,
+                ApprovalState::Declined,
+            ),
+            (
+                ApprovalDecision::Declined,
+                ApprovalReason::ReviewSession,
                 ApprovalState::Declined,
             ),
         ] {

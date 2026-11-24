@@ -415,7 +415,7 @@ async fn apply(session: &Session, mutation: Mutation) -> Result<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{Outputs, SessionKind};
+    use crate::tools::{Outputs, SessionKind, SkillUses};
 
     fn session(kind: SessionKind) -> (Session, mpsc::UnboundedReceiver<ToolSignal>) {
         let (signals, received) = mpsc::unbounded_channel();
@@ -431,6 +431,7 @@ mod tests {
                 conversation_id: 2,
                 kind,
                 outputs: Outputs::default(),
+                uses: SkillUses::default(),
             },
             gate: TurnGate::default(),
             signals,

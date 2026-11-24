@@ -24,17 +24,16 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::store::{SharedStore, Store, StoreError};
+use crate::store::{SharedStore, SkillUse, Store, StoreError};
 
 /// What a provider session is for. A kind may call only the tools that list it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Conversation,
-    // The kinds below start with the routines, the reviews, and the
-    // delegations of the harness; a tool lists them already.
+    // The kinds below start with the routines and the delegations of the
+    // harness; a tool lists them already.
     #[allow(dead_code)]
     Routine,
-    #[allow(dead_code)]
     Review,
     #[allow(dead_code)]
     Delegated,
@@ -55,6 +54,35 @@ pub struct ToolContext {
     pub conversation_id: i64,
     pub kind: SessionKind,
     pub outputs: Outputs,
+    pub uses: SkillUses,
+}
+
+/// The skill versions `skill_view` loaded in each turn of a conversation,
+/// which the conversation reads when the turn ends (US-029).
+#[derive(Debug, Clone, Default)]
+pub struct SkillUses(Arc<Mutex<Vec<(u64, SkillUse)>>>);
+
+impl SkillUses {
+    pub fn record(&self, permit: TurnPermit, used: SkillUse) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((permit.turn(), used));
+    }
+
+    /// The versions the turn `turn` loaded, each once. What earlier turns
+    /// left is dropped.
+    pub fn take(&self, turn: u64) -> Vec<SkillUse> {
+        let mut uses: Vec<SkillUse> =
+            std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+                .into_iter()
+                .filter(|(of, _)| *of == turn)
+                .map(|(_, used)| used)
+                .collect();
+        uses.sort();
+        uses.dedup();
+        uses
+    }
 }
 
 /// The proof that a turn of the caller's conversation runs and that no stop
@@ -279,8 +307,11 @@ impl ToolEntry {
         }
     }
 
+    /// Whether a session of `kind` may call the tool. A review reaches
+    /// nothing outside the bot's own state, whatever a tool lists.
     pub fn allows(&self, kind: SessionKind) -> bool {
         self.kinds.contains(&kind)
+            && !(kind == SessionKind::Review && self.effect == ToolEffect::External)
     }
 
     /// The tool as `tools/list` describes it. A tool that changes nothing
@@ -525,6 +556,7 @@ mod tests {
             conversation_id: 2,
             kind,
             outputs: Outputs::default(),
+            uses: SkillUses::default(),
         }
     }
 

@@ -816,7 +816,11 @@ impl Workspace {
             | ServerMessage::Memory { .. }
             | ServerMessage::Skills { .. }
             | ServerMessage::SkillHistory { .. }
-            | ServerMessage::SkillNotImported { .. } => {}
+            | ServerMessage::SkillNotImported { .. }
+            | ServerMessage::HarnessSettings { .. }
+            | ServerMessage::Consumption(_)
+            | ServerMessage::SkillFigures(_)
+            | ServerMessage::BotSkillFigures(_) => {}
             ServerMessage::SearchResults(results) => self.palette_results(results),
             ServerMessage::BotDeleted { bot_id } => {
                 self.deleting.remove(&bot_id);

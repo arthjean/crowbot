@@ -2,6 +2,7 @@ mod bot;
 mod endpoint;
 mod event;
 mod folders;
+mod harness;
 mod memory;
 mod message;
 mod preferences;
@@ -27,6 +28,11 @@ pub use event::{
     ToolStatus, TurnEnd, TurnOrigin, TurnUsage, UserMessage, cut_text,
 };
 pub use folders::Folders;
+pub use harness::{
+    BotSkillFigures, Consumption, DAILY_TOKEN_LIMIT_MAX, DAILY_TURN_LIMIT_MAX, Figure,
+    HarnessSettings, OriginConsumption, SkillFigures, SkillVersionFigures, TurnRefusal,
+    TurnSwitches,
+};
 pub use memory::{
     CORE_MEMORY_BOT_CHARACTERS, CORE_MEMORY_USER_CHARACTERS, MEMORY_ENTRY_CHARACTERS,
     MEMORY_OPERATIONS, MemoryAuthor, MemoryChange, MemoryChangeKind, MemoryEntry, MemoryOperation,

@@ -236,6 +236,9 @@ impl Store {
              JOIN conversations c ON c.id = e.conversation_id
              WHERE event_text MATCH ?1 AND c.bot_id = ?2 AND c.id != ?3
                 AND e.kind IN ('user_text', 'message_text', 'tool_call_started')
+                -- The prompt of a review quotes work found where it was done.
+                AND NOT (e.kind = 'user_text'
+                    AND EXISTS (SELECT 1 FROM reviews r WHERE r.conversation_id = c.id))
              ORDER BY event_text.rowid DESC LIMIT ?4",
         )?;
         let rows = statement

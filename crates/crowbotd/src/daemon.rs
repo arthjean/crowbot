@@ -1,6 +1,7 @@
 //! What every connection and every conversation share: the bots, the attached
 //! clients, the running conversations, and what each bot is doing.
 
+mod harness;
 mod providers;
 
 use std::collections::{HashMap, HashSet};
@@ -109,7 +110,22 @@ struct State {
     stopping: bool,
     /// The daemon starts no turn of its own (`PAUSED_FILE`).
     paused: bool,
+    /// The review of each bot, from the moment the daemon reserves it.
+    reviews: HashMap<i64, ReviewSlot>,
     providers: HashMap<&'static str, providers::ProviderEntry>,
+}
+
+/// Where the review of a bot stands. A reservation is taken in the same
+/// section of the state as the check that no turn of the bot works, and a
+/// person's turn that starts later finds it, so a review never runs beside
+/// a person's turn and a bot never has two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewSlot {
+    /// The review is being created; `stop` once a person's turn started
+    /// meanwhile, and the review then does not start.
+    Starting { stop: bool },
+    /// The review runs in this conversation.
+    Running(i64),
 }
 
 impl State {
@@ -129,6 +145,11 @@ pub struct Daemon {
     command: Option<String>,
     runtimes: Runtimes,
     state: Mutex<State>,
+    /// Held from the check of a daemon-started turn against the bot's
+    /// switches and limits to the record of its start, so that two turns
+    /// that start at once cannot both take the last place of the day. It is
+    /// taken before the state and the store.
+    admission: Mutex<()>,
     next_connection: AtomicU64,
     tools: Arc<Registry>,
     sections: Sections,
@@ -172,6 +193,7 @@ impl Daemon {
                 paused,
                 ..State::default()
             }),
+            admission: Mutex::new(()),
             next_connection: AtomicU64::new(1),
             tools,
             sections,

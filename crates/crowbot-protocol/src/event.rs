@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::harness::TurnRefusal;
 use crate::memory::{MemoryAuthor, MemoryChange};
 use crate::skill::{SkillAuthor, SkillChange};
 
@@ -107,6 +108,21 @@ pub enum Event {
         name: String,
         message: String,
     },
+    /// A turn the daemon would have started on its own here did not start:
+    /// the daemon was paused, or a daily limit of the bot was reached.
+    TurnNotStarted {
+        origin: TurnOrigin,
+        cause: TurnRefusal,
+    },
+    /// A review of the bot's work, which ran in the conversation
+    /// `review_conversation_id`, changed its memory or its skills.
+    ReviewApplied {
+        review_conversation_id: i64,
+        #[serde(default)]
+        memory: Vec<MemoryChange>,
+        #[serde(default)]
+        skills: Vec<SkillChange>,
+    },
 }
 
 impl Event {
@@ -197,6 +213,8 @@ pub enum ApprovalReason {
     /// The answer could not be written to the database, so the daemon
     /// declined the request rather than let run what the history would miss.
     NotRecorded,
+    /// A review may use the daemon's tools only.
+    ReviewSession,
 }
 
 /// What a daemon tool may change: nothing, state of the bot that the daemon

@@ -17,6 +17,11 @@ mod limits;
 
 pub use limits::{INACTIVITY_LIMIT, NO_PROGRESS_CYCLE, NO_PROGRESS_REPEATS, RETRY_DELAYS};
 
+/// The message of origin `Budget` the daemon sends after a turn that used
+/// the bot's tool calls, when the person allowed it: a summary rather than
+/// more work (`hermes-agent/agent/turn_finalizer.py:138-164`).
+pub const BUDGET_SUMMARY: &str = "You reached the limit of tool calls for one turn. Call no tool now. Summarize the work done so far, what is left to do, and what you would do next.";
+
 /// Divides the waits above in the daemon's own tests, in debug builds only,
 /// so that a test reads the same constants and does not wait ten minutes.
 #[cfg(debug_assertions)]

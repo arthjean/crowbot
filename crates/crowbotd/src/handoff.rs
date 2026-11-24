@@ -23,6 +23,15 @@ enum Speaker {
 /// nothing was said. It holds `HANDOFF_CHARACTERS` at most, and what is left
 /// out is the oldest.
 pub fn build(events: &[Event], from: &str) -> Option<String> {
+    let header = header(from);
+    let fixed = header.chars().count() + END.chars().count();
+    let body = transcript(events, HANDOFF_CHARACTERS.saturating_sub(fixed))?;
+    Some(format!("{header}{body}{END}"))
+}
+
+/// Who said what in `events`, oldest first, in `room` characters at most:
+/// what is left out is the oldest. `None` when nothing was said.
+pub fn transcript(events: &[Event], room: usize) -> Option<String> {
     let mut parts: Vec<(Speaker, String)> = Vec::new();
     let mut streaming = false;
     for event in events {
@@ -62,18 +71,14 @@ pub fn build(events: &[Event], from: &str) -> Option<String> {
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let header = header(from);
-    let fixed = header.chars().count() + END.chars().count();
-    let room = HANDOFF_CHARACTERS.saturating_sub(fixed);
     let length = body.chars().count();
-    let body = if length > room {
+    Some(if length > room {
         let kept = room.saturating_sub(LEFT_OUT.chars().count());
         let tail: String = body.chars().skip(length - kept).collect();
         format!("{LEFT_OUT}{tail}")
     } else {
         body
-    };
-    Some(format!("{header}{body}{END}"))
+    })
 }
 
 #[cfg(test)]

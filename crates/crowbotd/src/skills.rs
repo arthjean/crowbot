@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use self::format::Version;
 use crate::prompt::{Section, SectionState, Sections};
-use crate::store::{Expected, SharedStore, SkillPlan, SkillRow, SkillWriter, StoreError};
+use crate::store::{Expected, SharedStore, SkillPlan, SkillRow, SkillUse, SkillWriter, StoreError};
 use crate::tools::{
     ALL_KINDS, Applied, Mutation, Registry, SessionKind, Tool, ToolContext, ToolFuture, TurnPermit,
     effect,
@@ -338,9 +338,14 @@ impl Tool for SkillView {
     const DESCRIPTION: &'static str = "Loads one of your skills: its SKILL.md, the list of its other files, the folder where its files are (read-only), and the hash of its version, which a correction with skill_manage names. Give `file` to read one of its other files.";
     const KINDS: &'static [SessionKind] = ALL_KINDS;
 
-    fn run(&self, _permit: TurnPermit, context: ToolContext, input: SkillViewInput) -> ToolFuture {
+    fn run(&self, permit: TurnPermit, context: ToolContext, input: SkillViewInput) -> ToolFuture {
         let library = self.0.clone();
-        Box::pin(async move { view(&library, context.bot_id, &input) })
+        Box::pin(async move {
+            let (text, used) = view(&library, context.bot_id, &input)?;
+            // The turn's figures tie it to the version it loaded (US-029).
+            context.uses.record(permit, used);
+            Ok(text)
+        })
     }
 }
 
@@ -370,7 +375,12 @@ fn not_found(library: &Library, bot_id: i64, name: &str) -> String {
     }
 }
 
-fn view(library: &Library, bot_id: i64, input: &SkillViewInput) -> Result<String, String> {
+/// The text `skill_view` answers, and the version it loaded.
+fn view(
+    library: &Library,
+    bot_id: i64,
+    input: &SkillViewInput,
+) -> Result<(String, SkillUse), String> {
     let found = library
         .store
         .with(|store| {
@@ -388,6 +398,10 @@ fn view(library: &Library, bot_id: i64, input: &SkillViewInput) -> Result<String
         return Err(not_found(library, bot_id, &input.name));
     };
     let folder = library.folder(bot_id, &skill.name);
+    let used = SkillUse {
+        skill_id: skill.id,
+        version: skill.version.clone(),
+    };
     if let Some(path) = &input.file {
         let Some(content) = version.file(path) else {
             let files: Vec<&str> = version.files().keys().map(String::as_str).collect();
@@ -397,7 +411,7 @@ fn view(library: &Library, bot_id: i64, input: &SkillViewInput) -> Result<String
                 files.join(", ")
             ));
         };
-        return Ok(match std::str::from_utf8(content) {
+        let text = match std::str::from_utf8(content) {
             Ok(text) => format!(
                 "File {path} of the skill {} (version {}):\n\n{text}",
                 skill.name, skill.version
@@ -408,7 +422,8 @@ fn view(library: &Library, bot_id: i64, input: &SkillViewInput) -> Result<String
                 content.len(),
                 folder.join(path).display()
             ),
-        });
+        };
+        return Ok((text, used));
     }
     let others: Vec<&str> = version
         .files()
@@ -425,12 +440,13 @@ fn view(library: &Library, bot_id: i64, input: &SkillViewInput) -> Result<String
         Some(cause) => format!("not written this session ({cause})"),
         None => format!("{} (read-only)", folder.display()),
     };
-    Ok(format!(
+    let text = format!(
         "Skill {} (version {}).\nFolder: {place}\nOther files: {files}\n\n{}",
         skill.name,
         skill.version,
         version.document().unwrap_or_default()
-    ))
+    );
+    Ok((text, used))
 }
 
 /// Writes the bot's skills.
@@ -869,7 +885,7 @@ mod tests {
 
     use super::*;
     use crate::store::NewBot;
-    use crate::tools::Outputs;
+    use crate::tools::{Outputs, SkillUses};
 
     #[tokio::test]
     async fn a_review_session_archives_a_skill_through_the_tool() {
@@ -904,6 +920,7 @@ mod tests {
                 conversation_id: row.current_conversation_id,
                 kind,
                 outputs: Outputs::default(),
+                uses: SkillUses::default(),
             };
             let call = tool
                 .prepare(context, serde_json::json!({ "operations": operations }))

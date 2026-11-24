@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event, TurnUsage};
+use crate::harness::{BotSkillFigures, Consumption, HarnessSettings, SkillFigures};
 use crate::memory::{MemoryEntry, MemoryOperation};
 use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
@@ -9,7 +10,7 @@ use crate::rules::{ApprovalRule, RuleDraft};
 use crate::search::SearchResults;
 use crate::skill::{SkillFinding, SkillStateChange, SkillSummary, SkillVersion};
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -211,6 +212,31 @@ pub enum ClientMessage {
         name: String,
         change: SkillStateChange,
     },
+    /// Asks for what the daemon may start on its own for a bot.
+    GetHarnessSettings {
+        bot_id: i64,
+    },
+    /// Sets what the daemon may start on its own for a bot, and how much of
+    /// it a day. This message is the only way they change: no daemon tool,
+    /// prompt, or file changes them. A switch other than `retry` is refused
+    /// while no daily limit of turns is set.
+    SetHarnessSettings {
+        bot_id: i64,
+        settings: HarnessSettings,
+    },
+    /// Asks what a bot's turns consumed during the day, per origin.
+    GetConsumption {
+        bot_id: i64,
+    },
+    /// Asks how the turns that loaded a skill went, per version.
+    GetSkillFigures {
+        bot_id: i64,
+        name: String,
+    },
+    /// Asks how often a bot loads the skills its index lists.
+    GetBotSkillFigures {
+        bot_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +386,19 @@ pub enum ServerMessage {
         message: String,
         findings: Vec<SkillFinding>,
     },
+    /// What the daemon may start on its own for a bot. Answers
+    /// `GetHarnessSettings`, and every attached client receives it after
+    /// the settings change.
+    HarnessSettings {
+        bot_id: i64,
+        settings: HarnessSettings,
+    },
+    /// Answers `GetConsumption`.
+    Consumption(Consumption),
+    /// Answers `GetSkillFigures`.
+    SkillFigures(SkillFigures),
+    /// Answers `GetBotSkillFigures`.
+    BotSkillFigures(BotSkillFigures),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

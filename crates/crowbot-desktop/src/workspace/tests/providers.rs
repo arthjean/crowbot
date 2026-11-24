@@ -586,6 +586,79 @@ fn a_conversation_with_skill_events_opens_and_shows_them(cx: &mut TestAppContext
     )));
 }
 
+/// A conversation that holds the records of learning from use opens, and
+/// each one shows as a notice: a turn the daemon did not start, and what a
+/// review of its work changed (EP-006 of the harness PRD).
+#[gpui::test]
+fn a_turn_not_started_and_a_review_s_changes_open_as_notices(cx: &mut TestAppContext) {
+    use crowbot_protocol::{SkillChange, SkillChangeKind, TurnOrigin, TurnRefusal, UserMessage};
+
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::user_text("deploy"),
+                Event::TurnFailed {
+                    message: "gone".to_owned(),
+                    cause: None,
+                    provider: Some("claude".to_owned()),
+                },
+                Event::TurnNotStarted {
+                    origin: TurnOrigin::Retry,
+                    cause: TurnRefusal::TurnLimit,
+                },
+                Event::UserText(UserMessage::new("summarize").with_origin(TurnOrigin::Budget)),
+                Event::TurnEnded(TurnEnd::Completed),
+                Event::ReviewApplied {
+                    review_conversation_id: 11,
+                    memory: Vec::new(),
+                    skills: vec![SkillChange {
+                        name: "deploy".to_owned(),
+                        kind: SkillChangeKind::Created,
+                        old_hash: None,
+                        new_hash: Some("ab12".to_owned()),
+                    }],
+                },
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 2);
+    for notice in notices {
+        assert!(shown(cx, notice), "{notice}");
+    }
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::TurnNotStarted {
+            origin: TurnOrigin::Retry,
+            cause: TurnRefusal::TurnLimit,
+        })
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::ReviewApplied {
+            review_conversation_id: 11,
+            skills,
+            ..
+        }) if skills[0].name == "deploy"
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::User {
+            origin: TurnOrigin::Budget,
+            ..
+        }
+    )));
+}
+
 /// A conversation that holds a turn the daemon started and turns its guards
 /// stopped opens, and each row says so (EP-002 of the harness PRD).
 #[gpui::test]

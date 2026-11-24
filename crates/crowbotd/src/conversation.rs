@@ -5,8 +5,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
-    FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryOperation, QueueState,
-    ServerMessage, SkillAuthor, TurnEnd, TurnOrigin, UserMessage,
+    FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryChange, MemoryOperation,
+    QueueState, ServerMessage, SkillAuthor, SkillChange, TurnEnd, TurnOrigin, TurnRefusal,
+    UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -14,7 +15,7 @@ use tokio::task::AbortHandle;
 
 use crate::approval::{self, Answer, Request, Standing};
 use crate::daemon::Daemon;
-use crate::guard::{self, INACTIVITY_LIMIT, Progress, RETRY_DELAYS};
+use crate::guard::{self, BUDGET_SUMMARY, INACTIVITY_LIMIT, Progress, RETRY_DELAYS};
 use crate::handoff::{self, HANDOFF_CHARACTERS};
 use crate::mcp::{SessionEndpoint, ToolSignal};
 use crate::prompt::Sections;
@@ -22,10 +23,10 @@ use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
 use crate::store::{
-    BotRow, Conversation, EventsPage, MemoryWriter, ProviderSession, Recorder, Reported,
-    SharedStore, SkillPlan, SkillWriter, StoreError, Tokens, session_fingerprint,
+    BotRow, Conversation, EventsPage, MemoryWriter, ProviderSession, Recorder, Reported, ReviewRow,
+    SharedStore, SkillPlan, SkillWriter, StoreError, Tokens, TurnEndKind, session_fingerprint,
 };
-use crate::tools::{Outputs, SessionKind, ToolContext, TurnGate};
+use crate::tools::{Outputs, SessionKind, SkillUses, ToolContext, TurnGate};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -113,6 +114,17 @@ pub enum Command {
         plans: Vec<SkillPlan>,
         sink: Sink,
     },
+    /// The daemon starts the review this conversation holds, with its prompt.
+    Review {
+        text: String,
+    },
+    /// A review of this conversation's work changed the bot's memory or
+    /// skills: the conversation records what changed, with a link to it.
+    RecordReview {
+        review_conversation_id: i64,
+        memory: Vec<MemoryChange>,
+        skills: Vec<SkillChange>,
+    },
     /// The bot is being deleted, or the daemon stops: the running turn stops,
     /// then the task ends and tells so through `done`. An agent that has not
     /// ended its turn after `patience` is closed.
@@ -153,9 +165,20 @@ impl ConversationHandle {
 pub fn spawn(daemon: Arc<Daemon>, conversation: &Conversation) -> ConversationHandle {
     let (inputs, receiver) = mpsc::unbounded_channel();
     let store = daemon.store().clone();
+    let review = store
+        .with(|store| store.review(conversation.id))
+        .unwrap_or_else(|error| {
+            eprintln!(
+                "[crowbotd] conversation {}: cannot read whether it is a review: {error}",
+                conversation.id
+            );
+            None
+        });
     let actor = Actor {
         id: conversation.id,
         bot_id: conversation.bot_id,
+        review,
+        uses: SkillUses::default(),
         titled: conversation.title.is_some(),
         recorder: Recorder::new(store.clone(), conversation.id),
         store,
@@ -233,6 +256,9 @@ struct RunningTurn {
     not_recorded: Option<String>,
     /// When the turn last heard from its agent or from a person.
     last_activity: Instant,
+    /// The active skills of the bot when the turn started: the ones its
+    /// index listed.
+    indexed: u32,
 }
 
 impl Default for RunningTurn {
@@ -247,6 +273,7 @@ impl Default for RunningTurn {
             stop_cause: None,
             not_recorded: None,
             last_activity: Instant::now(),
+            indexed: 0,
         }
     }
 }
@@ -352,6 +379,11 @@ impl TurnFailure {
 struct Actor {
     id: i64,
     bot_id: i64,
+    /// The review this conversation holds, when it is one: its sessions
+    /// call the daemon's tools of a review only, and no person writes in it.
+    review: Option<ReviewRow>,
+    /// The skill versions `skill_view` loaded, per turn.
+    uses: SkillUses,
     /// The conversation has its title, so no later message can give it one.
     titled: bool,
     daemon: Arc<Daemon>,
@@ -559,6 +591,20 @@ impl Actor {
             Command::StandingChanged => self.review_approvals(),
             Command::ChangeMemory { operations, sink } => self.change_memory(&operations, &sink),
             Command::ChangeSkills { plans, sink } => self.change_skills(&plans, &sink),
+            Command::Review { text } => self.start_review(text),
+            Command::RecordReview {
+                review_conversation_id,
+                memory,
+                skills,
+            } => {
+                let closed = self.recorder.close();
+                self.report_store(closed);
+                self.emit(Event::ReviewApplied {
+                    review_conversation_id,
+                    memory,
+                    skills,
+                });
+            }
             Command::ShutDown { done, patience } => self.shut_down(done, patience),
         }
     }
@@ -886,6 +932,12 @@ impl Actor {
         if self.closing.is_some() {
             return self.refuse_message(sink, "This bot is being deleted.");
         }
+        if self.review.is_some() {
+            return self.refuse_message(
+                sink,
+                "A review takes no message. Write in another conversation of the bot.",
+            );
+        }
         if text.trim().is_empty() {
             return self.refuse_message(sink, "A message needs some text.");
         }
@@ -910,6 +962,8 @@ impl Actor {
                     self.retry = None;
                     self.accept_message(sink);
                     self.broadcast_queue();
+                    // A person wrote: a review of the bot's work gives way.
+                    self.daemon.person_wrote(self.bot_id);
                 }
                 Err(error) => self.refuse_message(sink, error.to_string()),
             }
@@ -934,7 +988,43 @@ impl Actor {
         ));
         self.give_title(&text);
         self.sync();
+        if origin == TurnOrigin::User {
+            // The turn shows as working: a review of the bot's work gives way.
+            self.daemon.person_wrote(self.bot_id);
+        }
         self.deliver(delivery, text);
+    }
+
+    /// Starts a turn of origin `origin` that the daemon sends on its own,
+    /// when `Daemon::admit` lets it, holding the admission from the check to
+    /// the record of its start. `false` when it did not start.
+    fn start_admitted(&mut self, text: String, origin: TurnOrigin, retries: usize) -> bool {
+        let daemon = self.daemon.clone();
+        let _admission = daemon.admission();
+        if !self.admit(origin) {
+            return false;
+        }
+        self.start_turn(text, origin, retries);
+        true
+    }
+
+    /// Starts the review this conversation holds, which the daemon reserved
+    /// for the bot. One that cannot start gives the reservation back.
+    fn start_review(&mut self, text: String) {
+        let Some(reviewed) = self
+            .review
+            .as_ref()
+            .map(|review| review.reviewed_conversation_id)
+        else {
+            return;
+        };
+        if self.turn_active
+            || self.closing.is_some()
+            || !self.start_admitted(text, TurnOrigin::Review, 0)
+        {
+            self.daemon
+                .review_ended(self.bot_id, self.id, reviewed, Vec::new(), Vec::new());
+        }
     }
 
     /// A turn starts: the daemon's tools may run, with permits of this turn,
@@ -948,8 +1038,37 @@ impl Actor {
         self.running = RunningTurn {
             origin,
             text: text.to_owned(),
+            indexed: self.indexed_skills(),
             ..RunningTurn::default()
         };
+    }
+
+    /// The active skills of the bot, which its index lists. A review's
+    /// turns are not counted in the figures of skills.
+    fn indexed_skills(&self) -> u32 {
+        if self.review.is_some() {
+            return 0;
+        }
+        self.store
+            .with(|store| store.active_skills(self.bot_id))
+            .map_or(0, |skills| u32::try_from(skills.len()).unwrap_or(u32::MAX))
+    }
+
+    /// Whether a turn of `origin` may start now (`Daemon::admit`). One that
+    /// may not is recorded with its cause; a pause or a limit is also told
+    /// here, while a switch that is off is the person's own choice.
+    fn admit(&mut self, origin: TurnOrigin) -> bool {
+        let Err(cause) = self.daemon.admit(self.bot_id, origin) else {
+            return true;
+        };
+        self.daemon
+            .record_refusal(self.bot_id, Some(self.id), origin, cause, false);
+        if cause != TurnRefusal::SwitchOff {
+            let closed = self.recorder.close();
+            self.report_store(closed);
+            self.emit(Event::TurnNotStarted { origin, cause });
+        }
+        false
     }
 
     /// Sends again the message of a turn that failed before it said
@@ -962,14 +1081,11 @@ impl Actor {
         if self.turn_active || self.closing.is_some() {
             return;
         }
-        if self.daemon.paused() {
-            eprintln!(
-                "[crowbotd] conversation {}: the daemon is paused, so the failed turn is not sent again",
-                self.id
-            );
-            return;
+        // A paused daemon, a switch that is off, or a daily limit reached
+        // keeps the failed turn from being sent again.
+        if !self.start_admitted(retry.text, TurnOrigin::Retry, retry.retries) {
+            self.consider_review();
         }
-        self.start_turn(retry.text, TurnOrigin::Retry, retry.retries);
     }
 
     /// Stops the running turn for a reason of the daemon's guards, which is
@@ -1358,8 +1474,13 @@ impl Actor {
         let context = ToolContext {
             bot_id: self.bot_id,
             conversation_id: self.id,
-            kind: SessionKind::Conversation,
+            kind: if self.review.is_some() {
+                SessionKind::Review
+            } else {
+                SessionKind::Conversation
+            },
             outputs: Outputs::default(),
+            uses: self.uses.clone(),
         };
         match SessionEndpoint::open(
             self.daemon.tools().clone(),
@@ -1627,6 +1748,17 @@ impl Actor {
         reply: oneshot::Sender<ApprovalAnswer>,
     ) {
         let id = self.new_approval_id();
+        if self.review.is_some() && self.stop_due.is_none() {
+            // A review may use the daemon's tools only, which it asks for
+            // apart (`DaemonToolRequested`).
+            return self.decline(
+                Some(id),
+                tool_call_id,
+                title,
+                reply,
+                ApprovalReason::ReviewSession,
+            );
+        }
         if self.stop_due.is_some() {
             reply.send(ApprovalAnswer::Cancel).ok();
             self.emit(Event::ApprovalClosed {
@@ -1816,6 +1948,19 @@ impl Actor {
         self.finish_turn(end);
         self.sync();
         self.finish_closing();
+        self.consider_review();
+    }
+
+    /// Once no turn of the bot runs or waits here, not even a failed one
+    /// about to be sent again, its work may be due for a review.
+    fn consider_review(&self) {
+        if self.review.is_none()
+            && !self.turn_active
+            && self.retry.is_none()
+            && self.closing.is_none()
+        {
+            self.daemon.consider_review(self.bot_id, self.id);
+        }
     }
 
     fn finish_turn(&mut self, end: Event) {
@@ -1844,6 +1989,15 @@ impl Actor {
         };
         let completed = matches!(end, Event::TurnEnded(_));
         let retry = self.retry_after(&end);
+        let summary_due = matches!(
+            end,
+            Event::TurnInterrupted {
+                cause: Interruption::BudgetExhausted
+            }
+        ) && self.running.origin != TurnOrigin::Budget
+            // A review ends where its budget ends: the next one reads on.
+            && self.review.is_none();
+        let ended = end_kind(&end);
         if let Some((provider, session_id, reported)) = self.running.usage.take() {
             let closed = self.recorder.close();
             self.report_store(closed);
@@ -1851,6 +2005,14 @@ impl Actor {
                 store.record_usage(self.id, &provider, session_id.as_deref(), &reported)
             });
             self.report_store(stored);
+        }
+        let uses = self.uses.take(self.turn);
+        if self.review.is_none() {
+            let indexed = self.running.indexed;
+            let figured = self
+                .store
+                .with(|store| store.record_skill_turn(self.id, indexed, ended, &uses));
+            self.report_store(figured);
         }
         self.emit(end);
         if !self.followers.is_empty() {
@@ -1877,8 +2039,39 @@ impl Actor {
         }
 
         let send_now = std::mem::take(&mut self.next_after_stop);
+        if let Some(reviewed) = self
+            .review
+            .as_ref()
+            .map(|review| review.reviewed_conversation_id)
+        {
+            // A review is read in the conversation it reviewed, which tells
+            // what it changed: its own end leaves the bot unread for nothing.
+            let marked = self.store.with(|store| store.mark_read(self.id));
+            self.report_store(marked);
+            match self.store.with(|store| store.review_changes(self.id)) {
+                Ok((memory, skills)) => {
+                    self.daemon
+                        .review_ended(self.bot_id, self.id, reviewed, memory, skills);
+                }
+                Err(error) => {
+                    self.daemon.review_ended(
+                        self.bot_id,
+                        self.id,
+                        reviewed,
+                        Vec::new(),
+                        Vec::new(),
+                    );
+                    self.report_store(Err::<(), _>(error));
+                }
+            }
+        }
         if self.closing.is_some() {
             return;
+        }
+        // A turn that used its tool calls asks, once, for a summary of the
+        // work done, ahead of the queue, when the person allowed it.
+        if summary_due {
+            self.start_admitted(BUDGET_SUMMARY.to_owned(), TurnOrigin::Budget, 0);
         }
         if let Some(wait) = retry {
             self.retry = Some(Retry {
@@ -1919,7 +2112,8 @@ impl Actor {
         else {
             return None;
         };
-        if self.running.said {
+        // A review is not sent again: the next one reads the same work.
+        if self.running.said || self.review.is_some() {
             return None;
         }
         RETRY_DELAYS.get(self.running.retries).copied()
@@ -1952,6 +2146,8 @@ impl Actor {
                 self.broadcast_queue();
                 self.give_title(&text);
                 self.sync();
+                // A person's turn works: a review of the bot's work gives way.
+                self.daemon.person_wrote(self.bot_id);
                 self.deliver(delivery, text);
             }
             Ok(None) => {}
@@ -2093,6 +2289,16 @@ impl Actor {
                     .any(|subscriber| subscriber.connection == *connection)
             });
         }
+    }
+}
+
+/// How a turn ended, for the figures of the skills it loaded.
+fn end_kind(end: &Event) -> TurnEndKind {
+    match end {
+        Event::TurnEnded(TurnEnd::Completed) => TurnEndKind::Completed,
+        Event::TurnEnded(TurnEnd::Cancelled) => TurnEndKind::Stopped,
+        Event::TurnInterrupted { .. } => TurnEndKind::Interrupted,
+        _ => TurnEndKind::Failed,
     }
 }
 

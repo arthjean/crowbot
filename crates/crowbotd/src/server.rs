@@ -253,6 +253,19 @@ impl ClientState {
                 name,
                 change,
             } => daemon.set_skill_state(bot_id, &name, change, sink.clone()),
+            ClientMessage::GetHarnessSettings { bot_id } => {
+                daemon.harness_settings(bot_id).map(reply)
+            }
+            ClientMessage::SetHarnessSettings { bot_id, settings } => {
+                daemon.set_harness_settings(bot_id, settings)
+            }
+            ClientMessage::GetConsumption { bot_id } => daemon.consumption(bot_id).map(reply),
+            ClientMessage::GetSkillFigures { bot_id, name } => {
+                daemon.skill_figures(bot_id, &name).map(reply)
+            }
+            ClientMessage::GetBotSkillFigures { bot_id } => {
+                daemon.bot_skill_figures(bot_id).map(reply)
+            }
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
             }

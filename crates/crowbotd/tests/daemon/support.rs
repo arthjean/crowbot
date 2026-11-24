@@ -138,6 +138,7 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
             let mut env = serde_json::json!({
                 "FAKE_AGENT_HEARTBEAT": heartbeat,
                 "FAKE_AGENT_AUTH": dir.join("auth"),
+                "FAKE_AGENT_REVIEW": dir.join("review"),
             });
             if system_prompt {
                 env["FAKE_AGENT_SYSTEM_PROMPT"] = "1".into();

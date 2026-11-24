@@ -74,7 +74,10 @@
 //! - `mcppid`: report the process id of the running MCP server.
 //!
 //! The command is the last part of a prompt: the parts before it are reported
-//! by `config` as the preface.
+//! by `config` as the preface. A prompt of a review of Crow Bot, which opens
+//! with `REVIEW_OPENING`, runs instead the command that the file
+//! `FAKE_AGENT_REVIEW` names holds, and answers `Nothing to keep.` when there
+//! is no such file.
 //!
 //! The agent offers the models `fast` and `smart` through a session config
 //! option, and starts each process on `fast`.
@@ -131,6 +134,9 @@ const SYSTEM_PROMPT: &str = "FAKE_AGENT_SYSTEM_PROMPT";
 const AUTH: &str = "FAKE_AGENT_AUTH";
 const NO_ASK_MODE: &str = "FAKE_AGENT_NO_ASK_MODE";
 const NO_MODELS: &str = "FAKE_AGENT_NO_MODELS";
+const REVIEW: &str = "FAKE_AGENT_REVIEW";
+/// How the daemon opens the prompt of a review (`review.rs`).
+const REVIEW_OPENING: &str = "You are reviewing your recent work for Crow Bot.";
 const SIGNED_IN: &str = "authenticated";
 /// The page a Grok-like agent names for its sign-in.
 /// The page a `terminal` sign-in in the modes `xdg-open` and `browser` opens.
@@ -442,6 +448,17 @@ fn failing_first(text: &str) -> Option<Result<(), String>> {
     Some(Err(command))
 }
 
+/// The command a review runs: the one the test wrote for it.
+fn reviewing(text: &str) -> Option<String> {
+    if !text.starts_with(REVIEW_OPENING) {
+        return None;
+    }
+    let script = std::env::var_os(REVIEW)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|command| command.trim().to_owned());
+    Some(script.unwrap_or_else(|| "say Nothing to keep.".to_owned()))
+}
+
 fn texts(blocks: &Value) -> Vec<String> {
     blocks
         .as_array()
@@ -718,6 +735,7 @@ impl Agent {
         let session = &params["sessionId"];
         let mut parts = texts(&params["prompt"]);
         let text = parts.pop().unwrap_or_default();
+        let text = reviewing(&text).unwrap_or(text);
         let text = match failing_first(&text) {
             Some(Ok(())) => {
                 return self.fail(
