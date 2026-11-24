@@ -57,10 +57,10 @@
     {
       "id": "EP-007",
       "title": "Routines",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 7,
-      "stories_done": 0
+      "stories_done": 7
     },
     {
       "id": "EP-008",
@@ -465,18 +465,18 @@
       "id": "US-030",
       "title": "Schedules and their next occurrence",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-031",
       "title": "Routines and the scheduler",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [
         "US-003",
@@ -484,81 +484,81 @@
         "US-026",
         "US-030"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-032",
       "title": "Missed occurrences",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "blocked_by": [
         "US-011",
         "US-031"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-033",
       "title": "The `schedule` tool and the client messages",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [
         "US-004",
         "US-031"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-034",
       "title": "A routine with nobody there",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [
         "US-003",
         "US-009",
         "US-031"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-035",
       "title": "A guard script before a run",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P2",
       "blocked_by": [
         "US-018",
         "US-033"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-028",
       "title": "The curator",
       "epic": "EP-007",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P2",
       "blocked_by": [
         "US-025",
         "US-029",
         "US-031"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-036",
