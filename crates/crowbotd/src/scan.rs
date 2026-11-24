@@ -99,6 +99,17 @@ pub fn describe(findings: &[ScanFinding]) -> String {
         .join(", ")
 }
 
+/// Whether `text` shows as one line, as it is written: no control, no line
+/// or paragraph separator, and no character a reader does not see. A name
+/// or a path shown in an approval must not forge or hide a line of it.
+pub fn one_line(text: &str) -> bool {
+    !text.chars().any(|character| {
+        character.is_control()
+            || matches!(character, '\u{2028}' | '\u{2029}')
+            || invisible(character)
+    })
+}
+
 /// A character that a reader does not see and that carries no meaning in
 /// plain text: zero-width characters, the word joiner, invisible operators,
 /// the byte order mark, the controls of bidirectional text, the Arabic
@@ -107,7 +118,7 @@ pub fn describe(findings: &[ScanFinding]) -> String {
 /// invisible musical formatting marks, the tag characters, which map one
 /// to one onto ASCII, and the controls other than tabs and line breaks.
 /// NFKC keeps every one of them.
-fn invisible(character: char) -> bool {
+pub fn invisible(character: char) -> bool {
     // A control other than a tab or a line break shows as nothing, and a
     // prompt reads it as a space.
     (character.is_control() && !character.is_whitespace())

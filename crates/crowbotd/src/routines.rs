@@ -280,10 +280,10 @@ pub fn plan(
     now: i64,
 ) -> Result<Planned, FieldError> {
     let name = draft.name.trim();
-    if name.chars().any(char::is_control) {
+    if !crate::scan::one_line(name) {
         return Err((
             "name",
-            "A routine's name is one line, with no control characters.".to_owned(),
+            "A routine's name is one line, with no control or invisible characters.".to_owned(),
         ));
     }
     if name.is_empty() || name.chars().count() > ROUTINE_NAME_CHARACTERS {
@@ -377,6 +377,12 @@ pub fn script_path(folder: &Path, path: &str) -> Result<PathBuf, String> {
         .map_err(|_| format!("The script {} does not exist.", joined.display()))?;
     if !resolved.starts_with(&folder) || !resolved.is_file() {
         return Err(outside());
+    }
+    // The path is shown in the approval, which it must not forge a line of.
+    if !crate::scan::one_line(&resolved.to_string_lossy()) {
+        return Err(
+            "The script's path holds a control or invisible character: rename it.".to_owned(),
+        );
     }
     Ok(resolved)
 }
