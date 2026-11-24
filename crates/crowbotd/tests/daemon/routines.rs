@@ -26,7 +26,7 @@ mod curator_limits;
 mod limits;
 
 use curator_limits::{CURATOR_ARCHIVE, CURATOR_IDLE, CURATOR_INTERVAL, CURATOR_STALE};
-use limits::{ONCE_GRACE, ROUTINE_OPENING, RUN_RETRY_DELAYS, SCRIPT_TIMEOUT};
+use limits::{ONCE_GRACE, ROUTINE_OPENING, RUN_RETRY_DELAYS};
 
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
@@ -1133,6 +1133,7 @@ mod scripts {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    use super::limits::SCRIPT_TIMEOUT;
     use super::*;
 
     fn script(folder: &Path, name: &str, body: &str) -> PathBuf {
@@ -1346,8 +1347,13 @@ mod scripts {
             .unwrap();
         assert!(detail.contains("ran longer than"), "{detail}");
         let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // A process killed in a container whose first process reaps no
+        // child stays a zombie: it runs no more.
         let gone = crate::support::eventually(Duration::from_secs(5), || {
-            !Path::new(&format!("/proc/{}", pid.trim())).exists()
+            std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).map_or(true, |stat| {
+                stat.rsplit_once(") ")
+                    .is_some_and(|(_, rest)| rest.starts_with('Z'))
+            })
         });
         assert!(gone, "the script's child {pid} still runs");
     }
