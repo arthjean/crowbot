@@ -19,8 +19,10 @@ use crowbot_protocol::{
 use tokio::sync::oneshot;
 
 use crate::conversation::{self, Command, ConversationHandle, Sink};
+use crate::prompt::Sections;
 use crate::runtime::Runtimes;
 use crate::store::{BotRow, NewBot, SharedStore, StoreError};
+use crate::tools::Registry;
 
 /// The provider of a bot that runs the agent command given to the daemon.
 pub const CUSTOM_PROVIDER: &str = "custom";
@@ -118,6 +120,8 @@ pub struct Daemon {
     runtimes: Runtimes,
     state: Mutex<State>,
     next_connection: AtomicU64,
+    tools: Arc<Registry>,
+    sections: Sections,
 }
 
 impl Daemon {
@@ -138,7 +142,19 @@ impl Daemon {
             runtimes,
             state: Mutex::new(State::default()),
             next_connection: AtomicU64::new(1),
+            tools: Arc::new(Registry::new()),
+            sections: Sections::new(),
         }
+    }
+
+    /// The daemon's own tools, which every session's bridge serves.
+    pub fn tools(&self) -> &Arc<Registry> {
+        &self.tools
+    }
+
+    /// The sections the daemon adds to a session's system prompt.
+    pub fn sections(&self) -> &Sections {
+        &self.sections
     }
 
     pub fn store(&self) -> &SharedStore {

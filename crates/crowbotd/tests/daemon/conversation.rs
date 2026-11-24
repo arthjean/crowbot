@@ -139,7 +139,7 @@ async fn a_tool_call_is_stored_with_its_kind_input_output_and_times() {
 
     let live = turn(&mut client, id, "work").await;
     let expected = vec![
-        Event::UserText("work".to_owned()),
+        Event::user_text("work".to_owned()),
         Event::ThoughtText("Looking at the files.".to_owned()),
         Event::ToolCallStarted {
             id: "call-1000".to_owned(),
@@ -147,6 +147,7 @@ async fn a_tool_call_is_stored_with_its_kind_input_output_and_times() {
             status: Some(ToolStatus::Pending),
             kind: Some(ToolKind::Read),
             input: Some(format!("{}/notes.txt", bot.bot.workspace)),
+            effect: None,
         },
         Event::ToolCallUpdated {
             id: "call-1000".to_owned(),
@@ -170,6 +171,7 @@ async fn a_tool_call_is_stored_with_its_kind_input_output_and_times() {
             status: Some(ToolStatus::InProgress),
             kind: Some(ToolKind::Execute),
             input: Some("cargo test".to_owned()),
+            effect: None,
         },
         Event::ToolCallUpdated {
             id: "call-1001".to_owned(),
@@ -370,13 +372,14 @@ async fn a_version_4_database_migrates_and_its_older_events_still_load() {
     assert_eq!(
         support::events(&snapshot),
         [
-            Event::UserText("Plan the trip".to_owned()),
+            Event::user_text("Plan the trip".to_owned()),
             Event::ToolCallStarted {
                 id: "t1".to_owned(),
                 title: "Read".to_owned(),
                 status: Some(ToolStatus::Pending),
                 kind: None,
                 input: None,
+                effect: None,
             },
             Event::ToolCallUpdated {
                 id: "t1".to_owned(),
@@ -411,7 +414,7 @@ async fn a_version_4_database_migrates_and_its_older_events_still_load() {
 
     let database = rusqlite::Connection::open(daemon.database()).unwrap();
     let count = |sql: &str| -> i64 { database.query_row(sql, [], |row| row.get(0)).unwrap() };
-    assert_eq!(count("PRAGMA user_version"), 8);
+    assert_eq!(count("PRAGMA user_version"), 9);
     assert_eq!(count("SELECT COUNT(*) FROM events"), 6);
     assert_eq!(count("SELECT COUNT(*) FROM conversations"), 1);
     drop(database);
@@ -437,7 +440,7 @@ async fn a_long_conversation_opens_on_its_newest_page_and_older_pages_load_in_or
             format!("n{index}")
         );
         expected.extend([
-            Event::UserText(format!("say n{index}")),
+            Event::user_text(format!("say n{index}")),
             Event::MessageText(format!("n{index}")),
             Event::TurnEnded(TurnEnd::Completed),
         ]);
@@ -931,6 +934,7 @@ async fn a_tool_call_stopped_before_it_ends_has_no_final_status() {
             status: Some(ToolStatus::InProgress),
             kind: Some(ToolKind::Execute),
             input: Some("sleep 60".to_owned()),
+            effect: None,
         }
     );
     assert_eq!(client.next_within(QUIET).await, None);
@@ -945,7 +949,7 @@ async fn a_tool_call_stopped_before_it_ends_has_no_final_status() {
     assert_eq!(
         support::events(&snapshot),
         [
-            Event::UserText("hang sleep 60".to_owned()),
+            Event::user_text("hang sleep 60".to_owned()),
             started,
             Event::TurnEnded(TurnEnd::Cancelled),
         ]
@@ -974,7 +978,7 @@ async fn a_turn_stopped_while_thinking_keeps_the_thought_and_has_no_message() {
     assert_eq!(
         support::events(&client.open(id).await),
         [
-            Event::UserText("ponder Weighing the options.".to_owned()),
+            Event::user_text("ponder Weighing the options.".to_owned()),
             thought,
             Event::TurnEnded(TurnEnd::Cancelled),
         ]

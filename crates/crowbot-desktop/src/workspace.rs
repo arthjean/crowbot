@@ -1658,7 +1658,7 @@ impl Workspace {
         let source = self.open.as_ref().and_then(|open| {
             let row = open.transcript.rows().iter().find(|row| row.key == key)?;
             match &row.kind {
-                RowKind::User { text }
+                RowKind::User { text, .. }
                 | RowKind::Answer { text, .. }
                 | RowKind::Thought { text } => Some(text.trim_matches('\n').to_owned()),
                 _ => None,

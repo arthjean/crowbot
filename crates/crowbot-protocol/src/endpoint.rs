@@ -51,6 +51,24 @@ impl Endpoint {
         (cfg!(unix) && length > SOCKET_PATH_LIMIT).then_some(length)
     }
 
+    /// An endpoint with a name and no file, on Linux: an abstract socket,
+    /// which ends with its listener and leaves nothing to remove. It is
+    /// written `@name`. Any account may connect to one, so its listener
+    /// drops a peer of another account, as a socket file's listener does.
+    #[cfg(target_os = "linux")]
+    pub fn abstract_socket(name: &str) -> Self {
+        Self(format!("@{name}"))
+    }
+
+    /// The name of an abstract socket, on Linux.
+    pub fn abstract_name(&self) -> Option<&str> {
+        if cfg!(target_os = "linux") {
+            self.0.strip_prefix('@')
+        } else {
+            None
+        }
+    }
+
     pub fn address(&self) -> &str {
         &self.0
     }

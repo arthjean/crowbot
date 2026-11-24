@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
-    UserText(String),
+    UserText(UserMessage),
     MessageText(String),
     ThoughtText(String),
     ToolCallStarted {
@@ -14,6 +14,9 @@ pub enum Event {
         kind: Option<ToolKind>,
         #[serde(default)]
         input: Option<String>,
+        /// What the tool may change, when it is one of the daemon's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect: Option<ToolEffect>,
     },
     ToolCallUpdated {
         id: String,
@@ -77,9 +80,19 @@ pub enum Event {
         from: String,
         to: String,
     },
+    /// The agent called a daemon tool that this session may not call, or
+    /// that does not exist. The tool did not run.
+    ToolRefused {
+        tool: String,
+        message: String,
+    },
 }
 
 impl Event {
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self::UserText(UserMessage::new(text))
+    }
+
     pub fn ends_turn(&self) -> bool {
         matches!(
             self,
@@ -152,6 +165,89 @@ pub enum ApprovalReason {
     PermissionLevel,
     /// The request offered no allow-once option, so it could only be declined.
     NoAllowOnce,
+    /// The agent asked to call a tool of the daemon, which the daemon gates
+    /// itself where it runs the tool.
+    DaemonTool,
+}
+
+/// What a daemon tool may change: nothing, state of the bot that the daemon
+/// versions and can put back (memory, skills), or anything else. Only an
+/// `External` tool asks a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    Read,
+    BotState,
+    External,
+}
+
+/// A message a person sent, with the note the daemon put before it: what
+/// changed in what the session was given when it opened. A message with no
+/// note is stored as its text alone, the shape every earlier daemon wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserMessage {
+    pub text: String,
+    pub note: Option<String>,
+}
+
+impl UserMessage {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            note: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_note(mut self, note: Option<String>) -> Self {
+        self.note = note.filter(|note| !note.is_empty());
+        self
+    }
+}
+
+impl std::ops::Deref for UserMessage {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl Serialize for UserMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Noted<'a> {
+            text: &'a str,
+            note: &'a str,
+        }
+        match &self.note {
+            None => serializer.serialize_str(&self.text),
+            Some(note) => Noted {
+                text: &self.text,
+                note,
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UserMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Text(String),
+            Noted {
+                text: String,
+                #[serde(default)]
+                note: Option<String>,
+            },
+        }
+        Ok(match Stored::deserialize(deserializer)? {
+            Stored::Text(text) => Self::new(text),
+            Stored::Noted { text, note } => Self::new(text).with_note(note),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +396,7 @@ mod tests {
                 status: Some(ToolStatus::Pending),
                 kind: None,
                 input: None,
+                effect: None,
             }
         );
         let updated =
@@ -360,6 +457,59 @@ mod tests {
             })
             .unwrap(),
             r#"{"type":"turn_failed","data":{"message":"sign in","cause":"sign_in_required","provider":"claude"}}"#
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_note_keeps_the_stored_shape_and_a_note_is_a_field() {
+        let plain = r#"{"type":"user_text","data":"hello"}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(plain).unwrap(),
+            Event::user_text("hello")
+        );
+        assert_eq!(
+            serde_json::to_string(&Event::user_text("hello")).unwrap(),
+            plain
+        );
+        let noted = Event::UserText(UserMessage::new("hi").with_note(Some("changed".to_owned())));
+        let stored = serde_json::to_string(&noted).unwrap();
+        assert_eq!(
+            stored,
+            r#"{"type":"user_text","data":{"text":"hi","note":"changed"}}"#
+        );
+        assert_eq!(serde_json::from_str::<Event>(&stored).unwrap(), noted);
+        let no_field = r#"{"type":"user_text","data":{"text":"hi"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Event>(no_field).unwrap(),
+            Event::user_text("hi")
+        );
+    }
+
+    #[test]
+    fn a_daemon_tool_call_and_a_refusal_have_a_stable_stored_shape() {
+        let started = Event::ToolCallStarted {
+            id: "t1".to_owned(),
+            title: "memory".to_owned(),
+            status: None,
+            kind: None,
+            input: None,
+            effect: Some(ToolEffect::BotState),
+        };
+        assert_eq!(
+            serde_json::to_string(&started).unwrap(),
+            r#"{"type":"tool_call_started","data":{"id":"t1","title":"memory","status":null,"kind":null,"input":null,"effect":"bot_state"}}"#
+        );
+        let refused = Event::ToolRefused {
+            tool: "review_only".to_owned(),
+            message: "no".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&refused).unwrap(),
+            r#"{"type":"tool_refused","data":{"tool":"review_only","message":"no"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalReason::DaemonTool).unwrap(),
+            r#""daemon_tool""#
         );
     }
 

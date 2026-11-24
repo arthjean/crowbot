@@ -153,7 +153,7 @@ impl Store {
         let mut messages = Vec::new();
         for (event_id, conversation_id, bot_id, payload, at_ms) in rows {
             let (author, text) = match serde_json::from_str(&payload)? {
-                Event::UserText(text) => (MessageAuthor::User, text),
+                Event::UserText(message) => (MessageAuthor::User, message.text),
                 Event::MessageText(text) => (MessageAuthor::Bot, text),
                 _ => continue,
             };
@@ -208,7 +208,7 @@ mod tests {
 
     fn turn(store: &Store, conversation_id: i64, asked: &str, answered: &str) -> (i64, i64) {
         let user = store
-            .append(conversation_id, &Event::UserText(asked.to_owned()))
+            .append(conversation_id, &Event::user_text(asked.to_owned()))
             .unwrap();
         let answer = store
             .append(conversation_id, &Event::MessageText(answered.to_owned()))
@@ -539,7 +539,7 @@ mod tests {
         let store = store();
         let (_, chat) = bot(&store, "Atlas", "");
         let asked = store
-            .append(chat, &Event::UserText("one long turn".to_owned()))
+            .append(chat, &Event::user_text("one long turn".to_owned()))
             .unwrap();
         let mut hit = 0;
         for index in 0..40 {
@@ -598,7 +598,7 @@ mod tests {
             .unwrap();
         assert_eq!(kept, 5);
         store
-            .append(1, &Event::UserText("a new albatross".to_owned()))
+            .append(1, &Event::user_text("a new albatross".to_owned()))
             .unwrap();
         assert_eq!(found(&store, "albatross"), 3);
     }
@@ -636,7 +636,7 @@ mod tests {
                 words[(index / 31) % words.len()]
             );
             let event = match index % 3 {
-                0 => Event::UserText(text),
+                0 => Event::user_text(text),
                 1 => Event::MessageText(text),
                 _ => Event::TurnEnded(TurnEnd::Completed),
             };

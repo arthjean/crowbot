@@ -1,7 +1,8 @@
 //! Bots in the database: their records, their conversations, and their read marks.
 
 use crowbot_protocol::{
-    Avatar, Bot, BotPatch, ConversationSummary, Event, MascotShape, PermissionLevel, mascot_at,
+    Avatar, Bot, BotPatch, ConversationSummary, Event, MascotShape, PermissionLevel, UserMessage,
+    mascot_at,
 };
 use rusqlite::{OptionalExtension, Row, params};
 
@@ -407,7 +408,9 @@ impl Store {
             )
             .optional()?;
         Ok(match payload.as_deref().map(serde_json::from_str) {
-            Some(Ok(Event::UserText(text) | Event::MessageText(text))) => preview_of(&text),
+            Some(Ok(Event::UserText(UserMessage { text, .. }) | Event::MessageText(text))) => {
+                preview_of(&text)
+            }
             _ => String::new(),
         })
     }
@@ -601,7 +604,7 @@ mod tests {
 
     fn turn(store: &Store, conversation_id: i64, end: Event) {
         for event in [
-            Event::UserText("go".to_owned()),
+            Event::user_text("go".to_owned()),
             Event::MessageText("done".to_owned()),
             end,
         ] {
@@ -850,7 +853,7 @@ mod tests {
         turn(&store, second, Event::TurnEnded(TurnEnd::Completed));
         // A turn that still runs is not unread yet.
         store
-            .append(second, &Event::UserText("more".to_owned()))
+            .append(second, &Event::user_text("more".to_owned()))
             .unwrap();
         store
             .append(second, &Event::MessageText("partial".to_owned()))
@@ -887,7 +890,7 @@ mod tests {
         assert!(store.standing(id).unwrap().failed);
         // The next message starts a turn: the failure is behind.
         store
-            .append(conversation, &Event::UserText("again".to_owned()))
+            .append(conversation, &Event::user_text("again".to_owned()))
             .unwrap();
         assert!(!store.standing(id).unwrap().failed);
         store
@@ -925,7 +928,7 @@ mod tests {
         store
             .append(
                 first,
-                &Event::UserText(
+                &Event::user_text(
                     "  Plan
  the   trip "
                         .to_owned(),
@@ -951,7 +954,7 @@ the plan."
 
         let second = store.new_conversation(id).unwrap().unwrap().id;
         store
-            .append(second, &Event::UserText("é".repeat(400)))
+            .append(second, &Event::user_text("é".repeat(400)))
             .unwrap();
         assert_eq!(store.standing(id).unwrap().preview, "é".repeat(140));
 
@@ -1006,14 +1009,14 @@ the plan."
             (
                 1,
                 "user_text",
-                Event::UserText("Plan the trip".to_owned()),
+                Event::user_text("Plan the trip".to_owned()),
                 8,
             ),
             (1, "turn_ended", Event::TurnEnded(TurnEnd::Completed), 9),
             (
                 2,
                 "user_text",
-                Event::UserText("\n  Fix the build\nnow".to_owned()),
+                Event::user_text("\n  Fix the build\nnow".to_owned()),
                 20,
             ),
             (2, "turn_failed", failed(), 21),

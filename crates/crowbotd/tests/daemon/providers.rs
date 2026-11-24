@@ -232,6 +232,67 @@ async fn a_bot_on_codex_or_grok_streams_its_answer_from_that_provider() {
     }
 }
 
+/// Each provider names a call to a daemon tool its own way
+/// (`docs/harness-providers.md`): ChatGPT's permission request names only the
+/// id of a tool call that named the server.
+#[tokio::test]
+async fn each_provider_calls_a_daemon_tool_through_the_bridge_and_its_request_is_the_daemons() {
+    let daemon = daemon();
+    let mut client = daemon.client().await;
+    for provider in [CLAUDE, CODEX, GROK] {
+        ready(&daemon, &mut client, provider).await;
+        let (bot, conversation) = conversation_on(&mut client, provider).await;
+        client.say(conversation, "mcpcall probe_read {}").await;
+        let mut events = Vec::new();
+        loop {
+            let ServerMessage::ConversationEvent { event, .. } = client.next().await else {
+                continue;
+            };
+            let ended = event.ends_turn();
+            events.push(event);
+            if ended {
+                break;
+            }
+        }
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::ApprovalResolved {
+                    decision: ApprovalDecision::Allowed,
+                    reason: Some(crowbot_protocol::ApprovalReason::DaemonTool),
+                    ..
+                }
+            )),
+            "{provider}: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::ToolCallStarted {
+                    effect: Some(crowbot_protocol::ToolEffect::Read),
+                    ..
+                }
+            )),
+            "{provider}: {events:?}"
+        );
+        let reply: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::MessageText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reply,
+            format!(
+                "call=bot={} conversation={conversation} failed=false",
+                bot.bot.id
+            ),
+            "{provider}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_declined_write_leaves_no_file_on_each_provider() {
     let daemon = daemon();

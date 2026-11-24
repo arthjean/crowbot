@@ -374,7 +374,7 @@ async fn a_database_from_before_bots_migrates_when_the_daemon_starts() {
     assert_eq!(
         support::events(&snapshot),
         [
-            Event::UserText("Plan the trip".to_owned()),
+            Event::user_text("Plan the trip".to_owned()),
             Event::MessageText("Done.".to_owned()),
             Event::TurnEnded(TurnEnd::Completed),
         ]

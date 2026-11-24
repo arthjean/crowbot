@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -8,14 +9,14 @@ use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     AuthCapabilities, AuthMethod, AuthState, AuthStatusRequest, AuthenticateRequest,
     CancelNotification, ClientCapabilities, ContentBlock, Implementation, InitializeRequest,
-    NewSessionRequest, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
-    SessionConfigSelectOptions, SessionId, SessionModeId, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, SystemPrompt,
-    TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdateFields,
-    ToolKind as AgentToolKind,
+    McpServer, McpServerStdio, Meta, NewSessionRequest, PermissionOptionKind, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionId, SessionModeId,
+    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, StopReason, SystemPrompt, TextContent, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdateFields, ToolKind as AgentToolKind,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, UntypedMessage,
@@ -24,6 +25,9 @@ use crowbot_protocol::{
     APPROVAL_TARGET_BYTES, Event, FailureCause, ModelChoice, ProviderState, TOOL_INPUT_BYTES,
     TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
 };
+
+use crate::mcp::{SERVER_NAME, ServerCommand};
+use crate::tools::Registry;
 use serde_json::{Map, Value};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -547,10 +551,15 @@ pub struct SessionConfig {
     pub launch: Launch,
     pub cwd: PathBuf,
     pub resume: Option<String>,
-    /// The bot's instructions. They reach the agent as the system prompt of
-    /// the session, or at the start of its first prompt when the agent takes
-    /// no system prompt.
-    pub instructions: String,
+    /// The bot's instructions and the sections the daemon adds to them
+    /// (`prompt.rs`). They reach the agent as the system prompt of the
+    /// session, or at the start of its first prompt when the agent takes no
+    /// system prompt.
+    pub system_prompt: String,
+    /// The daemon's MCP server for this session: the bridge to its endpoint.
+    pub mcp: Option<ServerCommand>,
+    /// The daemon's tools, to name the effect of a call to one of them.
+    pub tools: Arc<Registry>,
     /// The model the session runs on. `None` keeps the agent's default.
     pub model: Option<String>,
     /// The reasoning level. `None` keeps the agent's default.
@@ -582,6 +591,12 @@ pub enum AgentEvent {
         tool_call_id: String,
         title: Option<String>,
     },
+    /// The agent asked to call a daemon tool, which was allowed at once: the
+    /// daemon gates the call where it runs the tool (decision D1).
+    DaemonToolAllowed {
+        tool_call_id: String,
+        title: Option<String>,
+    },
 }
 
 pub enum SessionCommand {
@@ -590,6 +605,9 @@ pub enum SessionCommand {
     Prompt {
         text: String,
         handoff: Option<String>,
+        /// What changed in the sections of the system prompt since the
+        /// session last saw them (`prompt.rs`), read before the text.
+        note: Option<String>,
     },
     /// Asks the agent to end the running turn, then answers the approvals that
     /// waited as cancelled, in that order: an agent that reads its cancelled
@@ -815,13 +833,33 @@ pub async fn run_session(
         launch,
         cwd,
         resume,
-        instructions,
+        system_prompt: instructions,
+        mcp,
+        tools,
         model,
         effort,
         signed_in,
     } = config;
     let update_events = events.clone();
     let approval_events = events.clone();
+    // The tool calls that name a daemon tool, by their id: ChatGPT's
+    // permission request names only the id (`docs/harness-providers.md`).
+    let daemon_calls = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let seen_calls = daemon_calls.clone();
+    // Only a tool the daemon serves counts: a name that merely starts like
+    // one, from a server whose name starts like the daemon's, is another
+    // server's tool and asks like any other.
+    let served = tools.clone();
+    let daemon_tool = move |raw_input: Option<&Value>, meta: Option<&Meta>| {
+        daemon_tool(raw_input, meta).filter(|name| served.get(name).is_some())
+    };
+    let named_by_request = daemon_tool.clone();
+    let mcp_servers: Vec<McpServer> = mcp
+        .into_iter()
+        .map(|server| {
+            McpServer::Stdio(McpServerStdio::new(server.name, server.program).args(server.args))
+        })
+        .collect();
     let mut first = first.into_iter();
     // The modes the agent reports it moved to on its own, out of the one in
     // which it asks first.
@@ -837,7 +875,29 @@ pub async fn run_session(
                 {
                     left_mode.send(update.current_mode_id.0.to_string()).ok();
                 }
-                if let Some(event) = translate(notification.update) {
+                let named = match &notification.update {
+                    SessionUpdate::ToolCall(call) => Some((
+                        call.tool_call_id.0.to_string(),
+                        daemon_tool(call.raw_input.as_ref(), call.meta.as_ref()),
+                    )),
+                    SessionUpdate::ToolCallUpdate(update) => Some((
+                        update.tool_call_id.0.to_string(),
+                        daemon_tool(update.fields.raw_input.as_ref(), update.meta.as_ref()),
+                    )),
+                    _ => None,
+                };
+                let mut tool = None;
+                if let Some((id, Some(name))) = named {
+                    seen_calls
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(id, name.clone());
+                    tool = Some(name);
+                }
+                if let Some(mut event) = translate(notification.update) {
+                    if let (Event::ToolCallStarted { effect, .. }, Some(tool)) = (&mut event, &tool) {
+                        *effect = tools.effect(tool);
+                    }
                     update_events.send(AgentEvent::Event(event)).ok();
                 }
                 Ok(())
@@ -861,6 +921,26 @@ pub async fn run_session(
                         .ok();
                     return responder.respond(RequestPermissionResponse::new(decline));
                 };
+                let daemon_call = named_by_request(
+                    request.tool_call.fields.raw_input.as_ref(),
+                    request.tool_call.meta.as_ref(),
+                )
+                .or_else(|| {
+                    daemon_calls
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&tool_call_id)
+                        .cloned()
+                });
+                if daemon_call.is_some() {
+                    approval_events
+                        .send(AgentEvent::DaemonToolAllowed {
+                            tool_call_id,
+                            title,
+                        })
+                        .ok();
+                    return responder.respond(RequestPermissionResponse::new(allow));
+                }
                 let (reply, decision) = oneshot::channel();
                 approval_events
                     .send(AgentEvent::ApprovalNeeded {
@@ -914,6 +994,7 @@ pub async fn run_session(
                     let mut request = ResumeSessionRequest::new(session_id.clone(), cwd);
                     request.meta = agent.session_meta;
                     request.system_prompt = system_prompt;
+                    request.mcp_servers = mcp_servers;
                     let resumed = connection.send_request(request).block_task().await?;
                     (session_id, resumed.modes, resumed.config_options)
                 }
@@ -921,6 +1002,7 @@ pub async fn run_session(
                     let mut request = NewSessionRequest::new(cwd);
                     request.meta = agent.session_meta;
                     request.system_prompt = system_prompt;
+                    request.mcp_servers = mcp_servers;
                     let created = connection.send_request(request).block_task().await?;
                     (created.session_id, created.modes, created.config_options)
                 }
@@ -993,7 +1075,12 @@ pub async fn run_session(
                         None => break,
                     },
                 };
-                let SessionCommand::Prompt { text, handoff } = command else {
+                let SessionCommand::Prompt {
+                    text,
+                    handoff,
+                    note,
+                } = command
+                else {
                     continue;
                 };
                 if let (Some(mode), Ok(left)) = (guarded_mode, mode_left.try_recv()) {
@@ -1003,6 +1090,7 @@ pub async fn run_session(
                     .take()
                     .into_iter()
                     .chain(handoff)
+                    .chain(note)
                     .chain([text])
                     .map(|text| ContentBlock::Text(TextContent::new(text)))
                     .collect();
@@ -1165,6 +1253,7 @@ fn translate(update: SessionUpdate) -> Option<Event> {
             kind: Some(tool_kind(call.kind)),
             input: tool_input(call.raw_input.as_ref(), &call.locations),
             title: call.title,
+            effect: None,
         }),
         SessionUpdate::ToolCallUpdate(update) => {
             let fields = update.fields;
@@ -1195,6 +1284,43 @@ fn translate(update: SessionUpdate) -> Option<Event> {
         }
         _ => None,
     }
+}
+
+/// The daemon tool that a tool call names, read from fields the agent sets
+/// and the model does not write (`docs/harness-providers.md`): Claude's
+/// `_meta.claudeCode.toolName` or `mcpServer`, ChatGPT's `rawInput.server`
+/// with `_meta.is_mcp_tool_call`, and the `tool_name` of Grok's `use_tool`. A
+/// title is never read: an agent titles a shell command with its text.
+fn daemon_tool(raw_input: Option<&Value>, meta: Option<&Meta>) -> Option<String> {
+    let meta = meta?;
+    if let Some(claude) = meta.get("claudeCode") {
+        let name = claude.get("toolName").and_then(Value::as_str)?;
+        let tool = name.strip_prefix(&format!("mcp__{SERVER_NAME}__"));
+        let server = claude
+            .get("mcpServer")
+            .and_then(|server| server.get("name"))
+            .and_then(Value::as_str);
+        return match (tool, server) {
+            (Some(tool), None | Some(SERVER_NAME)) => Some(tool.to_owned()),
+            _ => None,
+        };
+    }
+    let input = raw_input.and_then(Value::as_object);
+    if meta.get("is_mcp_tool_call") == Some(&Value::Bool(true)) {
+        let input = input?;
+        return (input.get("server")?.as_str()? == SERVER_NAME)
+            .then(|| input.get("tool")?.as_str().map(str::to_owned))
+            .flatten();
+    }
+    let grok = meta.get("x.ai/tool")?;
+    if grok.get("name").and_then(Value::as_str) != Some("use_tool") {
+        return None;
+    }
+    input?
+        .get("tool_name")?
+        .as_str()?
+        .strip_prefix(&format!("{SERVER_NAME}__"))
+        .map(str::to_owned)
 }
 
 fn tool_kind(kind: AgentToolKind) -> ToolKind {
@@ -1675,6 +1801,7 @@ mod tests {
                 status: Some(ToolStatus::InProgress),
                 kind: Some(ToolKind::Execute),
                 input: Some("cargo test".to_owned()),
+                effect: None,
             })
         );
         assert_eq!(
@@ -1685,6 +1812,7 @@ mod tests {
                 status: Some(ToolStatus::Pending),
                 kind: Some(ToolKind::Other),
                 input: None,
+                effect: None,
             })
         );
     }
@@ -2020,5 +2148,67 @@ mod tests {
         // A long detail is cut.
         let long = failure(&"a".repeat(64 << 10));
         assert_eq!(failure_message(&long).len(), FAILURE_BYTES);
+    }
+
+    fn meta(value: Value) -> Meta {
+        value.as_object().unwrap().clone()
+    }
+
+    /// The forms each provider gave in `docs/harness-providers.md`.
+    #[test]
+    fn a_daemon_tool_is_named_by_fields_the_agent_sets_and_never_by_a_title() {
+        let claude_request = meta(json!({ "claudeCode": {
+            "toolName": "mcp__crowbot__memory",
+            "mcpServer": { "name": "crowbot", "source": "dynamic" }
+        } }));
+        assert_eq!(
+            daemon_tool(Some(&json!({})), Some(&claude_request)).as_deref(),
+            Some("memory")
+        );
+        let claude_call = meta(json!({ "claudeCode": { "toolName": "mcp__crowbot__memory" } }));
+        assert_eq!(
+            daemon_tool(None, Some(&claude_call)).as_deref(),
+            Some("memory")
+        );
+        let other_server = meta(json!({ "claudeCode": {
+            "toolName": "mcp__crowbot__memory",
+            "mcpServer": { "name": "elsewhere" }
+        } }));
+        assert_eq!(daemon_tool(None, Some(&other_server)), None);
+        let claude_shell = meta(json!({ "claudeCode": { "toolName": "Bash" } }));
+        assert_eq!(
+            daemon_tool(
+                Some(&json!({ "command": "mcp__crowbot__memory" })),
+                Some(&claude_shell)
+            ),
+            None
+        );
+
+        let codex = meta(json!({ "is_mcp_tool_call": true }));
+        let codex_input = json!({ "server": "crowbot", "tool": "memory", "arguments": {} });
+        assert_eq!(
+            daemon_tool(Some(&codex_input), Some(&codex)).as_deref(),
+            Some("memory")
+        );
+        let codex_other = json!({ "server": "elsewhere", "tool": "memory" });
+        assert_eq!(daemon_tool(Some(&codex_other), Some(&codex)), None);
+        // The same input with no flag is a shell command's or a file's.
+        assert_eq!(
+            daemon_tool(Some(&codex_input), Some(&meta(json!({})))),
+            None
+        );
+
+        let grok = meta(json!({ "x.ai/tool": { "name": "use_tool", "kind": "use_tool" } }));
+        let grok_input = json!({ "variant": "UseTool", "tool_name": "crowbot__memory" });
+        assert_eq!(
+            daemon_tool(Some(&grok_input), Some(&grok)).as_deref(),
+            Some("memory")
+        );
+        let grok_shell = meta(json!({ "x.ai/tool": { "name": "run_terminal_command" } }));
+        assert_eq!(daemon_tool(Some(&grok_input), Some(&grok_shell)), None);
+
+        // No meta: a title or an input alone names nothing.
+        assert_eq!(daemon_tool(Some(&codex_input), None), None);
+        assert_eq!(daemon_tool(Some(&grok_input), None), None);
     }
 }

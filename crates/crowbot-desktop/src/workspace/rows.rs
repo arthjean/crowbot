@@ -42,7 +42,7 @@ fn prepare(
             }
             Some(shown.document.blocks())
         }
-        RowKind::User { text } | RowKind::Thought { text } => {
+        RowKind::User { text, .. } | RowKind::Thought { text } => {
             let shown = open.texts.entry(row.key).or_insert_with(|| RowText {
                 document: Document::plain(text),
                 reveal: Reveal::shown_from(text.len(), now),
@@ -157,6 +157,9 @@ pub(super) fn notice_text(notice: &Notice) -> String {
         Notice::ProviderChanged { from, to } => {
             let (from, to) = (provider_name(Some(from)), provider_name(Some(to)));
             format!("The bot moved from {from} to {to}. {to} received what was said before.")
+        }
+        Notice::ToolRefused { tool, message } => {
+            format!("Crow Bot did not run the tool {tool}: {message}")
         }
     }
 }
@@ -498,6 +501,9 @@ impl Workspace {
             (ApprovalState::Waiting, _) => None,
             (ApprovalState::Allowed, Some(ApprovalReason::PermissionLevel)) => {
                 Some(("Allowed by Full access", theme.success_text))
+            }
+            (ApprovalState::Allowed, Some(ApprovalReason::DaemonTool)) => {
+                Some(("Allowed: a Crow Bot tool", theme.success_text))
             }
             (ApprovalState::Allowed, _) => Some(("Allowed", theme.success_text)),
             (ApprovalState::Declined, Some(ApprovalReason::NoAllowOnce)) => {

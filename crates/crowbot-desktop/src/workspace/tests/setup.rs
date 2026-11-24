@@ -1513,7 +1513,7 @@ fn an_unreachable_daemon_disables_the_settings_and_says_why(cx: &mut TestAppCont
 
 fn turn_events(first_id: i64, asked: &str, answered: &str) -> Vec<TimedEvent> {
     [
-        Event::UserText(asked.to_owned()),
+        Event::user_text(asked.to_owned()),
         Event::MessageText(answered.to_owned()),
         Event::TurnEnded(TurnEnd::Completed),
     ]
@@ -2037,7 +2037,7 @@ fn questions(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<S
     workspace.read_with(cx, |this, _| {
         let rows = this.open.as_ref().unwrap().transcript.rows().iter();
         rows.filter_map(|row| match &row.kind {
-            RowKind::User { text } => Some(text.to_string()),
+            RowKind::User { text, .. } => Some(text.to_string()),
             _ => None,
         })
         .collect()
@@ -2048,7 +2048,7 @@ fn live_question(daemon: &mut Daemon, cx: &mut VisualTestContext) {
     daemon.tell(
         ServerMessage::ConversationEvent {
             conversation_id: 10,
-            event: Event::UserText("live question".to_owned()),
+            event: Event::user_text("live question".to_owned()),
             at_ms: NOON + 900_000,
         },
         cx,

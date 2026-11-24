@@ -45,6 +45,18 @@
 //!   so, then, unless a cancel arrives within two seconds, write `written` to
 //!   the file without asking, as an agent in a mode that does not ask.
 //!
+//! - `mcpconfig`: report the MCP servers the session was given, as JSON.
+//! - `mcp <method> [params]`: start the first MCP server of the session, if
+//!   it is not running, and send it the request, with the params given as
+//!   JSON; report the answer as JSON.
+//! - `mcpcall <tool> [arguments]`: call a tool of the daemon's server as the
+//!   real agent of the flavor does (`docs/harness-providers.md`): a tool call
+//!   that names the server, a permission request, then the MCP call with
+//!   the tool call's id; report the result's text and whether it failed.
+//! - `mcpanon <tool> [arguments]`: the same with a permission request and a
+//!   tool call that name the tool in their title only.
+//! - `mcppid`: report the process id of the running MCP server.
+//!
 //! The command is the last part of a prompt: the parts before it are reported
 //! by `config` as the preface.
 //!
@@ -276,6 +288,109 @@ struct Agent {
     next_request: AtomicU64,
     answers: Mutex<HashMap<u64, mpsc::Sender<Value>>>,
     session: Mutex<Session>,
+    mcp: Mutex<Option<Mcp>>,
+}
+
+/// The first MCP server of the session, which the agent starts at its first
+/// use, as a real agent starts it at the session's start.
+struct Mcp {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    next: u64,
+    answers: Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>,
+}
+
+impl Mcp {
+    fn start(server: &Value) -> Result<Self, String> {
+        let command = server["command"].as_str().ok_or("no command")?;
+        let args: Vec<String> = server["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|arg| arg.as_str().map(str::to_owned))
+            .collect();
+        let mut child = std::process::Command::new(command)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let answers: Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>> = Arc::default();
+        let waiting = answers.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let Ok(answer) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let id = answer["id"].to_string();
+                let sender = waiting
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&id);
+                if let Some(sender) = sender {
+                    sender.send(answer).ok();
+                }
+            }
+            // The server ended: every request that waits learns it.
+            waiting
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+        });
+        let mut mcp = Self {
+            child,
+            stdin,
+            next: 0,
+            answers,
+        };
+        let initialized = mcp.request(
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "fake", "version": "0" } }),
+        );
+        if initialized.get("result").is_none() {
+            return Err(format!("initialize failed: {initialized}"));
+        }
+        mcp.notify("notifications/initialized");
+        Ok(mcp)
+    }
+
+    fn notify(&mut self, method: &str) {
+        writeln!(
+            self.stdin,
+            "{}",
+            json!({ "jsonrpc": "2.0", "method": method })
+        )
+        .ok();
+        self.stdin.flush().ok();
+    }
+
+    /// Sends a request and waits for its answer; `null` when the server
+    /// ended first.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next += 1;
+        let id = json!(self.next);
+        let (sender, answer) = mpsc::channel();
+        self.answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.to_string(), sender);
+        let written = writeln!(
+            self.stdin,
+            "{}",
+            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+        )
+        .and_then(|()| self.stdin.flush());
+        if written.is_err() {
+            return Value::Null;
+        }
+        answer
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap_or(Value::Null)
+    }
 }
 
 /// What the client set when it created or resumed the session.
@@ -289,6 +404,7 @@ struct Session {
     claude: bool,
     meta: Value,
     cwd: String,
+    mcp_servers: Value,
 }
 
 fn texts(blocks: &Value) -> Vec<String> {
@@ -408,7 +524,19 @@ impl Agent {
     }
 
     /// Asks the client for permission and returns the option it selected.
-    fn ask(&self, session: &Value, mut tool_call: Value, allow_once: bool) -> String {
+    fn ask(&self, session: &Value, tool_call: Value, allow_once: bool) -> String {
+        self.ask_with(session, tool_call, allow_once, Value::Null)
+    }
+
+    /// The same, with the `_meta` of the request. A tool call that has an
+    /// id keeps it.
+    fn ask_with(
+        &self,
+        session: &Value,
+        mut tool_call: Value,
+        allow_once: bool,
+        meta: Value,
+    ) -> String {
         let request = 1000 + self.next_request.fetch_add(1, Ordering::SeqCst);
         let mut options = vec![
             json!({ "optionId": "always", "name": "Always allow", "kind": "allow_always" }),
@@ -425,16 +553,22 @@ impl Agent {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(request, answer);
-        tool_call["toolCallId"] = format!("tool-{request}").into();
+        if tool_call.get("toolCallId").is_none() {
+            tool_call["toolCallId"] = format!("tool-{request}").into();
+        }
+        let mut params = json!({
+            "sessionId": session,
+            "toolCall": tool_call,
+            "options": options
+        });
+        if !meta.is_null() {
+            params["_meta"] = meta;
+        }
         self.send(&json!({
             "jsonrpc": "2.0",
             "id": request,
             "method": "session/request_permission",
-            "params": {
-                "sessionId": session,
-                "toolCall": tool_call,
-                "options": options
-            }
+            "params": params
         }));
         let Ok(response) = answered.recv() else {
             return "none".to_owned();
@@ -459,6 +593,7 @@ impl Agent {
         let system_prompt = texts(&params["systemPrompt"]["content"]);
         session.system_prompt = (!system_prompt.is_empty()).then(|| system_prompt.join("\n"));
         session.meta = params["_meta"].clone();
+        session.mcp_servers = params["mcpServers"].clone();
         session.claude = session.meta["claudeCode"].is_object();
         let modes = offered_modes(&self.flavor, session.claude);
         if session.mode.is_none() {
@@ -707,6 +842,26 @@ impl Agent {
                     Err(error) => self.say(session, &format!("cannot escape: {error}")),
                 }
             }
+            "mcpconfig" => {
+                let servers = self.session().mcp_servers.clone();
+                self.say(session, &format!("mcp={servers}"));
+            }
+            "mcppid" => match self.mcp_running() {
+                Ok(pid) => self.say(session, &format!("pid={pid}")),
+                Err(error) => self.say(session, &format!("mcp failed: {error}")),
+            },
+            "mcp" => {
+                let (method, params) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let params = serde_json::from_str(params).unwrap_or(Value::Null);
+                let answer = self.mcp_request(method, params);
+                self.say(session, &format!("answer={answer}"));
+            }
+            "mcpcall" | "mcpanon" => {
+                let (tool, arguments) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let arguments: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+                let report = self.mcp_call(session, tool, arguments, command == "mcpanon");
+                self.say(session, &report);
+            }
             "session" => self.say(
                 session,
                 &format!(
@@ -810,6 +965,123 @@ impl Agent {
             _ => self.say(session, text),
         }
         self.end(id);
+    }
+
+    /// The process id of the session's MCP server, started if need be.
+    fn mcp_running(&self) -> Result<u32, String> {
+        let mut mcp = self.mcp.lock().unwrap_or_else(PoisonError::into_inner);
+        if mcp.is_none() {
+            let servers = self.session().mcp_servers.clone();
+            *mcp = Some(Mcp::start(&servers[0])?);
+        }
+        Ok(mcp.as_ref().map_or(0, |mcp| mcp.child.id()))
+    }
+
+    fn mcp_request(&self, method: &str, params: Value) -> Value {
+        if let Err(error) = self.mcp_running() {
+            return json!({ "failed": error });
+        }
+        let mut mcp = self.mcp.lock().unwrap_or_else(PoisonError::into_inner);
+        mcp.as_mut()
+            .map_or(Value::Null, |mcp| mcp.request(method, params))
+    }
+
+    /// Calls a tool of the daemon's server as the agent of the flavor does.
+    fn mcp_call(&self, session: &Value, tool: &str, arguments: Value, anonymous: bool) -> String {
+        let server = self.session().mcp_servers[0]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let id = format!(
+            "call-{}",
+            1000 + self.next_request.fetch_add(1, Ordering::SeqCst)
+        );
+        let (started, asked, request_meta, call_meta) = if anonymous {
+            let title = format!("mcp__{server}__{tool}");
+            (
+                json!({ "title": title, "kind": "other", "status": "pending", "rawInput": arguments }),
+                json!({ "toolCallId": id, "title": title, "kind": "other", "rawInput": arguments }),
+                Value::Null,
+                json!({}),
+            )
+        } else {
+            match &self.flavor {
+                Flavor::Codex(_) => (
+                    json!({
+                        "title": format!("mcp.{server}.{tool}"),
+                        "kind": "execute",
+                        "status": "in_progress",
+                        "rawInput": { "server": server, "tool": tool, "arguments": arguments },
+                        "_meta": { "is_mcp_tool_call": true }
+                    }),
+                    json!({ "toolCallId": id, "kind": "execute", "status": "pending" }),
+                    json!({ "is_mcp_tool_approval": true }),
+                    json!({ "callId": id }),
+                ),
+                Flavor::Grok(_) => {
+                    let name = format!("{server}__{tool}");
+                    let meta = json!({ "x.ai/tool": { "name": "use_tool", "kind": "use_tool" } });
+                    (
+                        json!({
+                            "title": "use_tool",
+                            "rawInput": { "tool_name": name, "tool_input": arguments },
+                            "_meta": meta
+                        }),
+                        json!({
+                            "toolCallId": id,
+                            "kind": "other",
+                            "title": name,
+                            "rawInput": { "variant": "UseTool", "tool_name": name, "tool_input": arguments },
+                            "_meta": meta
+                        }),
+                        Value::Null,
+                        json!({}),
+                    )
+                }
+                Flavor::Plain => {
+                    let name = format!("mcp__{server}__{tool}");
+                    (
+                        json!({
+                            "title": name,
+                            "kind": "other",
+                            "status": "pending",
+                            "rawInput": arguments,
+                            "_meta": { "claudeCode": { "toolName": name } }
+                        }),
+                        json!({
+                            "toolCallId": id,
+                            "title": name,
+                            "kind": "other",
+                            "rawInput": arguments,
+                            "_meta": { "claudeCode": { "toolName": name, "mcpServer": { "name": server, "source": "dynamic" } } }
+                        }),
+                        Value::Null,
+                        json!({ "claudecode/toolUseId": id }),
+                    )
+                }
+            }
+        };
+        let mut started = started;
+        started["sessionUpdate"] = "tool_call".into();
+        started["toolCallId"] = id.as_str().into();
+        self.update(session, started);
+        let outcome = self.ask_with(session, asked, true, request_meta);
+        if outcome != "allow" {
+            self.update_tool(session, &id, "failed", None);
+            return format!("permission={outcome}");
+        }
+        let answer = self.mcp_request(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments, "_meta": call_meta }),
+        );
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| answer.to_string());
+        let failed = answer["result"]["isError"] == true || answer.get("error").is_some();
+        let status = if failed { "failed" } else { "completed" };
+        self.update_tool(session, &id, status, Some(&text));
+        format!("call={text} failed={failed}")
     }
 
     fn error(&self, id: &Value, code: i64, message: &str, data: Value) {

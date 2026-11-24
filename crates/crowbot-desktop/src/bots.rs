@@ -54,7 +54,7 @@ mod tests {
             cause: None,
             provider: None,
         }));
-        assert!(marks_read(&Event::UserText("go".to_owned())));
+        assert!(marks_read(&Event::user_text("go".to_owned())));
     }
 
     #[test]

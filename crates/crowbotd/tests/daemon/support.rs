@@ -13,6 +13,10 @@ use crowbot_protocol::{
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
+/// The variable that enables the checks on real providers: it names the
+/// data folder whose runtimes and sign-ins they use.
+pub const REAL_PROVIDERS: &str = "CROWBOT_REAL_PROVIDERS";
+
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 fn unique(prefix: &str) -> String {
@@ -97,6 +101,9 @@ enum Agent {
     /// the file `manifest.json` of the test folder, and the process gets the
     /// variables given, which the scripted agent it starts reads.
     Providers(&'static [(&'static str, &'static str)]),
+    /// The daemon's own providers, with the runtimes and the provider homes
+    /// of the data folder `REAL_PROVIDERS` names: the user's own sign-ins.
+    RealProviders,
 }
 
 fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
@@ -107,6 +114,8 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
         .arg("--bots-dir")
         .arg(dir.join("bots"))
         .args(["--endpoint", endpoint.address()])
+        // The daemon's tools and prompt sections for tests (`test_harness.rs`).
+        .env("CROWBOT_TEST_HARNESS", dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null());
     let scripted = |env: serde_json::Value| {
@@ -145,6 +154,10 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
                 })
             });
             command.env("PATH", std::env::join_paths(kept).unwrap());
+        }
+        Agent::RealProviders => {
+            let data = std::env::var_os(REAL_PROVIDERS).expect("names the daemon's data folder");
+            command.arg("--data-dir").arg(data);
         }
         Agent::Providers(variables) => {
             command
@@ -242,6 +255,18 @@ impl Daemon {
     /// A daemon whose agent program does not exist.
     pub fn start_with_missing_agent() -> Self {
         Self::start_with(Agent::Missing)
+    }
+
+    /// A daemon with the providers, the runtimes, and the sign-ins of the
+    /// data folder `REAL_PROVIDERS` names, and a database of its own.
+    pub fn start_with_real_providers() -> Self {
+        Self::start_with(Agent::RealProviders)
+    }
+
+    /// A file of the folder that the daemon's test tools and sections read
+    /// and write (`test_harness.rs`).
+    pub fn harness_file(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
     }
 
     /// A daemon whose bots run on Claude, with the user's own sign-in.
@@ -776,7 +801,7 @@ pub fn user_texts(events: &[TimedEvent]) -> Vec<&str> {
     events
         .iter()
         .filter_map(|timed| match &timed.event {
-            Event::UserText(text) => Some(text.as_str()),
+            Event::UserText(message) => Some(message.text.as_str()),
             _ => None,
         })
         .collect()

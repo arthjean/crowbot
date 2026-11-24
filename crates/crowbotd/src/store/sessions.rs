@@ -1,7 +1,9 @@
 //! What the database keeps about providers: the session each provider holds
 //! for a conversation, and the settings of each provider.
 
-use crowbot_protocol::{Bot, Event};
+use std::collections::BTreeMap;
+
+use crowbot_protocol::{Bot, Event, UserMessage};
 use rusqlite::{OptionalExtension, Row, params};
 
 use super::{Store, StoreError};
@@ -16,6 +18,9 @@ pub struct ProviderSession {
     pub fingerprint: String,
     /// The last event of the conversation that the session knows about.
     pub last_event_id: i64,
+    /// The version of each section of the system prompt the session has
+    /// seen, by the section's id.
+    pub sections: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,14 +52,18 @@ fn fingerprint_of(
     sha256_hex(settings.to_string().as_bytes())
 }
 
-const SESSION_COLUMNS: &str = "provider, session_id, fingerprint, last_event_id";
+const SESSION_COLUMNS: &str = "provider, session_id, fingerprint, last_event_id, sections";
 
 fn session_row(row: &Row<'_>) -> rusqlite::Result<ProviderSession> {
+    let sections: String = row.get(4)?;
     Ok(ProviderSession {
         provider: row.get(0)?,
         session_id: row.get(1)?,
         fingerprint: row.get(2)?,
         last_event_id: row.get(3)?,
+        // Versions that cannot be read count as none seen: the next prompt
+        // then carries every section in its note.
+        sections: serde_json::from_str(&sections).unwrap_or_default(),
     })
 }
 
@@ -121,6 +130,23 @@ impl Store {
         Ok(())
     }
 
+    /// Stores the versions of the sections of the system prompt that the
+    /// session of a provider has seen.
+    pub fn set_session_sections(
+        &self,
+        conversation_id: i64,
+        provider: &str,
+        sections: &BTreeMap<String, String>,
+    ) -> Result<(), StoreError> {
+        let sections = serde_json::to_string(sections).map_err(StoreError::from)?;
+        self.connection.execute(
+            "UPDATE provider_sessions SET sections = ?3
+             WHERE conversation_id = ?1 AND provider = ?2",
+            params![conversation_id, provider, sections],
+        )?;
+        Ok(())
+    }
+
     /// The session of the provider knows the conversation up to its last event.
     pub fn touch_provider_session(
         &self,
@@ -162,7 +188,9 @@ impl Store {
         {
             let event: Event = serde_json::from_str(&row.get::<_, String>(0)?)?;
             kept += match &event {
-                Event::UserText(text) | Event::MessageText(text) => text.chars().count(),
+                Event::UserText(UserMessage { text, .. }) | Event::MessageText(text) => {
+                    text.chars().count()
+                }
                 Event::ToolCallStarted { title, .. } => title.chars().count(),
                 _ => 0,
             };
@@ -290,14 +318,14 @@ mod tests {
         assert_eq!(store.last_provider_session(id).unwrap(), None);
 
         store
-            .append(id, &Event::UserText("one".to_owned()))
+            .append(id, &Event::user_text("one".to_owned()))
             .unwrap();
         let fingerprint = session_fingerprint(&bot);
         store
             .set_provider_session(id, "claude", "claude-1", &fingerprint)
             .unwrap();
         let first = store
-            .append(id, &Event::UserText("two".to_owned()))
+            .append(id, &Event::user_text("two".to_owned()))
             .unwrap();
         store
             .set_provider_session(id, "codex", "codex-1", &fingerprint)
@@ -313,7 +341,7 @@ mod tests {
         );
 
         store
-            .append(id, &Event::UserText("three".to_owned()))
+            .append(id, &Event::user_text("three".to_owned()))
             .unwrap();
         store.touch_provider_session(id, "claude").unwrap();
         let last = store.last_provider_session(id).unwrap().unwrap();
@@ -355,12 +383,12 @@ mod tests {
         let store = store();
         let (id, _) = conversation(&store);
         let said = |event: Event| store.append(id, &event).unwrap();
-        said(Event::UserText("first question".to_owned()));
+        said(Event::user_text("first question".to_owned()));
         let answered = said(Event::MessageText("first answer".to_owned()));
         said(Event::ThoughtText("a thought".to_owned()));
-        said(Event::UserText("second question".to_owned()));
+        said(Event::user_text("second question".to_owned()));
         said(Event::MessageText("second answer".to_owned()));
-        said(Event::UserText("the message being sent".to_owned()));
+        said(Event::user_text("the message being sent".to_owned()));
 
         let texts = |after: i64, characters: usize| {
             store
@@ -368,7 +396,7 @@ mod tests {
                 .unwrap()
                 .into_iter()
                 .map(|event| match event {
-                    Event::UserText(text) | Event::MessageText(text) => text,
+                    Event::UserText(UserMessage { text, .. }) | Event::MessageText(text) => text,
                     other => panic!("unexpected {other:?}"),
                 })
                 .collect::<Vec<_>>()

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, TimedEvent, ToolKind, ToolStatus, TurnEnd,
+    Interruption, TimedEvent, ToolEffect, ToolKind, ToolStatus, TurnEnd, UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -42,6 +42,8 @@ pub struct Step {
     pub started_ms: i64,
     pub ended_ms: Option<i64>,
     pub allowed_by_level: bool,
+    /// What the tool may change, when it is one of the daemon's own.
+    pub effect: Option<ToolEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,11 @@ pub enum Notice {
         from: String,
         to: String,
     },
+    /// The agent called a daemon tool that the session may not call.
+    ToolRefused {
+        tool: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +96,8 @@ pub enum RowKind {
     Day,
     User {
         text: String,
+        /// What the daemon told the session before the message.
+        note: Option<String>,
     },
     Steps {
         steps: Vec<Step>,
@@ -424,7 +433,7 @@ impl Transcript {
         let at_ms = timed.at_ms;
         let end = self.rows.len();
         match timed.event {
-            Event::UserText(text) => {
+            Event::UserText(UserMessage { text, note }) => {
                 self.close_turn(None);
                 self.day_row(seq, at_ms);
                 self.turn = Some(Turn {
@@ -434,7 +443,7 @@ impl Transcript {
                 self.rows.push(Row {
                     key: key(seq, Slot::Main),
                     at_ms,
-                    kind: RowKind::User { text },
+                    kind: RowKind::User { text, note },
                 });
                 end
             }
@@ -487,6 +496,7 @@ impl Transcript {
                         started_ms: at_ms,
                         ended_ms: None,
                         allowed_by_level: false,
+                        effect: None,
                     }),
                 }
                 index.min(end)
@@ -497,7 +507,18 @@ impl Transcript {
                 status,
                 kind,
                 input,
-            } => self.tool(seq, at_ms, id, Some(title), status, kind, input, None),
+                effect,
+            } => self.tool(
+                seq,
+                at_ms,
+                id,
+                Some(title),
+                status,
+                kind,
+                input,
+                None,
+                effect,
+            ),
             Event::ToolCallUpdated {
                 id,
                 title,
@@ -505,7 +526,7 @@ impl Transcript {
                 kind,
                 input,
                 output,
-            } => self.tool(seq, at_ms, id, title, status, kind, input, output),
+            } => self.tool(seq, at_ms, id, title, status, kind, input, output, None),
             Event::ApprovalRequested {
                 id,
                 title,
@@ -547,8 +568,16 @@ impl Transcript {
                 if let Some(index) = self.settle_approval(id.as_deref(), state, reason) {
                     return index;
                 }
-                if reason == Some(ApprovalReason::PermissionLevel) {
-                    return self.allowed_by_level(seq, at_ms, &tool_call_id, title);
+                match reason {
+                    Some(ApprovalReason::PermissionLevel) => {
+                        return self.allowed_by_level(seq, at_ms, &tool_call_id, title, true);
+                    }
+                    // The daemon gates its own tools where it runs them: the
+                    // step tells the call, and no row of its own is needed.
+                    Some(ApprovalReason::DaemonTool) => {
+                        return self.allowed_by_level(seq, at_ms, &tool_call_id, title, false);
+                    }
+                    _ => {}
                 }
                 self.day_row(seq, at_ms);
                 self.rows.push(Row {
@@ -630,6 +659,9 @@ impl Transcript {
             Event::ProviderChanged { from, to } => {
                 self.notice(seq, at_ms, Notice::ProviderChanged { from, to })
             }
+            Event::ToolRefused { tool, message } => {
+                self.notice(seq, at_ms, Notice::ToolRefused { tool, message })
+            }
         }
     }
 
@@ -655,6 +687,7 @@ impl Transcript {
         kind: Option<ToolKind>,
         input: Option<String>,
         output: Option<String>,
+        effect: Option<ToolEffect>,
     ) -> usize {
         let end = self.rows.len();
         let Some((index, steps)) = self.steps_mut(seq, at_ms) else {
@@ -683,11 +716,15 @@ impl Transcript {
                     started_ms: at_ms,
                     ended_ms: None,
                     allowed_by_level: false,
+                    effect: None,
                 });
                 let last = steps.len() - 1;
                 &mut steps[last]
             }
         };
+        if effect.is_some() {
+            step.effect = effect;
+        }
         if let Some(title) = title {
             step.title = title;
         }
@@ -720,6 +757,7 @@ impl Transcript {
         at_ms: i64,
         tool_call_id: &str,
         title: Option<String>,
+        by_level: bool,
     ) -> usize {
         let end = self.rows.len();
         let Some((index, steps)) = self.steps_mut(seq, at_ms) else {
@@ -729,7 +767,7 @@ impl Transcript {
             .iter_mut()
             .rfind(|step| step.id.as_deref() == Some(tool_call_id))
         {
-            Some(step) => step.allowed_by_level = true,
+            Some(step) => step.allowed_by_level |= by_level,
             None => steps.push(Step {
                 id: Some(tool_call_id.to_owned()),
                 kind: StepKind::Tool(None),
@@ -739,7 +777,8 @@ impl Transcript {
                 state: StepState::Running,
                 started_ms: at_ms,
                 ended_ms: None,
-                allowed_by_level: true,
+                allowed_by_level: by_level,
+                effect: None,
             }),
         }
         index.min(end)
@@ -896,7 +935,7 @@ pub mod tests {
     }
 
     pub fn user(text: &str) -> Event {
-        Event::UserText(text.to_owned())
+        Event::user_text(text.to_owned())
     }
 
     pub fn message(text: &str) -> Event {
@@ -914,6 +953,7 @@ pub mod tests {
             status: Some(ToolStatus::InProgress),
             kind: Some(ToolKind::Execute),
             input: Some(format!("run {title}")),
+            effect: None,
         }
     }
 
@@ -1229,6 +1269,60 @@ pub mod tests {
         assert!(same.starts_group(1));
         assert!(!same.starts_group(2));
         assert!(same.starts_group(3));
+    }
+
+    #[test]
+    fn a_note_a_daemon_tool_and_a_refusal_keep_what_the_daemon_said() {
+        let transcript = Transcript::from_snapshot(snapshot(
+            vec![
+                at(
+                    NOON,
+                    Event::UserText(UserMessage::new("go").with_note(Some("changed".to_owned()))),
+                ),
+                at(
+                    NOON + 1_000,
+                    Event::ToolCallStarted {
+                        id: "t1".to_owned(),
+                        title: "mcp__crowbot__memory".to_owned(),
+                        status: Some(ToolStatus::InProgress),
+                        kind: None,
+                        input: None,
+                        effect: Some(ToolEffect::BotState),
+                    },
+                ),
+                at(
+                    NOON + 2_000,
+                    Event::ApprovalResolved {
+                        id: Some("a1".to_owned()),
+                        tool_call_id: "t1".to_owned(),
+                        title: None,
+                        decision: ApprovalDecision::Allowed,
+                        reason: Some(ApprovalReason::DaemonTool),
+                    },
+                ),
+                at(
+                    NOON + 3_000,
+                    Event::ToolRefused {
+                        tool: "review".to_owned(),
+                        message: "no".to_owned(),
+                    },
+                ),
+            ],
+            false,
+            &[],
+        ));
+        assert_eq!(kinds(&transcript), ["day", "user", "steps", "notice"]);
+        assert!(matches!(
+            &transcript.rows()[1].kind,
+            RowKind::User { text, note: Some(note) } if text == "go" && note == "changed"
+        ));
+        let step = &steps(&transcript)[0];
+        assert_eq!(step.effect, Some(ToolEffect::BotState));
+        assert!(!step.allowed_by_level);
+        assert!(matches!(
+            &transcript.rows()[3].kind,
+            RowKind::Notice(Notice::ToolRefused { tool, .. }) if tool == "review"
+        ));
     }
 
     #[test]

@@ -4,7 +4,9 @@ mod digest;
 mod handoff;
 mod instance;
 mod lifetime;
+mod mcp;
 mod private;
+mod prompt;
 mod provider;
 mod runtime;
 mod server;
@@ -13,6 +15,9 @@ mod sign_in_page;
 mod stop;
 mod store;
 mod systemd;
+#[cfg(debug_assertions)]
+mod test_harness;
+mod tools;
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -304,6 +309,12 @@ fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if sign_in_page::started_as_opener() {
         return sign_in_page::opener();
+    }
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|first| first == mcp::BRIDGE)
+    {
+        return mcp::run_bridge(std::env::args().skip(2));
     }
     systemd::take_notify_socket();
     #[cfg(unix)]

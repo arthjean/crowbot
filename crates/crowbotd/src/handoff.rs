@@ -27,7 +27,7 @@ pub fn build(events: &[Event], from: &str) -> Option<String> {
     let mut streaming = false;
     for event in events {
         let (speaker, text) = match event {
-            Event::UserText(text) => (Speaker::User, text.clone()),
+            Event::UserText(message) => (Speaker::User, message.text.clone()),
             Event::MessageText(text) => (Speaker::Assistant, text.clone()),
             Event::ToolCallStarted { title, .. } if !title.trim().is_empty() => (
                 Speaker::Assistant,
@@ -81,7 +81,7 @@ mod tests {
     use super::*;
 
     fn user(text: &str) -> Event {
-        Event::UserText(text.to_owned())
+        Event::user_text(text.to_owned())
     }
 
     fn answer(text: &str) -> Event {
@@ -110,6 +110,7 @@ mod tests {
                     status: None,
                     kind: None,
                     input: None,
+                    effect: None,
                 },
                 answer("Done."),
                 user("And then?"),

@@ -237,7 +237,7 @@ fn a_dropped_link_leaves_the_panes_inert_and_a_reconnect_reloads_without_duplica
     let (workspace, mut daemon, cx) = open(cx);
     daemon.connect(vec![summary(1, "Atlas", BotState::Idle)], cx);
     let turn = vec![
-        Event::UserText("hi".to_owned()),
+        Event::user_text("hi".to_owned()),
         Event::MessageText("caw".to_owned()),
         Event::TurnEnded(TurnEnd::Completed),
     ];
@@ -688,7 +688,7 @@ fn the_badge_names_the_model_of_the_next_turn_while_a_turn_runs(cx: &mut TestApp
     let mut atlas = summary(1, "Atlas", BotState::Working);
     atlas.bot.model = Some("sonnet".to_owned());
     daemon.connect(vec![atlas.clone()], cx);
-    let mut running = snapshot(10, 1, vec![Event::UserText("go".to_owned())]);
+    let mut running = snapshot(10, 1, vec![Event::user_text("go".to_owned())]);
     running.turn_active = true;
     running.turn_model = Some(Some("sonnet".to_owned()));
     daemon.tell(ServerMessage::ConversationOpened(running), cx);

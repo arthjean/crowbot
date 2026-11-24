@@ -20,7 +20,8 @@ pub use bot::{
 pub use endpoint::{Endpoint, SOCKET_PATH_LIMIT};
 pub use event::{
     APPROVAL_TARGET_BYTES, ApprovalClosure, ApprovalDecision, ApprovalReason, Event, FailureCause,
-    Interruption, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
+    Interruption, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolEffect, ToolKind, ToolStatus, TurnEnd,
+    UserMessage, cut_text,
 };
 pub use folders::Folders;
 pub use message::{

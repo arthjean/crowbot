@@ -428,6 +428,65 @@ fn a_provider_shows_its_runtime_its_download_and_takes_an_executable_of_the_user
     assert_eq!(daemon.sent(), [set(None)]);
 }
 
+/// A conversation that holds the events of the daemon's tools opens, and
+/// each shows (EP-001 of the harness PRD).
+#[gpui::test]
+fn a_conversation_with_daemon_tools_and_a_note_opens_and_shows_each_row(cx: &mut TestAppContext) {
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::UserText(
+                    crowbot_protocol::UserMessage::new("go")
+                        .with_note(Some("Memory changed.".to_owned())),
+                ),
+                Event::ToolCallStarted {
+                    id: "t1".to_owned(),
+                    title: "mcp__crowbot__memory".to_owned(),
+                    status: None,
+                    kind: None,
+                    input: None,
+                    effect: Some(crowbot_protocol::ToolEffect::BotState),
+                },
+                Event::ApprovalResolved {
+                    id: Some("a1".to_owned()),
+                    tool_call_id: "t1".to_owned(),
+                    title: Some("mcp__crowbot__memory".to_owned()),
+                    decision: crowbot_protocol::ApprovalDecision::Allowed,
+                    reason: Some(crowbot_protocol::ApprovalReason::DaemonTool),
+                },
+                Event::ToolRefused {
+                    tool: "probe_review".to_owned(),
+                    message: "This session has no tool named probe_review.".to_owned(),
+                },
+                Event::MessageText("ok".to_owned()),
+                Event::TurnEnded(TurnEnd::Completed),
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 1);
+    assert!(shown(cx, notices[0]), "{}", notices[0]);
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::User { note: Some(note), .. } if note == "Memory changed."
+    )));
+    assert!(
+        !rows
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::Approval(_))),
+        "a daemon tool's approval has no card of its own"
+    );
+}
+
 #[gpui::test]
 fn the_conversation_tells_a_download_a_provider_change_and_a_model_that_is_gone(
     cx: &mut TestAppContext,
@@ -440,7 +499,7 @@ fn the_conversation_tells_a_download_a_provider_change_and_a_model_that_is_gone(
             10,
             1,
             vec![
-                Event::UserText("hi".to_owned()),
+                Event::user_text("hi".to_owned()),
                 Event::ProviderChanged {
                     from: "claude".to_owned(),
                     to: "codex".to_owned(),
@@ -465,7 +524,7 @@ fn the_conversation_tells_a_download_a_provider_change_and_a_model_that_is_gone(
     daemon.tell(
         ServerMessage::ConversationEvent {
             conversation_id: 10,
-            event: Event::UserText("again".to_owned()),
+            event: Event::user_text("again".to_owned()),
             at_ms: NOON + 10_000,
         },
         cx,
@@ -507,7 +566,7 @@ fn a_turn_that_failed_for_a_sign_in_offers_the_sign_in_of_its_provider(cx: &mut 
             10,
             1,
             vec![
-                Event::UserText("hi".to_owned()),
+                Event::user_text("hi".to_owned()),
                 Event::TurnFailed {
                     message: "Authentication required".to_owned(),
                     cause: Some(FailureCause::SignInRequired),

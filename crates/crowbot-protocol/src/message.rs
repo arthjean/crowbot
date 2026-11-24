@@ -6,7 +6,7 @@ use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
 use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -378,7 +378,7 @@ mod tests {
             events: vec![TimedEvent {
                 id: 40,
                 at_ms: 1_700_000_000_000,
-                event: Event::UserText("hi".to_owned()),
+                event: Event::user_text("hi".to_owned()),
             }],
             older: Some(41),
         };

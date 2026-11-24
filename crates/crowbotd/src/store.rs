@@ -4,7 +4,7 @@ mod search;
 mod sessions;
 
 pub use bots::{BotRow, NewBot};
-pub use sessions::{ProviderSetting, session_fingerprint};
+pub use sessions::{ProviderSession, ProviderSetting, session_fingerprint};
 
 use std::fmt;
 use std::path::Path;
@@ -13,11 +13,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
     ApprovalClosure, ConversationSummary, Event, Interruption, QueueState, QueuedMessage,
-    TimedEvent,
+    TimedEvent, UserMessage,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -160,6 +160,12 @@ CREATE TABLE bot_models (
 /// `avatar_glyph` of a bot stays as it was: the daemon no longer reads it.
 const SCHEMA_V8: &str = "
 ALTER TABLE bots ADD COLUMN avatar_shape TEXT NOT NULL DEFAULT 'smooth';
+";
+
+/// A provider session keeps the version of each section of the system
+/// prompt it has seen, at its start and in the notes since, as a JSON object.
+const SCHEMA_V9: &str = "
+ALTER TABLE provider_sessions ADD COLUMN sections TEXT NOT NULL DEFAULT '{}';
 ";
 
 const UNFINISHED_TURNS: &str = "
@@ -310,6 +316,9 @@ impl Store {
         if version < 8 {
             transaction.execute_batch(SCHEMA_V8)?;
             self.assign_mascots()?;
+        }
+        if version < 9 {
+            transaction.execute_batch(SCHEMA_V9)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -557,7 +566,11 @@ impl Store {
     /// message of a new turn. Both happen together, so a message that left the
     /// queue is in the conversation, and a daemon that stops in between starts
     /// nothing twice.
-    pub fn start_queued(&self, conversation_id: i64) -> Result<Option<String>, StoreError> {
+    pub fn start_queued(
+        &self,
+        conversation_id: i64,
+        note: Option<String>,
+    ) -> Result<Option<String>, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
         let first = transaction
             .query_row(
@@ -570,7 +583,8 @@ impl Store {
             return Ok(None);
         };
         transaction.execute("DELETE FROM queue WHERE id = ?1", params![queue_id])?;
-        self.append(conversation_id, &Event::UserText(text.clone()))?;
+        let message = UserMessage::new(text.clone()).with_note(note);
+        self.append(conversation_id, &Event::UserText(message))?;
         self.unpause_when_empty(conversation_id)?;
         transaction.commit()?;
         Ok(Some(text))
@@ -779,6 +793,7 @@ fn kind(event: &Event) -> &'static str {
         Event::TurnInterrupted { .. } => "turn_interrupted",
         Event::ModelUnavailable { .. } => "model_unavailable",
         Event::ProviderChanged { .. } => "provider_changed",
+        Event::ToolRefused { .. } => "tool_refused",
     }
 }
 
@@ -976,13 +991,14 @@ mod tests {
         let store = store();
         let id = conversation(&store);
         let events = vec![
-            Event::UserText("hello".to_owned()),
+            Event::user_text("hello".to_owned()),
             Event::ToolCallStarted {
                 id: "t1".to_owned(),
                 title: "Read".to_owned(),
                 status: Some(ToolStatus::Pending),
                 kind: Some(crowbot_protocol::ToolKind::Read),
                 input: Some("notes.txt".to_owned()),
+                effect: None,
             },
             Event::MessageText("hi".to_owned()),
             Event::TurnEnded(TurnEnd::Completed),
@@ -999,14 +1015,14 @@ mod tests {
         let first = conversation(&store);
         let second = conversation(&store);
         store
-            .append(first, &Event::UserText("one".to_owned()))
+            .append(first, &Event::user_text("one".to_owned()))
             .unwrap();
         store
-            .append(second, &Event::UserText("two".to_owned()))
+            .append(second, &Event::user_text("two".to_owned()))
             .unwrap();
         assert_eq!(
             store.events(second).unwrap(),
-            vec![Event::UserText("two".to_owned())]
+            vec![Event::user_text("two".to_owned())]
         );
     }
 
@@ -1059,7 +1075,7 @@ mod tests {
                 "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, 'user_text', ?2, ?3)",
                 params![
                     first,
-                    serde_json::to_string(&Event::UserText("later".to_owned())).unwrap(),
+                    serde_json::to_string(&Event::user_text("later".to_owned())).unwrap(),
                     now_ms() + 60_000
                 ],
             )
@@ -1193,7 +1209,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (1, 'user_text', ?1, 8)",
-                params![serde_json::to_string(&Event::UserText("kept".to_owned())).unwrap()],
+                params![serde_json::to_string(&Event::user_text("kept".to_owned())).unwrap()],
             )
             .unwrap();
         connection
@@ -1210,7 +1226,7 @@ mod tests {
         assert_eq!(conversation.title.as_deref(), Some("kept"));
         assert_eq!(
             store.events(1).unwrap(),
-            vec![Event::UserText("kept".to_owned())]
+            vec![Event::user_text("kept".to_owned())]
         );
         assert_eq!(store.queue(1).unwrap(), QueueState::default());
     }
@@ -1235,7 +1251,7 @@ mod tests {
         assert_eq!(paused_column, 0);
         assert_eq!(
             store.events(1).unwrap(),
-            vec![Event::UserText("kept".to_owned())]
+            vec![Event::user_text("kept".to_owned())]
         );
     }
 
@@ -1256,16 +1272,16 @@ mod tests {
         let finished = conversation(&store);
         let running = conversation(&store);
         for event in [
-            Event::UserText("done".to_owned()),
+            Event::user_text("done".to_owned()),
             Event::TurnEnded(TurnEnd::Completed),
         ] {
             store.append(finished, &event).unwrap();
         }
         for event in [
-            Event::UserText("first".to_owned()),
+            Event::user_text("first".to_owned()),
             request("old"),
             Event::TurnEnded(TurnEnd::Completed),
-            Event::UserText("second".to_owned()),
+            Event::user_text("second".to_owned()),
             Event::MessageText("partial".to_owned()),
             request("answered"),
             Event::ApprovalResolved {
@@ -1333,14 +1349,20 @@ mod tests {
         store.enqueue(other, "elsewhere").unwrap();
         store.enqueue(id, "two").unwrap();
         assert_eq!(texts(&store, id), ["one", "two"]);
-        assert_eq!(store.start_queued(id).unwrap().as_deref(), Some("one"));
-        assert_eq!(store.start_queued(id).unwrap().as_deref(), Some("two"));
-        assert_eq!(store.start_queued(id).unwrap(), None);
+        assert_eq!(
+            store.start_queued(id, None).unwrap().as_deref(),
+            Some("one")
+        );
+        assert_eq!(
+            store.start_queued(id, None).unwrap().as_deref(),
+            Some("two")
+        );
+        assert_eq!(store.start_queued(id, None).unwrap(), None);
         assert_eq!(
             store.events(id).unwrap(),
             vec![
-                Event::UserText("one".to_owned()),
-                Event::UserText("two".to_owned())
+                Event::user_text("one".to_owned()),
+                Event::user_text("two".to_owned())
             ]
         );
         assert_eq!(texts(&store, other), ["elsewhere"]);
@@ -1390,7 +1412,7 @@ mod tests {
         page.events
             .iter()
             .map(|timed| match &timed.event {
-                Event::UserText(text) => text.clone(),
+                Event::UserText(message) => message.text.clone(),
                 other => panic!("unexpected event {other:?}"),
             })
             .collect()
@@ -1404,11 +1426,11 @@ mod tests {
         let mut rows = Vec::new();
         for index in 0..7 {
             store
-                .append(other, &Event::UserText(format!("other {index}")))
+                .append(other, &Event::user_text(format!("other {index}")))
                 .unwrap();
             rows.push(
                 store
-                    .append(id, &Event::UserText(format!("m{index}")))
+                    .append(id, &Event::user_text(format!("m{index}")))
                     .unwrap(),
             );
         }
@@ -1446,7 +1468,7 @@ mod tests {
                     "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, 'user_text', ?2, ?3)",
                     params![
                         id,
-                        serde_json::to_string(&Event::UserText(payload.to_owned())).unwrap(),
+                        serde_json::to_string(&Event::user_text(payload.to_owned())).unwrap(),
                         at_ms
                     ],
                 )
@@ -1459,12 +1481,12 @@ mod tests {
                 TimedEvent {
                     id: 1,
                     at_ms: 1_000,
-                    event: Event::UserText("first".to_owned()),
+                    event: Event::user_text("first".to_owned()),
                 },
                 TimedEvent {
                     id: 2,
                     at_ms: 2_500,
-                    event: Event::UserText("second".to_owned()),
+                    event: Event::user_text("second".to_owned()),
                 },
             ]
         );
@@ -1570,13 +1592,14 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::UserText("kept".to_owned()),
+                Event::user_text("kept".to_owned()),
                 Event::ToolCallStarted {
                     id: "t1".to_owned(),
                     title: "Read".to_owned(),
                     status: Some(ToolStatus::Pending),
                     kind: None,
                     input: None,
+                    effect: None,
                 },
                 Event::ToolCallUpdated {
                     id: "t1".to_owned(),
@@ -1621,14 +1644,14 @@ mod tests {
             let store = Store::open(&path).unwrap();
             let id = conversation(&store);
             store
-                .append(id, &Event::UserText("kept".to_owned()))
+                .append(id, &Event::user_text("kept".to_owned()))
                 .unwrap();
             id
         };
         let reopened = Store::open(&path).unwrap();
         assert_eq!(
             reopened.events(id).unwrap(),
-            vec![Event::UserText("kept".to_owned())]
+            vec![Event::user_text("kept".to_owned())]
         );
     }
 }

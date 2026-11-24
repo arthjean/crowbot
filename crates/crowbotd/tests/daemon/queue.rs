@@ -7,7 +7,7 @@ use crate::support::{Daemon, queued_texts, user_texts};
 const START_BOUND: Duration = Duration::from_millis(500);
 
 fn user_text(text: &'static str) -> impl Fn(&Event) -> bool {
-    move |event| matches!(event, Event::UserText(sent) if sent == text)
+    move |event| matches!(event, Event::UserText(sent) if sent.text == text)
 }
 
 #[tokio::test]

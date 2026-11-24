@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
     FailureCause, Interruption, MESSAGE_LENGTH, PermissionLevel, QueueState, ServerMessage,
-    TurnEnd,
+    TurnEnd, UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -14,12 +14,16 @@ use tokio::task::AbortHandle;
 
 use crate::daemon::Daemon;
 use crate::handoff::{self, HANDOFF_CHARACTERS};
+use crate::mcp::{SessionEndpoint, ToolSignal};
+use crate::prompt::Sections;
 use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
 use crate::store::{
-    BotRow, Conversation, EventsPage, Recorder, SharedStore, StoreError, session_fingerprint,
+    BotRow, Conversation, EventsPage, ProviderSession, Recorder, SharedStore, StoreError,
+    session_fingerprint,
 };
+use crate::tools::{Outputs, SessionKind, ToolContext};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -113,6 +117,11 @@ enum Input {
         generation: u64,
         result: Result<(), SessionFailure>,
     },
+    /// A call to a daemon tool, through the session's endpoint.
+    Tool {
+        generation: u64,
+        signal: ToolSignal,
+    },
 }
 
 #[derive(Clone)]
@@ -170,6 +179,44 @@ struct Session {
     moved_from: Option<String>,
     commands: UnboundedSender<SessionCommand>,
     task: AbortHandle,
+    /// The versions of the system prompt's sections the session has seen:
+    /// at its start, then in each note since.
+    sections: BTreeMap<String, String>,
+    /// The daemon's tools for this session. Dropped with the session.
+    _endpoint: Option<SessionEndpoint>,
+}
+
+/// How a message reaches an agent: through the session that runs, or a
+/// session to start.
+enum Delivery {
+    /// The note is the one the message is stored with, and `seen` the
+    /// versions it tells, which the session has seen once it reads it.
+    Live {
+        note: Option<String>,
+        seen: BTreeMap<String, String>,
+    },
+    Start(Box<Plan>),
+}
+
+impl Delivery {
+    fn note(&self) -> Option<String> {
+        match self {
+            Self::Live { note, .. } => note.clone(),
+            Self::Start(plan) => plan.note.clone(),
+        }
+    }
+}
+
+/// A provider session to start, read before the message is recorded so that
+/// the message keeps its note.
+struct Plan {
+    revision: i64,
+    bot: Bot,
+    resumed: Option<ProviderSession>,
+    moved_from: Option<String>,
+    system_prompt: String,
+    sections: BTreeMap<String, String>,
+    note: Option<String>,
 }
 
 /// Waits until the turn is stopped. A stop that comes before the provider
@@ -278,6 +325,7 @@ impl Actor {
                 Some(Input::SessionClosed { generation, result }) => {
                     self.session_closed(generation, result);
                 }
+                Some(Input::Tool { generation, signal }) => self.tool_signal(generation, signal),
                 None => break,
             }
             if self.finished {
@@ -606,14 +654,18 @@ impl Actor {
         }
         self.turn_active = true;
         self.accept_message(sink);
-        self.emit(Event::UserText(text.clone()));
+        let delivery = self.prepare();
+        let note = delivery.as_ref().ok().and_then(Delivery::note);
+        self.emit(Event::UserText(
+            UserMessage::new(text.clone()).with_note(note),
+        ));
         self.give_title(&text);
         self.sync();
-        self.deliver(text);
+        self.deliver(delivery, text);
     }
 
-    fn deliver(&mut self, text: String) {
-        match self.try_deliver(text) {
+    fn deliver(&mut self, delivery: Result<Delivery, TurnFailure>, text: String) {
+        match delivery.and_then(|delivery| self.try_deliver(delivery, text)) {
             Ok(()) => {
                 if let Some(model) = self
                     .session
@@ -630,7 +682,11 @@ impl Actor {
         }
     }
 
-    fn try_deliver(&mut self, text: String) -> Result<(), TurnFailure> {
+    /// Reads how the next message reaches an agent, and what changed since
+    /// that session saw the sections of its system prompt. Another provider,
+    /// new instructions, a new model, a new reasoning level, or a new folder
+    /// take a new provider session: the one that runs keeps the old ones.
+    fn prepare(&mut self) -> Result<Delivery, TurnFailure> {
         let (conversation, bot) = self
             .store
             .with(|store| {
@@ -650,10 +706,6 @@ impl Actor {
                 bot.bot.workspace
             )));
         }
-        let provider = bot.bot.provider.clone();
-        // Another provider, new instructions, a new model, a new reasoning
-        // level, or a new folder take a new provider session: the one that
-        // runs keeps the old ones.
         if self
             .session
             .as_ref()
@@ -661,43 +713,86 @@ impl Actor {
         {
             self.close_session();
         }
-        let text = match &self.session {
-            Some(session) => {
-                let prompt = SessionCommand::Prompt {
-                    text,
-                    handoff: None,
-                };
-                match session.commands.send(prompt) {
-                    Ok(()) => return Ok(()),
-                    Err(mpsc::error::SendError(SessionCommand::Prompt { text, .. })) => text,
-                    Err(_) => {
-                        return Err(TurnFailure::of_provider(
-                            &provider,
-                            "the agent stopped before it received the message",
-                        ));
-                    }
-                }
-            }
-            None => text,
-        };
-        let session = self
-            .start_session(bot, text)
-            .map_err(|message| TurnFailure::of_provider(&provider, message))?;
-        self.session = Some(session);
-        Ok(())
+        if let Some(session) = &self.session {
+            let (note, seen) = self.daemon.sections().note(self.bot_id, &session.sections);
+            return Ok(Delivery::Live { note, seen });
+        }
+        let provider = bot.bot.provider.clone();
+        self.plan_session(bot)
+            .map(|plan| Delivery::Start(Box::new(plan)))
+            .map_err(|message| TurnFailure::of_provider(&provider, message))
     }
 
-    /// Starts the provider session that runs the message. The session is the
-    /// one the provider holds for this conversation when it was started with
-    /// the settings the bot has now, and a new one otherwise. When another
-    /// provider ran the conversation last, the message comes after what the
-    /// session has not seen of it.
-    fn start_session(&mut self, bot: BotRow, text: String) -> Result<Session, String> {
+    fn try_deliver(&mut self, delivery: Delivery, text: String) -> Result<(), TurnFailure> {
+        let (note, seen) = match delivery {
+            Delivery::Start(plan) => {
+                let provider = plan.bot.provider.clone();
+                return self.start_session(*plan, text, &provider);
+            }
+            Delivery::Live { note, seen } => (note, seen),
+        };
+        let Some(session) = &mut self.session else {
+            return Err(TurnFailure::before_session(
+                "the agent stopped before it received the message",
+            ));
+        };
+        let provider = session.bot.provider.clone();
+        let prompt = SessionCommand::Prompt {
+            text,
+            handoff: None,
+            note: note.clone(),
+        };
+        match session.commands.send(prompt) {
+            Ok(()) => {
+                if note.is_some() {
+                    // The versions the stored note told, and not the ones of
+                    // now: a change since then reaches the next note.
+                    session.sections = seen.clone();
+                    let saved = self
+                        .store
+                        .with(|store| store.set_session_sections(self.id, &provider, &seen));
+                    self.report_store(saved);
+                }
+                Ok(())
+            }
+            Err(mpsc::error::SendError(SessionCommand::Prompt { text, .. })) => {
+                // The agent ended meanwhile: a new session runs the message,
+                // with what it needs to read first.
+                self.close_session();
+                let failed = || {
+                    TurnFailure::of_provider(
+                        &provider,
+                        "the agent stopped before it received the message",
+                    )
+                };
+                let bot = self
+                    .store
+                    .with(|store| store.bot(self.bot_id))
+                    .ok()
+                    .flatten()
+                    .ok_or_else(failed)?;
+                let plan = self
+                    .plan_session(bot)
+                    .map_err(|message| TurnFailure::of_provider(&provider, message))?;
+                self.start_session(plan, text, &provider)
+            }
+            Err(_) => Err(TurnFailure::of_provider(
+                &provider,
+                "the agent stopped before it received the message",
+            )),
+        }
+    }
+
+    /// Reads the provider session that runs the next message: the one the
+    /// provider holds for this conversation when it was started with the
+    /// settings the bot has now, and a new one otherwise. A resumed session
+    /// gets in a note what changed in the sections since it last saw them; a
+    /// new one gets them in its system prompt.
+    fn plan_session(&mut self, bot: BotRow) -> Result<Plan, String> {
         let revision = bot.session_revision;
         let bot = bot.bot;
         let provider = bot.provider.clone();
         let fingerprint = session_fingerprint(&bot);
-        self.recorder.save().map_err(|error| error.to_string())?;
         let (held, last) = self
             .store
             .with(|store| {
@@ -711,6 +806,50 @@ impl Actor {
         let moved_from = last
             .map(|session| session.provider)
             .filter(|last| *last != provider);
+        let snapshot = self.daemon.sections().snapshot(self.bot_id);
+        let system_prompt = Sections::system_prompt(&bot.instructions, &snapshot);
+        let (note, sections) = match &resumed {
+            Some(session) => self.daemon.sections().note(self.bot_id, &session.sections),
+            None => (None, snapshot.versions),
+        };
+        Ok(Plan {
+            revision,
+            bot,
+            resumed,
+            moved_from,
+            system_prompt,
+            sections,
+            note,
+        })
+    }
+
+    /// Starts the provider session that runs the message. When another
+    /// provider ran the conversation last, the message comes after what the
+    /// session has not seen of it.
+    fn start_session(
+        &mut self,
+        plan: Plan,
+        text: String,
+        provider: &str,
+    ) -> Result<(), TurnFailure> {
+        let session = self
+            .launch(plan, text)
+            .map_err(|message| TurnFailure::of_provider(provider, message))?;
+        self.session = Some(session);
+        Ok(())
+    }
+
+    fn launch(&mut self, plan: Plan, text: String) -> Result<Session, String> {
+        let Plan {
+            revision,
+            bot,
+            resumed,
+            moved_from,
+            system_prompt,
+            sections,
+            note,
+        } = plan;
+        self.recorder.save().map_err(|error| error.to_string())?;
         let handoff = match &moved_from {
             Some(from) => {
                 let seen = resumed.as_ref().map_or(0, |session| session.last_event_id);
@@ -722,12 +861,19 @@ impl Actor {
             }
             None => None,
         };
-        let first = vec![SessionCommand::Prompt { text, handoff }];
+        let first = vec![SessionCommand::Prompt {
+            text,
+            handoff,
+            note,
+        }];
         let resume = resumed.map(|session| session.session_id);
         let settings = bot.clone();
 
         self.generation += 1;
         let generation = self.generation;
+        let endpoint = self.open_endpoint(generation);
+        let mcp = endpoint.as_ref().map(SessionEndpoint::command);
+        let tools = self.daemon.tools().clone();
         let (commands, mut command_receiver) = mpsc::unbounded_channel();
         let (events, mut event_receiver) = mpsc::unbounded_channel();
         let inputs = self.inputs.clone();
@@ -758,7 +904,9 @@ impl Actor {
                     launch,
                     cwd: PathBuf::from(settings.workspace),
                     resume,
-                    instructions: settings.instructions,
+                    system_prompt,
+                    mcp,
+                    tools,
                     model: settings.model,
                     effort: settings.effort,
                     signed_in,
@@ -777,7 +925,66 @@ impl Actor {
             moved_from,
             commands,
             task: task.abort_handle(),
+            sections,
+            _endpoint: endpoint,
         })
+    }
+
+    /// The endpoint the session's bridge reaches the daemon's tools through.
+    /// A session whose endpoint cannot be made runs without them.
+    fn open_endpoint(&self, generation: u64) -> Option<SessionEndpoint> {
+        let (signals, mut received) = mpsc::unbounded_channel();
+        let inputs = self.inputs.clone();
+        tokio::spawn(async move {
+            while let Some(signal) = received.recv().await {
+                if inputs.send(Input::Tool { generation, signal }).is_err() {
+                    break;
+                }
+            }
+        });
+        let context = ToolContext {
+            bot_id: self.bot_id,
+            conversation_id: self.id,
+            kind: SessionKind::Conversation,
+            outputs: Outputs::default(),
+        };
+        match SessionEndpoint::open(self.daemon.tools().clone(), context, signals) {
+            Ok(endpoint) => Some(endpoint),
+            Err(error) => {
+                eprintln!(
+                    "[crowbotd] conversation {}: the session runs without the daemon's tools: {error}",
+                    self.id
+                );
+                None
+            }
+        }
+    }
+
+    /// A call to a daemon tool: a refusal is recorded, and an `External`
+    /// tool asks as any other request does. A call of a session that ended,
+    /// or outside a turn, is cancelled.
+    fn tool_signal(&mut self, generation: u64, signal: ToolSignal) {
+        match signal {
+            ToolSignal::Refused { tool, message } => {
+                if self.is_current(generation) {
+                    self.emit(Event::ToolRefused { tool, message });
+                }
+            }
+            ToolSignal::Approval {
+                tool_call_id,
+                title,
+                target,
+                cut,
+                reply,
+            } => {
+                if !self.is_current(generation) || !self.turn_active {
+                    reply.send(ApprovalAnswer::Cancel).ok();
+                    return;
+                }
+                let tool_call_id = tool_call_id.unwrap_or_else(|| self.new_approval_id());
+                self.ask_approval(tool_call_id, Some(title), target, cut, reply);
+            }
+        }
     }
 
     /// Closes the provider process at once. Events it already sent are ignored,
@@ -798,6 +1005,7 @@ impl Actor {
                 };
                 let provider = session.bot.provider.clone();
                 let fingerprint = session_fingerprint(&session.bot);
+                let sections = session.sections.clone();
                 if let Some(from) = session.moved_from.take() {
                     self.emit(Event::ProviderChanged {
                         from,
@@ -811,7 +1019,8 @@ impl Actor {
                             &provider,
                             &provider_session_id,
                             &fingerprint,
-                        )
+                        )?;
+                        store.set_session_sections(self.id, &provider, &sections)
                     })
                 });
                 self.report_store(saved);
@@ -860,7 +1069,45 @@ impl Actor {
                 target,
                 cut,
                 reply,
+            } => self.ask_approval(tool_call_id, title, target, cut, reply),
+            AgentEvent::ApprovalRefused {
+                tool_call_id,
+                title,
+            } => self.emit(Event::ApprovalResolved {
+                id: None,
+                tool_call_id,
+                title,
+                decision: ApprovalDecision::Declined,
+                reason: Some(ApprovalReason::NoAllowOnce),
+            }),
+            AgentEvent::DaemonToolAllowed {
+                tool_call_id,
+                title,
             } => {
+                let id = self.new_approval_id();
+                self.emit(Event::ApprovalResolved {
+                    id: Some(id),
+                    tool_call_id,
+                    title,
+                    decision: ApprovalDecision::Allowed,
+                    reason: Some(ApprovalReason::DaemonTool),
+                });
+            }
+        }
+    }
+
+    /// A request that the bot's level answers, or that waits for a person.
+    /// A stop that is under way cancels it.
+    fn ask_approval(
+        &mut self,
+        tool_call_id: String,
+        title: Option<String>,
+        target: Option<String>,
+        cut: bool,
+        reply: oneshot::Sender<ApprovalAnswer>,
+    ) {
+        {
+            {
                 let id = self.new_approval_id();
                 if self.stop_due.is_some() {
                     reply.send(ApprovalAnswer::Cancel).ok();
@@ -905,16 +1152,6 @@ impl Actor {
                 });
                 self.sync();
             }
-            AgentEvent::ApprovalRefused {
-                tool_call_id,
-                title,
-            } => self.emit(Event::ApprovalResolved {
-                id: None,
-                tool_call_id,
-                title,
-                decision: ApprovalDecision::Declined,
-                reason: Some(ApprovalReason::NoAllowOnce),
-            }),
         }
     }
 
@@ -1091,18 +1328,26 @@ impl Actor {
         if self.turn_active {
             return;
         }
-        match self.store.with(|store| store.start_queued(self.id)) {
+        if self.queue().is_ok_and(|queue| queue.messages.is_empty()) {
+            return;
+        }
+        let delivery = self.prepare();
+        let note = delivery.as_ref().ok().and_then(Delivery::note);
+        match self
+            .store
+            .with(|store| store.start_queued(self.id, note.clone()))
+        {
             Ok(Some(text)) => {
                 self.turn_active = true;
                 self.broadcast(ServerMessage::ConversationEvent {
                     conversation_id: self.id,
-                    event: Event::UserText(text.clone()),
+                    event: Event::UserText(UserMessage::new(text.clone()).with_note(note)),
                     at_ms: at_ms(),
                 });
                 self.broadcast_queue();
                 self.give_title(&text);
                 self.sync();
-                self.deliver(text);
+                self.deliver(delivery, text);
             }
             Ok(None) => {}
             Err(error) => self.report_store(Err::<(), _>(error)),

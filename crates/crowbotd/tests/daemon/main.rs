@@ -9,6 +9,7 @@ mod conversation;
 mod endpoint;
 #[cfg(target_os = "linux")]
 mod guard;
+mod prompt;
 mod providers;
 mod queue;
 mod recovery;
@@ -22,3 +23,4 @@ mod signals;
 mod startup;
 mod stop;
 mod support;
+mod tools;
