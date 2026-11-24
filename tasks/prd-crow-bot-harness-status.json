@@ -65,10 +65,10 @@
     {
       "id": "EP-008",
       "title": "Checkpoints",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "stories_total": 2,
-      "stories_done": 0
+      "stories_done": 2
     },
     {
       "id": "EP-009",
@@ -564,25 +564,25 @@
       "id": "US-036",
       "title": "Snapshot the bot's folder around a turn",
       "epic": "EP-008",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-037",
       "title": "Put the folder back",
       "epic": "EP-008",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "blocked_by": [
         "US-036"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-038",
