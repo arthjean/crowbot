@@ -87,8 +87,9 @@ pub fn refusal(
 struct Reading {
     parsed: Parsed,
     layers: Vec<Layer>,
-    /// The folder relative paths are read from.
-    folder: PathBuf,
+    /// The folders relative paths are read from: the request's and the
+    /// bot's.
+    folders: Vec<PathBuf>,
     /// A source could not tell what the command does: no source but a
     /// person may allow it.
     held: bool,
@@ -96,11 +97,15 @@ struct Reading {
 
 impl Reading {
     fn of(request: &Request, standing: Option<&Standing>) -> Self {
-        let folder = request
+        let mut folders: Vec<PathBuf> = request
             .folder
-            .clone()
-            .or_else(|| standing.map(|standing| standing.folder.clone()))
-            .unwrap_or_default();
+            .iter()
+            .chain(standing.map(|standing| &standing.folder))
+            .cloned()
+            .collect();
+        if folders.is_empty() {
+            folders.push(PathBuf::new());
+        }
         let (parsed, layers) = match (&request.target, request.command) {
             (Some(target), true) => {
                 let parsed = command::parse(target, request.cut);
@@ -112,13 +117,13 @@ impl Reading {
         Self {
             parsed,
             layers,
-            folder,
+            folders,
             held: false,
         }
     }
 
     fn refusal(&mut self, floors: &Floors, standing: Option<&Standing>) -> Option<ApprovalReason> {
-        match floors.check(&self.layers, &self.folder) {
+        match floors.check(&self.layers, &self.folders) {
             Verdict::Refuse => return Some(ApprovalReason::Floor),
             Verdict::Unsure => self.held = true,
             Verdict::Clear => {}
@@ -334,6 +339,38 @@ mod tests {
                     &command("rm -rf /", Some(Path::new("/nowhere"))),
                     Some(&standing),
                     &floors()
+                ),
+                Answer::Decline(ApprovalReason::Floor)
+            );
+        }
+        // A relative path is read from the folder the request names and
+        // from the bot's: a folder the agent names does not hide where the
+        // command reaches when it runs in the bot's.
+        if cfg!(unix) {
+            let standing = Standing {
+                folder: PathBuf::from("/home/ada/CrowBot/Bots/ada"),
+                ..standing.clone()
+            };
+            let floors = Floors::new(Some(PathBuf::from("/home/ada")), Vec::new());
+            for named in ["/elsewhere/a/b/c/d", "/home/ada/CrowBot/Bots/ada"] {
+                assert_eq!(
+                    answer(
+                        &command("rm -rf ../../..", Some(Path::new(named))),
+                        Some(&standing),
+                        &floors
+                    ),
+                    Answer::Decline(ApprovalReason::Floor),
+                    "{named}"
+                );
+            }
+            assert_eq!(
+                answer(
+                    &command(
+                        "rm -rf ../../..",
+                        Some(Path::new("/home/ada/CrowBot/Bots/ada/x/y/z"))
+                    ),
+                    Some(&standing),
+                    &floors
                 ),
                 Answer::Decline(ApprovalReason::Floor)
             );

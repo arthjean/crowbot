@@ -76,14 +76,15 @@ impl Floors {
         }
     }
 
-    /// What the floors say of a command request. `folder` is the folder
-    /// the request names for the command, or the bot's folder when it
-    /// names none: a relative path is read from there.
-    pub fn check(&self, layers: &[Layer], folder: &Path) -> Verdict {
+    /// What the floors say of a command request. A relative path is read
+    /// from each of `folders`, the folder the request names and the bot's:
+    /// an agent may name one and run the command in the other, so a floor
+    /// that either reading reaches refuses.
+    pub fn check(&self, layers: &[Layer], folders: &[PathBuf]) -> Verdict {
         let mut verdict = Verdict::Clear;
         for layer in layers {
             let found = match layer {
-                Layer::Simple(simple) => self.check_simple(simple, folder),
+                Layer::Simple(simple) => self.check_simple(simple, folders),
                 Layer::Opaque(text) => {
                     if mentions(text, is_floor_program) || names_block_device(text) {
                         Verdict::Unsure
@@ -101,12 +102,12 @@ impl Floors {
         verdict
     }
 
-    fn check_simple(&self, simple: &Simple, folder: &Path) -> Verdict {
+    fn check_simple(&self, simple: &Simple, folders: &[PathBuf]) -> Verdict {
         let name = program_name(&simple.program);
         let args = &simple.args;
         match name.as_str() {
             "rm" | "remove-item" | "ri" | "del" | "erase" | "rd" | "rmdir" => {
-                self.check_delete(&name, args, folder)
+                self.check_delete(&name, args, folders)
             }
             "find" if args.iter().any(|arg| arg == "-delete") => {
                 // The starting points follow the options that come first
@@ -121,12 +122,12 @@ impl Floors {
                 }
                 let starts =
                     rest.take_while(|arg| !arg.starts_with('-') && *arg != "(" && *arg != "!");
-                self.check_targets(starts, folder, true)
+                self.check_targets(starts, folders, true)
             }
             "dd" => {
                 let raw = args.iter().any(|arg| {
                     arg.strip_prefix("of=")
-                        .is_some_and(|output| is_block_device(output, folder))
+                        .is_some_and(|output| is_block_device(output, folders))
                 });
                 if raw { Verdict::Refuse } else { Verdict::Clear }
             }
@@ -147,7 +148,7 @@ impl Floors {
         }
     }
 
-    fn check_delete(&self, name: &str, args: &[String], folder: &Path) -> Verdict {
+    fn check_delete(&self, name: &str, args: &[String], folders: &[PathBuf]) -> Verdict {
         let mut recursive = false;
         let mut targets = Vec::new();
         let mut operands = false;
@@ -183,26 +184,27 @@ impl Floors {
             // These remove what a folder holds only with `/s`.
             recursive = recursive && cfg!(windows);
         }
-        self.check_targets(targets.into_iter(), folder, recursive)
+        self.check_targets(targets.into_iter(), folders, recursive)
     }
 
     fn check_targets<'a>(
         &self,
         targets: impl Iterator<Item = &'a String>,
-        folder: &Path,
+        folders: &[PathBuf],
         recursive: bool,
     ) -> Verdict {
         for target in targets {
-            let joined = folder.join(target);
-            let path = normalize(&joined);
             // A link in the path leads where the delete goes: both the path
             // as written and the one on the disk are read.
-            let paths = [Some(path), joined.canonicalize().ok()];
-            for path in paths.iter().flatten() {
-                if self.daemon.iter().any(|kept| holds(path, kept)) {
+            let paths = folders.iter().flat_map(|folder| {
+                let joined = folder.join(target);
+                [Some(normalize(&joined)), joined.canonicalize().ok()]
+            });
+            for path in paths.flatten() {
+                if self.daemon.iter().any(|kept| holds(&path, kept)) {
                     return Verdict::Refuse;
                 }
-                if recursive && self.protected.iter().any(|kept| holds(path, kept)) {
+                if recursive && self.protected.iter().any(|kept| holds(&path, kept)) {
                     return Verdict::Refuse;
                 }
             }
@@ -307,11 +309,7 @@ fn unwrap(simple: &Simple, layers: &mut Vec<Layer>, depth: usize) {
             return;
         }
         "flock" => {
-            let rest = skip_options(
-                args,
-                &["-w", "--wait", "--timeout", "-E", "--conflict-exit-code"],
-                1,
-            );
+            let rest = skip_options(args, &FLOCK, 1, layers);
             match rest.and_then(|rest| rest.first()) {
                 Some(first) if first == "-c" || first == "--command" => {
                     let start = args.len() - rest.map_or(0, <[String]>::len) + 1;
@@ -326,35 +324,8 @@ fn unwrap(simple: &Simple, layers: &mut Vec<Layer>, depth: usize) {
             layers.push(Layer::Opaque(args.join(" ")));
             return;
         }
-        "sudo" | "doas" | "pkexec" => {
-            let rest = skip_options(
-                args,
-                &[
-                    "-u",
-                    "-g",
-                    "-C",
-                    "-D",
-                    "-h",
-                    "-p",
-                    "-r",
-                    "-t",
-                    "-U",
-                    "-R",
-                    "-T",
-                    "--user",
-                    "--group",
-                    "--close-from",
-                    "--chdir",
-                    "--chroot",
-                    "--host",
-                    "--prompt",
-                    "--role",
-                    "--type",
-                    "--other-user",
-                    "--command-timeout",
-                ],
-                0,
-            );
+        "sudo" | "doas" | "pkexec" | "sudo.exe" | "doas.exe" => {
+            let rest = skip_options(args, &SUDO, 0, layers);
             // `-D` and `--chdir` move the command, `-R` and `--chroot` its root:
             // its paths are no longer read from the request's folder.
             let moved = |arg: &String| {
@@ -373,7 +344,7 @@ fn unwrap(simple: &Simple, layers: &mut Vec<Layer>, depth: usize) {
                 layers.push(Layer::Opaque(args.join(" ")));
                 return;
             }
-            let rest = skip_options(args, &["-u", "--unset", "-C", "--chdir"], 0);
+            let rest = skip_options(args, &ENV, 0, layers);
             let moved = |arg: &String| {
                 arg.starts_with("--chdir") || (!arg.starts_with("--") && arg.contains('C'))
             };
@@ -383,21 +354,21 @@ fn unwrap(simple: &Simple, layers: &mut Vec<Layer>, depth: usize) {
                 &rest[assignments..]
             })
         }
-        "nohup" | "time" | "command" | "builtin" | "exec" | "setsid" | "busybox" | "doas.exe"
-        | "sudo.exe" => skip_options(args, &[], 0),
-        "nice" => skip_options(args, &["-n", "--adjustment"], 0),
-        "ionice" => skip_options(args, &["-c", "-n", "--class", "--classdata"], 0),
-        "stdbuf" => skip_options(
-            args,
-            &["-i", "-o", "-e", "--input", "--output", "--error"],
-            0,
-        ),
-        "timeout" => skip_options(args, &["-s", "--signal", "-k", "--kill-after"], 1),
-        "chrt" | "taskset" => skip_options(args, &[], 1),
+        "nohup" | "builtin" | "busybox" => skip_options(args, &NONE, 0, layers),
+        "time" => skip_options(args, &TIME, 0, layers),
+        "command" => skip_options(args, &COMMAND, 0, layers),
+        "exec" => skip_options(args, &EXEC, 0, layers),
+        "setsid" => skip_options(args, &SETSID, 0, layers),
+        "nice" => skip_options(args, &NICE, 0, layers),
+        "ionice" => skip_options(args, &IONICE, 0, layers),
+        "stdbuf" => skip_options(args, &STDBUF, 0, layers),
+        "timeout" => skip_options(args, &TIMEOUT, 1, layers),
+        "chrt" => skip_options(args, &CHRT, 1, layers),
+        "taskset" => skip_options(args, &TASKSET, 1, layers),
         "xargs" => {
             // The inner command gets arguments nobody has read.
             layers.push(Layer::Opaque(args.join(" ")));
-            skip_options(args, &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"], 0)
+            skip_options(args, &XARGS, 0, layers)
         }
         _ => None,
     };
@@ -468,27 +439,311 @@ fn moves(
     }
 }
 
+/// The options of a command that runs a command: those that take a value,
+/// and those that take none. Any other option may take a value nobody
+/// knows, so the word read as the inner program may not be it.
+struct Options {
+    value: &'static [&'static str],
+    flags: &'static [&'static str],
+    /// An option made of digits (`nice -5`).
+    digits: bool,
+}
+
+const NONE: Options = Options {
+    value: &[],
+    flags: &[],
+    digits: false,
+};
+const SUDO: Options = Options {
+    value: &[
+        "-u",
+        "-g",
+        "-C",
+        "-D",
+        "-h",
+        "-p",
+        "-r",
+        "-t",
+        "-U",
+        "-R",
+        "-T",
+        "--user",
+        "--group",
+        "--close-from",
+        "--chdir",
+        "--chroot",
+        "--host",
+        "--prompt",
+        "--role",
+        "--type",
+        "--other-user",
+        "--command-timeout",
+    ],
+    flags: &[
+        "-A",
+        "-b",
+        "-E",
+        "-e",
+        "-H",
+        "-i",
+        "-K",
+        "-k",
+        "-l",
+        "-L",
+        "-n",
+        "-P",
+        "-S",
+        "-s",
+        "-V",
+        "-v",
+        "-B",
+        "-N",
+        "--askpass",
+        "--background",
+        "--preserve-env",
+        "--edit",
+        "--set-home",
+        "--login",
+        "--remove-timestamp",
+        "--reset-timestamp",
+        "--list",
+        "--non-interactive",
+        "--preserve-groups",
+        "--stdin",
+        "--shell",
+        "--validate",
+        "--bell",
+        "--keep-cwd",
+        "--disable-internal-agent",
+    ],
+    digits: false,
+};
+const ENV: Options = Options {
+    value: &["-u", "--unset", "-C", "--chdir"],
+    flags: &[
+        "-",
+        "-i",
+        "--ignore-environment",
+        "-0",
+        "--null",
+        "-v",
+        "--debug",
+        "--default-signal",
+        "--ignore-signal",
+        "--block-signal",
+        "--list-signal-handling",
+    ],
+    digits: false,
+};
+const TIME: Options = Options {
+    value: &["-f", "--format", "-o", "--output"],
+    flags: &[
+        "-a",
+        "--append",
+        "-p",
+        "--portability",
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+    ],
+    digits: false,
+};
+const COMMAND: Options = Options {
+    value: &[],
+    flags: &["-p", "-v", "-V"],
+    digits: false,
+};
+const EXEC: Options = Options {
+    value: &["-a"],
+    flags: &["-c", "-l"],
+    digits: false,
+};
+const SETSID: Options = Options {
+    value: &[],
+    flags: &["-c", "--ctty", "-f", "--fork", "-w", "--wait"],
+    digits: false,
+};
+const NICE: Options = Options {
+    value: &["-n", "--adjustment"],
+    flags: &[],
+    digits: true,
+};
+const IONICE: Options = Options {
+    value: &[
+        "-c",
+        "-n",
+        "-p",
+        "-P",
+        "-u",
+        "--class",
+        "--classdata",
+        "--pid",
+        "--pgid",
+        "--uid",
+    ],
+    flags: &["-t", "--ignore"],
+    digits: false,
+};
+const STDBUF: Options = Options {
+    value: &["-i", "-o", "-e", "--input", "--output", "--error"],
+    flags: &[],
+    digits: false,
+};
+const TIMEOUT: Options = Options {
+    value: &["-s", "--signal", "-k", "--kill-after"],
+    flags: &[
+        "-f",
+        "--foreground",
+        "-p",
+        "--preserve-status",
+        "-v",
+        "--verbose",
+    ],
+    digits: false,
+};
+const CHRT: Options = Options {
+    value: &[
+        "-T",
+        "--sched-runtime",
+        "-P",
+        "--sched-period",
+        "-D",
+        "--sched-deadline",
+    ],
+    flags: &[
+        "-a",
+        "--all-tasks",
+        "-b",
+        "--batch",
+        "-d",
+        "--deadline",
+        "-e",
+        "--ext",
+        "-f",
+        "--fifo",
+        "-i",
+        "--idle",
+        "-m",
+        "--max",
+        "-o",
+        "--other",
+        "-p",
+        "--pid",
+        "-r",
+        "--rr",
+        "-R",
+        "--reset-on-fork",
+        "-v",
+        "--verbose",
+    ],
+    digits: false,
+};
+const TASKSET: Options = Options {
+    value: &[],
+    flags: &["-a", "--all-tasks", "-p", "--pid", "-c", "--cpu-list"],
+    digits: false,
+};
+const FLOCK: Options = Options {
+    value: &["-w", "--wait", "--timeout", "-E", "--conflict-exit-code"],
+    flags: &[
+        "-s",
+        "--shared",
+        "-x",
+        "-e",
+        "--exclusive",
+        "-u",
+        "--unlock",
+        "-n",
+        "--nb",
+        "--nonblock",
+        "-o",
+        "--close",
+        "-F",
+        "--no-fork",
+        "--verbose",
+        "--fcntl",
+    ],
+    digits: false,
+};
+const XARGS: Options = Options {
+    value: &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"],
+    flags: &[
+        "-0",
+        "-r",
+        "-t",
+        "-p",
+        "-x",
+        "-o",
+        "--null",
+        "--no-run-if-empty",
+        "--verbose",
+        "--interactive",
+        "--exit",
+        "--open-tty",
+    ],
+    digits: false,
+};
+
 /// The arguments after the options of a command that runs a command, and
-/// after `positional` more words (the duration of `timeout`).
+/// after `positional` more words (the duration of `timeout`), read as
+/// `getopt` reads them: in a cluster (`-iu root`), the first letter that
+/// takes a value takes the rest of the cluster, or the next word. An
+/// option `options` does not know makes the whole line opaque too.
 fn skip_options<'a>(
     args: &'a [String],
-    with_value: &[&str],
+    options: &Options,
     positional: usize,
+    layers: &mut Vec<Layer>,
 ) -> Option<&'a [String]> {
+    let mut unknown = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
+        index += 1;
         if arg == "--" {
-            index += 1;
             break;
+        }
+        if arg == "-" && options.flags.contains(&"-") {
+            continue;
         }
         if !arg.starts_with('-') || arg == "-" {
+            index -= 1;
             break;
         }
-        index += if with_value.contains(&arg.as_str()) {
-            2
-        } else {
-            1
-        };
+        if arg.starts_with("--") {
+            let (name, inline) = match arg.split_once('=') {
+                Some((name, _)) => (name, true),
+                None => (arg.as_str(), false),
+            };
+            if options.value.contains(&name) {
+                if !inline {
+                    index += 1;
+                }
+            } else if !options.flags.contains(&name) {
+                unknown = true;
+            }
+            continue;
+        }
+        let letters: Vec<char> = arg.chars().skip(1).collect();
+        if options.digits && letters.iter().all(char::is_ascii_digit) {
+            continue;
+        }
+        for (at, letter) in letters.iter().enumerate() {
+            let option = format!("-{letter}");
+            if options.value.contains(&option.as_str()) {
+                // The rest of the cluster is the value, or else the next word.
+                if at + 1 == letters.len() {
+                    index += 1;
+                }
+                break;
+            }
+            if !options.flags.contains(&option.as_str()) {
+                unknown = true;
+            }
+        }
+    }
+    if unknown {
+        layers.push(Layer::Opaque(args.join(" ")));
     }
     let start = index + positional;
     args.get(start..).filter(|rest| !rest.is_empty())
@@ -545,18 +800,18 @@ fn is_recursive_long(lower: &str) -> bool {
     lower.len() >= 3 && "--recursive".starts_with(lower)
 }
 
-/// Whether the output of `dd` is a device, read from `folder` with `.`,
+/// Whether the output of `dd` is a device, read from each folder with `.`,
 /// `..`, and repeated slashes resolved, and through a link.
-fn is_block_device(output: &str, folder: &Path) -> bool {
-    let joined = folder.join(output);
-    let written = normalize(&joined);
-    let resolved = joined.canonicalize().ok();
+fn is_block_device(output: &str, folders: &[PathBuf]) -> bool {
     output.to_lowercase().starts_with(r"\\.\physicaldrive")
         || is_device_path(output)
-        || [Some(written), resolved]
-            .iter()
-            .flatten()
-            .any(|path| path.to_str().is_some_and(is_device_path))
+        || folders.iter().any(|folder| {
+            let joined = folder.join(output);
+            [Some(normalize(&joined)), joined.canonicalize().ok()]
+                .iter()
+                .flatten()
+                .any(|path| path.to_str().is_some_and(is_device_path))
+        })
 }
 
 fn is_device_path(path: &str) -> bool {
@@ -661,7 +916,7 @@ mod tests {
             "/home/ada/CrowBot/Bots/ada"
         });
         let parsed = command::parse(text, false);
-        floors().check(&layers(&parsed, text), &folder)
+        floors().check(&layers(&parsed, text), &[folder])
     }
 
     #[cfg(unix)]
@@ -758,6 +1013,15 @@ mod tests {
             "flock -w 5 /tmp/lock -c 'rm -rf /'",
             // A folder of its own does not hide an absolute path.
             "env --chdir=/tmp rm -rf /etc",
+            // Options that take a value: alone, in a cluster, or attached.
+            "exec -a name rm -rf /",
+            "time -f %e rm -rf /",
+            "sudo -iu root rm -rf /",
+            "sudo -u root -E rm -rf /",
+            "nice -n5 rm -rf /",
+            "nice -5 rm -rf /",
+            "timeout -sKILL 10 rm -rf /",
+            "env - rm -rf /",
         ] {
             assert_eq!(verdict(text), Verdict::Refuse, "{text}");
         }
@@ -783,6 +1047,9 @@ mod tests {
             "bash -c -- 'ls'",
             "sudo --user root ls",
             "env -C /tmp ls",
+            "sudo -E cargo build",
+            "nice -n 5 cargo build",
+            "sudo --weird x cargo build",
             "systemctl --user status crowbotd",
             "git init",
             "echo rm -rf /",
@@ -853,6 +1120,9 @@ mod tests {
             // A script read past other options may not be the one that runs.
             "bash -c -o pipefail 'rm -rf etc'",
             "runuser -u root rm -rf etc",
+            // An option nobody knows may take the next word as its value.
+            "nohup --weird x rm -rf etc",
+            "sudo --frobnicate x rm -rf etc",
         ] {
             assert_eq!(verdict(text), Verdict::Unsure, "{text}");
         }
