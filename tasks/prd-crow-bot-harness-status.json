@@ -1,0 +1,718 @@
+{
+  "prd": {
+    "file": "tasks/prd-crow-bot-harness.md",
+    "title": "Crow Bot harness",
+    "created_at": "2026-11-23",
+    "status": "READY"
+  },
+  "epics": [
+    {
+      "id": "EP-001",
+      "title": "The daemon serves tools to a bot",
+      "status": "DONE",
+      "priority": "P0",
+      "stories_total": 5,
+      "stories_done": 5
+    },
+    {
+      "id": "EP-002",
+      "title": "The daemon guards a turn",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 6,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-003",
+      "title": "Approval rules",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 5,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-004",
+      "title": "Memory and the search of past conversations",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 5,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-005",
+      "title": "Skills",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 4,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-006",
+      "title": "Learning from use",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 4,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-007",
+      "title": "Routines",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 6,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-008",
+      "title": "Checkpoints",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 2,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-009",
+      "title": "Delegation",
+      "status": "TODO",
+      "priority": "P2",
+      "stories_total": 3,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-010",
+      "title": "Goals",
+      "status": "TODO",
+      "priority": "P2",
+      "stories_total": 2,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-011",
+      "title": "The client keeps working",
+      "status": "TODO",
+      "priority": "P0",
+      "stories_total": 1,
+      "stories_done": 0
+    },
+    {
+      "id": "EP-012",
+      "title": "Desktop surfaces for the harness",
+      "status": "TODO",
+      "priority": "P1",
+      "stories_total": 3,
+      "stories_done": 0
+    }
+  ],
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "Record how each provider treats a daemon MCP server",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
+    },
+    {
+      "id": "US-002",
+      "title": "The bridge and the per-session endpoint",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
+    },
+    {
+      "id": "US-003",
+      "title": "The tool registry and the effect of a tool",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "blocked_by": [
+        "US-002"
+      ],
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
+    },
+    {
+      "id": "US-004",
+      "title": "Approvals of daemon tools",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "blocked_by": [
+        "US-001",
+        "US-003"
+      ],
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
+    },
+    {
+      "id": "US-005",
+      "title": "The system prompt in tiers and the daemon's note",
+      "epic": "EP-001",
+      "status": "DONE",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
+    },
+    {
+      "id": "US-006",
+      "title": "Store the usage an agent reports",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-007",
+      "title": "The origin of a turn",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-008",
+      "title": "Stop a turn that makes no progress",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-009",
+      "title": "Limits of a turn",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-007"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-010",
+      "title": "Retry a turn that failed before it said anything",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-007"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-011",
+      "title": "Pause all new work",
+      "epic": "EP-002",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-012",
+      "title": "A cut request is never allowed",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-013",
+      "title": "Parse a command",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-014",
+      "title": "Built-in refusals",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-013"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-015",
+      "title": "Per-bot rules",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-001",
+        "US-013",
+        "US-014"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-016",
+      "title": "An answer is stored before it is given",
+      "epic": "EP-003",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-017",
+      "title": "The memory store",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-018",
+      "title": "Scan what the daemon injects",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-019",
+      "title": "The `memory` tool and the client messages",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-004",
+        "US-017",
+        "US-018"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-020",
+      "title": "Memory in the prompt and recalled by turn",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-005",
+        "US-017",
+        "US-018",
+        "US-006"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-021",
+      "title": "The `session_search` tool",
+      "epic": "EP-004",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-003"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-022",
+      "title": "The skill store and its projection",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-023",
+      "title": "The skills index and the read tools",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-003",
+        "US-005",
+        "US-022"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-024",
+      "title": "The `skill_manage` tool",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-004",
+        "US-018",
+        "US-022"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-025",
+      "title": "Skill history, rollback, and import",
+      "epic": "EP-005",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-022"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-026",
+      "title": "Switches and limits for daemon-started turns",
+      "epic": "EP-006",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-006",
+        "US-007",
+        "US-009"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-027",
+      "title": "The review conversation",
+      "epic": "EP-006",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-019",
+        "US-021",
+        "US-023",
+        "US-024",
+        "US-026"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-028",
+      "title": "The curator",
+      "epic": "EP-006",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-025",
+        "US-029",
+        "US-031"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-029",
+      "title": "Measure what skills change",
+      "epic": "EP-006",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-006",
+        "US-023"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-030",
+      "title": "Schedules and their next occurrence",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-031",
+      "title": "Routines and the scheduler",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-003",
+        "US-007",
+        "US-026",
+        "US-030"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-032",
+      "title": "Missed occurrences",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-011",
+        "US-031"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-033",
+      "title": "The `schedule` tool and the client messages",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-004",
+        "US-031"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-034",
+      "title": "A routine with nobody there",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-003",
+        "US-009",
+        "US-031"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-035",
+      "title": "A guard script before a run",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-018",
+        "US-033"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-036",
+      "title": "Snapshot the bot's folder around a turn",
+      "epic": "EP-008",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-037",
+      "title": "Put the folder back",
+      "epic": "EP-008",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-036"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-038",
+      "title": "Child conversations and the `delegate` tool",
+      "epic": "EP-009",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-004",
+        "US-007",
+        "US-026"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-039",
+      "title": "The result of a delegation",
+      "epic": "EP-009",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-038"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-040",
+      "title": "Stop and restart with children",
+      "epic": "EP-009",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-038"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-041",
+      "title": "A goal that lasts across turns",
+      "epic": "EP-010",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-004",
+        "US-007",
+        "US-026"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-042",
+      "title": "A reminder to verify an edit",
+      "epic": "EP-010",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-007",
+        "US-026"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-043",
+      "title": "The transcript pattern for new events",
+      "epic": "EP-011",
+      "status": "TODO",
+      "priority": "P0",
+      "blocked_by": [
+        "US-005",
+        "US-007"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-044",
+      "title": "Memory and skills of a bot",
+      "epic": "EP-012",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-019",
+        "US-025",
+        "US-043"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-045",
+      "title": "Routines",
+      "epic": "EP-012",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-011",
+        "US-033",
+        "US-043"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-046",
+      "title": "Rules, switches, and consumption",
+      "epic": "EP-012",
+      "status": "TODO",
+      "priority": "P1",
+      "blocked_by": [
+        "US-014",
+        "US-015",
+        "US-026",
+        "US-043"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    }
+  ]
+}
