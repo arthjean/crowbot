@@ -106,6 +106,14 @@ pub async fn check_sandbox(launch: &crate::provider::acp::Launch) -> Result<(), 
 #[cfg(target_os = "linux")]
 fn sandbox_program(launch: &crate::provider::acp::Launch) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
+    // The fake agent of the daemon's tests runs as Codex and never starts
+    // `bwrap`: a debug build started with `CROWBOT_TEST_BWRAP` checks the
+    // program it names instead, so those tests do not depend on the user
+    // namespaces of the computer they run on.
+    #[cfg(debug_assertions)]
+    if let Some(program) = std::env::var_os("CROWBOT_TEST_BWRAP") {
+        return Some(std::path::PathBuf::from(program));
+    }
     let runs = |path: &Path| {
         std::fs::metadata(path)
             .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)

@@ -175,6 +175,9 @@ fn daemon_command(dir: &Path, endpoint: &Endpoint, agent: Agent) -> Command {
             command
                 .arg("--runtime-manifest")
                 .arg(dir.join("manifest.json"))
+                // The fake agent never starts `bwrap`: the daemon checks a
+                // program that always succeeds (`provider/codex.rs`).
+                .env("CROWBOT_TEST_BWRAP", "true")
                 .env("FAKE_AGENT_HEARTBEAT", heartbeat)
                 .envs(variables.iter().copied());
         }
@@ -438,6 +441,8 @@ impl Daemon {
             command.env("CROWBOT_TEST_CLOCK", self.dir.join("clock"));
         }
         if let Some(confinement) = self.confinement {
+            // A confined daemon checks the real `bwrap` of Codex.
+            command.env_remove("CROWBOT_TEST_BWRAP");
             command = confined(command, &self.dir.join("runtimes"), confinement);
         }
         self.child = Some(command.stderr(log).spawn().unwrap());
