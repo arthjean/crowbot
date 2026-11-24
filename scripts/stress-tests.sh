@@ -23,8 +23,10 @@ binary=$(cargo test --locked --test daemon --no-run --message-format json 2>/dev
   grep '"kind":\["test"\]' | grep '"name":"daemon"' |
   sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)
 [ -x "$binary" ] || { echo "cannot build the daemon tests" >&2; exit 1; }
-# The scripted agent the tests start is built by the first run otherwise.
+# The scripted agent the tests start, built once for every run: a run that
+# built it again could copy it over itself while another run starts it.
 cargo build --locked -p crowbotd --example fake_acp_agent 2>/dev/null
+export CROWBOT_FAKE_AGENT_BUILT=1
 
 logs=$(mktemp -d "${TMPDIR:-/tmp}/crowbot-stress.XXXXXX")
 failed=0

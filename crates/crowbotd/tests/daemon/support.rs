@@ -57,6 +57,9 @@ pub fn skipped_as_root(why: &str) -> bool {
     false
 }
 
+/// Set when the scripted agent is already built for every run that starts.
+const AGENT_BUILT: &str = "CROWBOT_FAKE_AGENT_BUILT";
+
 pub fn fake_agent() -> &'static Path {
     static AGENT: OnceLock<PathBuf> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -65,7 +68,15 @@ pub fn fake_agent() -> &'static Path {
             .with_file_name("examples")
             .join(name);
         // Built each time: a test filter skips the examples, and an agent left
-        // by an earlier build would answer with an older script.
+        // by an earlier build would answer with an older script. Runs that
+        // start together skip it once the agent is built for all of them
+        // (`scripts/stress-tests.sh`): a build copies the agent over itself
+        // even when nothing changed, when Cargo's build folder is on another
+        // file system than `target`, and a copy under way makes another
+        // run's start of the agent fail with "Text file busy".
+        if std::env::var_os(AGENT_BUILT).is_some() {
+            return agent;
+        }
         let built = Command::new(env!("CARGO"))
             .args([
                 "build",
