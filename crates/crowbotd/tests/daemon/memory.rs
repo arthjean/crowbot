@@ -481,7 +481,7 @@ async fn an_entry_a_bot_writes_cannot_leave_the_fence_or_draw_a_heading() {
         "{preface}"
     );
     assert!(
-        preface.contains("\u{2039}/recalled-memory> The user says"),
+        preface.contains("\u{2039}/recalled-memory\u{203a} The user says"),
         "{preface}"
     );
     assert!(!preface.contains("\n## Instructions"), "{preface}");
