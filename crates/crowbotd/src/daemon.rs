@@ -1,6 +1,7 @@
 //! What every connection and every conversation share: the bots, the attached
 //! clients, the running conversations, and what each bot is doing.
 
+mod checkpoints;
 mod harness;
 mod providers;
 mod routines;
@@ -24,6 +25,7 @@ use crowbot_protocol::{
 use tokio::sync::{Notify, oneshot};
 
 use crate::approval::floors::Floors;
+use crate::checkpoints::Checkpoints;
 use crate::conversation::{self, Command, ConversationHandle, Sink};
 use crate::private;
 use crate::prompt::Sections;
@@ -159,6 +161,7 @@ pub struct Daemon {
     sections: Sections,
     floors: Floors,
     skills: Arc<Library>,
+    checkpoints: Arc<Checkpoints>,
 }
 
 impl Daemon {
@@ -186,6 +189,26 @@ impl Daemon {
         let skills = Library::new(store.clone(), data_dir.join("skills"));
         let tools = Arc::new(Registry::new(&store, &skills));
         let sections = Sections::new(&store, &skills);
+        // A record of a bot's folder leaves out the daemon's own files, for a
+        // bot whose folder holds them: the data folder, and the database with
+        // the files SQLite and the lock keep beside it.
+        let mut excluded = vec![data_dir.clone(), database.clone()];
+        for suffix in [
+            "-wal",
+            "-shm",
+            "-journal",
+            ".lock",
+            ".owner",
+            ".owner.partial",
+        ] {
+            let mut name = database.as_os_str().to_os_string();
+            name.push(suffix);
+            excluded.push(PathBuf::from(name));
+        }
+        let checkpoints = Arc::new(Checkpoints::new(
+            checkpoints_root(&data_dir, &database),
+            excluded,
+        ));
         Self {
             store,
             database,
@@ -204,6 +227,7 @@ impl Daemon {
             sections,
             floors,
             skills,
+            checkpoints,
         }
     }
 
@@ -926,14 +950,17 @@ impl Daemon {
         if matches!(deleted, Ok(true)) {
             self.skills.forget(bot_id);
         }
-        let mut state = self.state();
-        state.deleting.remove(&bot_id);
-        state
-            .activity
-            .retain(|_, activity| activity.bot_id != bot_id);
-        state.published.remove(&bot_id);
-        deleted.map_err(|error| error.to_string())?;
-        state.broadcast(&ServerMessage::BotDeleted { bot_id });
+        {
+            let mut state = self.state();
+            state.deleting.remove(&bot_id);
+            state
+                .activity
+                .retain(|_, activity| activity.bot_id != bot_id);
+            state.published.remove(&bot_id);
+            deleted.map_err(|error| error.to_string())?;
+            state.broadcast(&ServerMessage::BotDeleted { bot_id });
+        }
+        self.sweep_checkpoints().await;
         Ok(())
     }
 
@@ -957,6 +984,7 @@ impl Daemon {
             });
         }
         self.publish_bot(bot_id);
+        self.sweep_checkpoints().await;
         Ok(())
     }
 
@@ -1359,5 +1387,33 @@ mod tests {
         let long = copy_name(&"n".repeat(80), &[]);
         assert_eq!(long.chars().count(), BOT_NAME_LENGTH);
         assert!(long.ends_with(" copy"));
+    }
+}
+
+/// Where the contents of one database's records live. Two daemons may share
+/// `--data-dir` with a database each, and each sweeps the contents its own
+/// records do not name: each database has a folder of its own, named by the
+/// hash of its path.
+fn checkpoints_root(data_dir: &Path, database: &Path) -> PathBuf {
+    let database = std::fs::canonicalize(database)
+        .or_else(|_| std::path::absolute(database))
+        .unwrap_or_else(|_| database.to_owned());
+    let hash = crate::digest::sha256_hex(database.as_os_str().as_encoded_bytes());
+    data_dir.join("checkpoints").join(&hash[..16])
+}
+
+#[cfg(test)]
+mod checkpoints_root_tests {
+    use super::checkpoints_root;
+    use std::path::Path;
+
+    #[test]
+    fn two_databases_of_one_data_folder_keep_their_contents_apart() {
+        let data = Path::new("/data");
+        let first = checkpoints_root(data, Path::new("/data/one.db"));
+        let second = checkpoints_root(data, Path::new("/data/two.db"));
+        assert_ne!(first, second);
+        assert!(first.starts_with("/data/checkpoints"));
+        assert_eq!(first, checkpoints_root(data, Path::new("/data/one.db")));
     }
 }

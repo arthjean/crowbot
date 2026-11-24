@@ -275,7 +275,13 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         self.forget_work(id)?;
         self.forget_routines(id)?;
-        for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
+        for owned in [
+            "queue",
+            "turn_usage",
+            "events",
+            "provider_sessions",
+            "checkpoints",
+        ] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN
@@ -325,7 +331,13 @@ impl Store {
             .map(i64::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
+        for owned in [
+            "queue",
+            "turn_usage",
+            "events",
+            "provider_sessions",
+            "checkpoints",
+        ] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN

@@ -1,4 +1,5 @@
 mod approval;
+mod checkpoints;
 mod clock;
 mod conversation;
 mod curator;
@@ -264,6 +265,12 @@ async fn run(args: Args) -> Result<(), StartError> {
         args.command,
         runtimes,
     ));
+    // What no record of a folder names any longer goes, such as the
+    // contents a refused restore read.
+    tokio::spawn({
+        let daemon = daemon.clone();
+        async move { daemon.sweep_checkpoints().await }
+    });
     // The scheduler of routines and the curator's passes, until the daemon
     // stops.
     let scheduling = tokio::spawn(routines::run(daemon.clone()));

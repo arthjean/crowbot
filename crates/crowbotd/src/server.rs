@@ -275,6 +275,16 @@ impl ClientState {
             }
             ClientMessage::DeleteRoutine { routine_id } => daemon.delete_routine(routine_id),
             ClientMessage::RunRoutineNow { routine_id } => daemon.run_routine_now(routine_id),
+            ClientMessage::GetTurnChanges {
+                conversation_id,
+                event_id,
+            } => daemon.turn_changes(conversation_id, event_id).map(reply),
+            ClientMessage::RestoreCheckpoint {
+                conversation_id,
+                event_id,
+                paths,
+                confirm,
+            } => daemon.restore_checkpoint(conversation_id, event_id, paths, confirm, sink.clone()),
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
             }

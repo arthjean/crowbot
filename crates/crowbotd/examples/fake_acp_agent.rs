@@ -55,6 +55,12 @@
 //!   of the session.
 //! - `write <path>`: write `written` to the file. A session that asks first
 //!   requests permission, and writes only when the request is allowed.
+//! - `edit <path> <text>`: start an edit tool call of the file, relative to
+//!   the session's folder, ask first as `write` does, then write the text
+//!   to it and answer `edited`.
+//! - `run <command>`: start a tool call that runs the command, ask first as
+//!   `write` does, then run it with the system's shell in the session's
+//!   folder and answer `ran`.
 //! - `leave <mode> <path>`: move the session to that mode on its own and say
 //!   so, then, unless a cancel arrives within two seconds, write `written` to
 //!   the file without asking, as an agent in a mode that does not ask.
@@ -1141,6 +1147,64 @@ impl Agent {
                     "failed"
                 };
                 self.say(session, &format!("write={outcome}"));
+            }
+            "edit" | "run" => {
+                let cwd = PathBuf::from(&self.session().cwd);
+                let (path, content) = rest.split_once(' ').unwrap_or((rest, ""));
+                let tool_call = if command == "edit" {
+                    json!({
+                        "title": format!("Edit {path}"),
+                        "kind": "edit",
+                        "status": "pending",
+                        "locations": [{ "path": cwd.join(path) }]
+                    })
+                } else {
+                    json!({
+                        "title": rest,
+                        "kind": "execute",
+                        "status": "pending",
+                        "rawInput": { "command": rest, "cwd": cwd }
+                    })
+                };
+                let call = self.start_tool(session, tool_call.clone());
+                let mut request = tool_call;
+                request["toolCallId"] = call.as_str().into();
+                let allowed = !self.asks_first() || self.ask(session, request, true) == "allow";
+                if !allowed {
+                    self.update_tool(session, &call, "failed", Some("declined"));
+                    self.say(session, "declined");
+                } else if command == "edit" {
+                    let written = std::fs::write(cwd.join(path), content).is_ok();
+                    self.update_tool(
+                        session,
+                        &call,
+                        if written { "completed" } else { "failed" },
+                        None,
+                    );
+                    self.say(session, if written { "edited" } else { "edit failed" });
+                } else {
+                    let mut shell = if cfg!(windows) {
+                        let mut shell = std::process::Command::new("cmd");
+                        shell.arg("/C");
+                        shell
+                    } else {
+                        let mut shell = std::process::Command::new("sh");
+                        shell.arg("-c");
+                        shell
+                    };
+                    let output = shell.arg(rest).current_dir(&cwd).output();
+                    let ran = output.as_ref().is_ok_and(|output| output.status.success());
+                    let text = output
+                        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                        .unwrap_or_default();
+                    self.update_tool(
+                        session,
+                        &call,
+                        if ran { "completed" } else { "failed" },
+                        Some(&text),
+                    );
+                    self.say(session, if ran { "ran" } else { "run failed" });
+                }
             }
             "config" => {
                 let report = {

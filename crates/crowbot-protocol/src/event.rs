@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::checkpoint::{CheckpointCause, CheckpointMoment, LeftFile};
 use crate::harness::TurnRefusal;
 use crate::memory::{MemoryAuthor, MemoryChange};
 use crate::routine::{RoutineChangeKind, RoutinePause};
@@ -142,6 +143,29 @@ pub enum Event {
     RoutinePaused {
         routine_id: i64,
         cause: RoutinePause,
+    },
+    /// The daemon could not record the bot's folder at this moment: the
+    /// turn runs on, and what it changes cannot be put back from here.
+    CheckpointSkipped {
+        moment: CheckpointMoment,
+        cause: CheckpointCause,
+        /// The file or folder that could not be read, relative to the bot's folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        message: String,
+    },
+    /// A person put files of the bot's folder back as they were before the
+    /// turn that `turn_event_id` started.
+    CheckpointRestored {
+        turn_event_id: i64,
+        /// The files written back, relative to the bot's folder.
+        restored: Vec<String>,
+        /// The files removed, which did not exist before that turn.
+        #[serde(default)]
+        removed: Vec<String>,
+        /// The files the restore covered and left as they are.
+        #[serde(default)]
+        left: Vec<LeftFile>,
     },
 }
 

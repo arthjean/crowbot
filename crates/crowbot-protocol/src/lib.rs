@@ -1,4 +1,5 @@
 mod bot;
+mod checkpoint;
 mod endpoint;
 mod event;
 mod folders;
@@ -21,6 +22,10 @@ pub use bot::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH, BOT_MODEL_LENGTH, BOT_NAME_LENGTH,
     BOT_TITLE_LENGTH, Bot, BotDraft, BotPatch, BotState, BotSummary, MascotShape, PermissionLevel,
     TOOL_CALL_LIMIT_MAX, mascot_at,
+};
+pub use checkpoint::{
+    CheckpointCause, CheckpointMoment, CheckpointSummary, FileChange, FileChangeKind, FileKind,
+    FileState, LeftCause, LeftFile, RESTORE_PATHS, RestoreRefusal, TurnChanges,
 };
 pub use endpoint::{Endpoint, SOCKET_PATH_LIMIT};
 pub use event::{

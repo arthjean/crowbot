@@ -1,4 +1,5 @@
 mod bots;
+mod checkpoints;
 mod figures;
 mod harness;
 mod memory;
@@ -12,6 +13,7 @@ mod skills;
 mod usage;
 
 pub use bots::{BotRow, NewBot};
+pub use checkpoints::{CheckpointRow, NewCheckpoint};
 pub use figures::SkillUse;
 pub use harness::TurnEndKind;
 pub use memory::{MemoryWriter, OperationResult};
@@ -33,7 +35,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -460,6 +462,30 @@ CREATE TABLE daemon_marks (
 ALTER TABLE skills ADD COLUMN stale_since_ms INTEGER;
 ";
 
+const SCHEMA_V16: &str = "
+CREATE TABLE checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    bot_id INTEGER NOT NULL,
+    turn_event_id INTEGER,
+    event_id INTEGER,
+    moment TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    tree TEXT NOT NULL,
+    files INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    stored_bytes INTEGER NOT NULL,
+    taken_at_ms INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL
+);
+CREATE INDEX checkpoints_by_turn ON checkpoints(conversation_id, turn_event_id);
+CREATE INDEX checkpoints_by_folder ON checkpoints(folder, id);
+CREATE TABLE checkpoint_trees (
+    hash TEXT PRIMARY KEY,
+    body TEXT NOT NULL
+) WITHOUT ROWID;
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -633,6 +659,9 @@ impl Store {
         }
         if version < 15 {
             transaction.execute_batch(SCHEMA_V15)?;
+        }
+        if version < 16 {
+            transaction.execute_batch(SCHEMA_V16)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -904,7 +933,7 @@ impl Store {
         &self,
         conversation_id: i64,
         note: Option<String>,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<(String, i64)>, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
         let first = transaction
             .query_row(
@@ -918,10 +947,10 @@ impl Store {
         };
         transaction.execute("DELETE FROM queue WHERE id = ?1", params![queue_id])?;
         let message = UserMessage::new(text.clone()).with_note(note);
-        self.append(conversation_id, &Event::UserText(message))?;
+        let event_id = self.append(conversation_id, &Event::UserText(message))?;
         self.unpause_when_empty(conversation_id)?;
         transaction.commit()?;
-        Ok(Some(text))
+        Ok(Some((text, event_id)))
     }
 
     fn unpause_when_empty(&self, conversation_id: i64) -> Result<(), StoreError> {
@@ -1136,6 +1165,8 @@ fn kind(event: &Event) -> &'static str {
         Event::RoutineChanged { .. } => "routine_changed",
         Event::RoutineMissed { .. } => "routine_missed",
         Event::RoutinePaused { .. } => "routine_paused",
+        Event::CheckpointSkipped { .. } => "checkpoint_skipped",
+        Event::CheckpointRestored { .. } => "checkpoint_restored",
     }
 }
 
@@ -1203,6 +1234,16 @@ impl Recorder {
             conversation_id,
             open: None,
         }
+    }
+
+    /// `record`, with the id of an event other than text, which is
+    /// committed when this returns.
+    pub fn record_id(&mut self, event: Event) -> Result<Option<i64>, StoreError> {
+        if matches!(event, Event::MessageText(_) | Event::ThoughtText(_)) {
+            return self.record(event).map(|()| None);
+        }
+        self.close()?;
+        self.append(&event).map(Some)
     }
 
     pub fn record(&mut self, event: Event) -> Result<(), StoreError> {
@@ -1728,11 +1769,19 @@ mod tests {
         store.enqueue(id, "two").unwrap();
         assert_eq!(texts(&store, id), ["one", "two"]);
         assert_eq!(
-            store.start_queued(id, None).unwrap().as_deref(),
+            store
+                .start_queued(id, None)
+                .unwrap()
+                .map(|(text, _)| text)
+                .as_deref(),
             Some("one")
         );
         assert_eq!(
-            store.start_queued(id, None).unwrap().as_deref(),
+            store
+                .start_queued(id, None)
+                .unwrap()
+                .map(|(text, _)| text)
+                .as_deref(),
             Some("two")
         );
         assert_eq!(store.start_queued(id, None).unwrap(), None);

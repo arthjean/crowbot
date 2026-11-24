@@ -670,6 +670,65 @@ fn a_routine_s_records_open_as_notices(cx: &mut TestAppContext) {
     )));
 }
 
+/// A conversation that holds the records of checkpoints opens, and each one
+/// shows as a notice: a record of the folder that failed, and a restore
+/// (EP-008 of the harness PRD).
+#[gpui::test]
+fn a_checkpoint_s_records_open_as_notices(cx: &mut TestAppContext) {
+    use crowbot_protocol::{CheckpointCause, CheckpointMoment, LeftCause, LeftFile, UserMessage};
+
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::UserText(UserMessage::new("tidy the folder")),
+                Event::CheckpointSkipped {
+                    moment: CheckpointMoment::BeforeTurn,
+                    cause: CheckpointCause::Storage,
+                    path: None,
+                    message: "The daemon could not store the record of the folder.".to_owned(),
+                },
+                Event::TurnEnded(TurnEnd::Completed),
+                Event::CheckpointRestored {
+                    turn_event_id: 1,
+                    restored: vec!["a.txt".to_owned()],
+                    removed: vec!["c.txt".to_owned()],
+                    left: vec![LeftFile {
+                        path: "big.bin".to_owned(),
+                        cause: LeftCause::NotKept,
+                        message: None,
+                    }],
+                },
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 2);
+    for notice in notices {
+        assert!(shown(cx, notice), "{notice}");
+    }
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::CheckpointSkipped {
+            cause: CheckpointCause::Storage,
+            ..
+        })
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::CheckpointRestored { restored, .. })
+            if restored == &["a.txt".to_owned()]
+    )));
+}
+
 /// A conversation that holds the records of learning from use opens, and
 /// each one shows as a notice: a turn the daemon did not start, and what a
 /// review of its work changed (EP-006 of the harness PRD).

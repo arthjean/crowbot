@@ -719,15 +719,17 @@ async fn new_conversation_within(
     patience: Duration,
 ) -> Option<i64> {
     let deadline = Instant::now() + patience;
+    // `next_within` leaves out what the daemon tells every client about
+    // conversations, which is what this waits for.
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        match client.next_within(left).await {
-            Some(ServerMessage::ConversationChanged(summary))
+        match tokio::time::timeout(left, client.next()).await {
+            Ok(ServerMessage::ConversationChanged(summary))
                 if summary.bot_id == bot_id && !known.contains(&summary.id) =>
             {
                 return Some(summary.id);
             }
-            Some(_) => {}
-            None => return None,
+            Ok(_) => {}
+            Err(_) => return None,
         }
     }
     None

@@ -4,16 +4,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
-    ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
-    FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryChange, MemoryOperation,
-    QueueState, RoutineIncident, RoutinePause, RoutineState, RunOutcome, ServerMessage,
-    SkillAuthor, SkillChange, TurnEnd, TurnOrigin, TurnRefusal, UserMessage,
+    ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, CheckpointMoment, ConversationSnapshot,
+    Event, FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryChange, MemoryOperation,
+    QueueState, RestoreRefusal, RoutineIncident, RoutinePause, RoutineState, RunOutcome,
+    ServerMessage, SkillAuthor, SkillChange, TurnEnd, TurnOrigin, TurnRefusal, UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use crate::approval::{self, Answer, Request, Standing};
+use crate::checkpoints::{self, Moment, RestoreRequest};
 use crate::daemon::Daemon;
 use crate::guard::{self, BUDGET_SUMMARY, INACTIVITY_LIMIT, Progress, RETRY_DELAYS};
 use crate::handoff::{self, HANDOFF_CHARACTERS};
@@ -130,6 +131,14 @@ pub enum Command {
     },
     /// The routine this conversation belonged to was deleted.
     RoutineDeleted,
+    /// A person puts files of the bot's folder back as they were before the
+    /// turn that the `UserText` event `event_id` started.
+    Restore {
+        event_id: i64,
+        paths: Option<Vec<String>>,
+        confirm: bool,
+        sink: Sink,
+    },
     /// The daemon starts the review this conversation holds, with its prompt.
     Review {
         text: String,
@@ -291,6 +300,10 @@ struct RunningTurn {
     /// The agent sent an event of the turn: a message, a thought, a tool
     /// call, or a request.
     heard: bool,
+    /// The `UserText` event that started the turn, and the bot's folder,
+    /// when the daemon recorded it before the turn: the record after the
+    /// turn is then taken too.
+    checkpoint: Option<(i64, String)>,
 }
 
 impl Default for RunningTurn {
@@ -308,6 +321,7 @@ impl Default for RunningTurn {
             indexed: 0,
             run: None,
             heard: false,
+            checkpoint: None,
         }
     }
 }
@@ -641,6 +655,12 @@ impl Actor {
                 self.emit(event);
             }
             Command::RoutineDeleted => self.routine = None,
+            Command::Restore {
+                event_id,
+                paths,
+                confirm,
+                sink,
+            } => self.restore(event_id, paths.as_deref(), confirm, &sink),
             Command::Review { text } => self.start_review(text),
             Command::RecordReview {
                 review_conversation_id,
@@ -826,7 +846,7 @@ impl Actor {
             reason,
         };
         match self.record(&allowed) {
-            Ok(()) => {
+            Ok(_) => {
                 reply.send(ApprovalAnswer::Allow).ok();
                 self.send_event(allowed);
             }
@@ -1032,7 +1052,7 @@ impl Actor {
         self.running.retries = retries;
         let delivery = self.prepare(&text);
         let note = delivery.as_ref().ok().and_then(Delivery::note);
-        self.emit(Event::UserText(
+        let started = self.emit_id(Event::UserText(
             UserMessage::new(text.clone())
                 .with_note(note)
                 .with_origin(origin),
@@ -1043,7 +1063,158 @@ impl Actor {
             // The turn shows as working: a review of the bot's work gives way.
             self.daemon.person_wrote(self.bot_id);
         }
+        if delivery.is_ok() {
+            self.record_before(started);
+        }
         self.deliver(delivery, text);
+    }
+
+    /// Records the bot's folder before the prompt reaches the agent, tied to
+    /// the turn's `UserText`. A review, whose agent writes no file, is not
+    /// recorded.
+    fn record_before(&mut self, started: Option<i64>) {
+        let Some(started) = started.filter(|_| self.review.is_none()) else {
+            return;
+        };
+        let workspace = match self.store.with(|store| store.bot(self.bot_id)) {
+            Ok(Some(row)) => row.bot.workspace,
+            Ok(None) | Err(_) => return,
+        };
+        match self.record_folder(&workspace, started, started, CheckpointMoment::BeforeTurn) {
+            None => self.running.checkpoint = Some((started, workspace)),
+            Some(skipped) => self.emit(skipped),
+        }
+    }
+
+    /// Records the bot's folder once the end of the turn is stored, tied to
+    /// that end, when the turn was recorded before it. The event that tells
+    /// why the record failed, to record after the end.
+    fn record_after(&mut self, ended: Option<i64>) -> Option<Event> {
+        let (Some((started, workspace)), Some(ended)) = (self.running.checkpoint.take(), ended)
+        else {
+            return None;
+        };
+        // A daemon that stops does not wait on a record: the next turn's
+        // record covers the folder.
+        if self.closing.is_some() {
+            return None;
+        }
+        self.record_folder(&workspace, started, ended, CheckpointMoment::AfterTurn)
+    }
+
+    /// Records the folder. The event that tells why the record could not
+    /// be taken, when it could not.
+    fn record_folder(
+        &self,
+        workspace: &str,
+        turn_event_id: i64,
+        event_id: i64,
+        moment: CheckpointMoment,
+    ) -> Option<Event> {
+        let at = Moment {
+            conversation_id: self.id,
+            bot_id: self.bot_id,
+            workspace,
+            turn_event_id: Some(turn_event_id),
+            event_id: Some(event_id),
+            moment,
+        };
+        let recorded = self.daemon.checkpoints().record(&self.store, &at);
+        let skip = recorded.err()?;
+        eprintln!(
+            "[crowbotd] conversation {}: the folder was not recorded: {}",
+            self.id, skip.message
+        );
+        Some(Event::CheckpointSkipped {
+            moment,
+            cause: skip.cause,
+            path: skip.path,
+            message: skip.message,
+        })
+    }
+
+    /// Puts files of the bot's folder back as the record taken before a
+    /// turn holds them, while no turn of a bot of that folder runs.
+    fn restore(&mut self, event_id: i64, paths: Option<&[String]>, confirm: bool, sink: &Sink) {
+        let refuse = |cause, message: String| {
+            sink.send(ServerMessage::RestoreRefused {
+                conversation_id: self.id,
+                event_id,
+                cause,
+                message,
+                conflicts: Vec::new(),
+            })
+            .ok();
+        };
+        if self.turn_active || self.closing.is_some() {
+            return refuse(
+                RestoreRefusal::TurnRunning,
+                "A turn runs in this conversation. Stop it, or wait for its end, then restore."
+                    .to_owned(),
+            );
+        }
+        let workspace = match self.store.with(|store| store.bot(self.bot_id)) {
+            Ok(Some(row)) => row.bot.workspace,
+            Ok(None) => {
+                return refuse(
+                    RestoreRefusal::Other,
+                    format!("bot {} does not exist", self.bot_id),
+                );
+            }
+            Err(error) => {
+                return refuse(RestoreRefusal::Other, error.to_string());
+            }
+        };
+        let closed = self.recorder.close();
+        self.report_store(closed);
+        let request = RestoreRequest {
+            conversation_id: self.id,
+            bot_id: self.bot_id,
+            workspace: &workspace,
+            turn_event_id: event_id,
+            paths,
+            confirm,
+        };
+        let daemon = self.daemon.clone();
+        let store = self.store.clone();
+        let id = self.id;
+        let key = checkpoints::folder_key(&workspace);
+        let mut recorded = None;
+        let restored = daemon.checkpoints().restore(
+            &store,
+            &request,
+            || key.as_deref().is_none_or(|key| daemon.folder_busy(key)),
+            |event| {
+                let appended = store
+                    .with(|store| store.append(id, &event))
+                    .map_err(|error| error.to_string());
+                recorded = Some(event);
+                appended
+            },
+        );
+        match restored {
+            Ok(restore_event_id) => {
+                if let Some(event) = recorded {
+                    self.send_event(event);
+                }
+                sink.send(ServerMessage::RestoreApplied {
+                    conversation_id: self.id,
+                    event_id,
+                    restore_event_id,
+                })
+                .ok();
+            }
+            Err(refused) => {
+                sink.send(ServerMessage::RestoreRefused {
+                    conversation_id: self.id,
+                    event_id,
+                    cause: refused.cause,
+                    message: refused.message,
+                    conflicts: refused.conflicts,
+                })
+                .ok();
+            }
+        }
     }
 
     /// Starts a turn of origin `origin` that the daemon sends on its own,
@@ -2135,7 +2306,17 @@ impl Actor {
             self.report_store(figured);
         }
         let last_end = end.clone();
-        self.emit(end);
+        // The folder is recorded once the end is stored, and before a client
+        // hears of the end: what a client does at the end of a turn finds
+        // the turn's work done.
+        let recorded = self.record(&end);
+        let ended = recorded.as_ref().ok().copied().flatten();
+        self.report_store(recorded);
+        let skipped = self.record_after(ended);
+        self.send_event(end);
+        if let Some(skipped) = skipped {
+            self.emit(skipped);
+        }
         if !self.followers.is_empty() {
             // A client has the end of the conversation on screen: the turn
             // that just ended is read before the bot's state is told.
@@ -2355,7 +2536,7 @@ impl Actor {
             .store
             .with(|store| store.start_queued(self.id, note.clone()))
         {
-            Ok(Some(text)) => {
+            Ok(Some((text, started))) => {
                 self.begin_turn(&text, TurnOrigin::User);
                 self.broadcast(ServerMessage::ConversationEvent {
                     conversation_id: self.id,
@@ -2367,6 +2548,9 @@ impl Actor {
                 self.sync();
                 // A person's turn works: a review of the bot's work gives way.
                 self.daemon.person_wrote(self.bot_id);
+                if delivery.is_ok() {
+                    self.record_before(Some(started));
+                }
                 self.deliver(delivery, text);
             }
             Ok(None) => {}
@@ -2457,14 +2641,22 @@ impl Actor {
     }
 
     fn emit(&mut self, event: Event) {
+        self.emit_id(event);
+    }
+
+    /// `emit`, with the id of the stored event; `None` for text, which may
+    /// wait in memory, and for an event that could not be stored.
+    fn emit_id(&mut self, event: Event) -> Option<i64> {
         let recorded = self.record(&event);
+        let id = recorded.as_ref().ok().copied().flatten();
         self.report_store(recorded);
         self.send_event(event);
+        id
     }
 
     /// Writes an event to the database. Text may wait in memory; any other
-    /// event is committed when this returns.
-    fn record(&mut self, event: &Event) -> Result<(), StoreError> {
+    /// event is committed when this returns, and its id is returned.
+    fn record(&mut self, event: &Event) -> Result<Option<i64>, StoreError> {
         // A turn that answered, ran a tool, or asked to run one is not sent
         // again: a retry could run twice what a person already allowed.
         if matches!(
@@ -2488,7 +2680,7 @@ impl Actor {
         {
             self.running.heard = true;
         }
-        self.recorder.record(event.clone())
+        self.recorder.record_id(event.clone())
     }
 
     fn send_event(&mut self, event: Event) {

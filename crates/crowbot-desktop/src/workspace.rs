@@ -824,7 +824,10 @@ impl Workspace {
             | ServerMessage::Routines { .. }
             | ServerMessage::RoutineChanged(_)
             | ServerMessage::RoutineCreated { .. }
-            | ServerMessage::RoutineDeleted { .. } => {}
+            | ServerMessage::RoutineDeleted { .. }
+            | ServerMessage::TurnChanges(_)
+            | ServerMessage::RestoreApplied { .. }
+            | ServerMessage::RestoreRefused { .. } => {}
             ServerMessage::SearchResults(results) => self.palette_results(results),
             ServerMessage::BotDeleted { bot_id } => {
                 self.deleting.remove(&bot_id);

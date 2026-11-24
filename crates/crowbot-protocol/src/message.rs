@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bot::{BotDraft, BotPatch, BotSummary, present};
+use crate::checkpoint::{RestoreRefusal, TurnChanges};
 use crate::event::{ApprovalDecision, Event, TurnUsage};
 use crate::harness::{BotSkillFigures, Consumption, HarnessSettings, SkillFigures};
 use crate::memory::{MemoryEntry, MemoryOperation};
@@ -11,7 +12,7 @@ use crate::rules::{ApprovalRule, RuleDraft};
 use crate::search::SearchResults;
 use crate::skill::{SkillFinding, SkillStateChange, SkillSummary, SkillVersion};
 
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -263,6 +264,25 @@ pub enum ClientMessage {
     RunRoutineNow {
         routine_id: i64,
     },
+    /// Asks what the turn that the `UserText` event `event_id` started
+    /// changed in the bot's folder.
+    GetTurnChanges {
+        conversation_id: i64,
+        event_id: i64,
+    },
+    /// Puts files of the bot's folder back as they were before the turn that
+    /// the `UserText` event `event_id` started. With no `paths`, every file
+    /// that differs is covered; a path that names a folder covers what it
+    /// holds. A file changed since the last record of the folder is written
+    /// over only when `confirm` is set.
+    RestoreCheckpoint {
+        conversation_id: i64,
+        event_id: i64,
+        #[serde(default)]
+        paths: Option<Vec<String>>,
+        #[serde(default)]
+        confirm: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -441,6 +461,25 @@ pub enum ServerMessage {
     RoutineDeleted {
         bot_id: i64,
         routine_id: i64,
+    },
+    /// Answers `GetTurnChanges`.
+    TurnChanges(TurnChanges),
+    /// Answers the client whose restore was applied, after the
+    /// `CheckpointRestored` event `restore_event_id`.
+    RestoreApplied {
+        conversation_id: i64,
+        event_id: i64,
+        restore_event_id: i64,
+    },
+    /// Answers a `RestoreCheckpoint` that was not applied. `conflicts` lists
+    /// the files changed since the last record of the folder.
+    RestoreRefused {
+        conversation_id: i64,
+        event_id: i64,
+        cause: RestoreRefusal,
+        message: String,
+        #[serde(default)]
+        conflicts: Vec<String>,
     },
 }
 

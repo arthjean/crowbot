@@ -3,9 +3,9 @@ use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use crowbot_protocol::{
-    ApprovalDecision, ApprovalReason, FailureCause, MemoryAuthor, MemoryChange, MemoryChangeKind,
-    ProviderState, RoutineChangeKind, RoutinePause, SkillAuthor, SkillChange, SkillChangeKind,
-    TurnOrigin, TurnRefusal,
+    ApprovalDecision, ApprovalReason, CheckpointMoment, FailureCause, LeftCause, LeftFile,
+    MemoryAuthor, MemoryChange, MemoryChangeKind, ProviderState, RoutineChangeKind, RoutinePause,
+    SkillAuthor, SkillChange, SkillChangeKind, TurnOrigin, TurnRefusal,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
@@ -203,7 +203,78 @@ pub(super) fn notice_text(notice: &Notice) -> String {
             missed, caught_up, ..
         } => routine_missed_text(*missed, *caught_up),
         Notice::RoutinePaused { cause, .. } => routine_paused_text(*cause),
+        Notice::CheckpointSkipped {
+            moment, message, ..
+        } => checkpoint_skipped_text(*moment, message),
+        Notice::CheckpointRestored {
+            restored,
+            removed,
+            left,
+            ..
+        } => checkpoint_restored_text(restored, removed, left),
     }
+}
+
+/// Why Crow Bot could not record the bot's folder, and what it costs.
+fn checkpoint_skipped_text(moment: CheckpointMoment, message: &str) -> String {
+    let lost = match moment {
+        CheckpointMoment::BeforeTurn => {
+            "Crow Bot could not record the bot's folder before this turn, so what it changes cannot be put back from here."
+        }
+        CheckpointMoment::AfterTurn => {
+            "Crow Bot could not record the bot's folder after this turn, so what it changed cannot be listed."
+        }
+        _ => "Crow Bot could not record the bot's folder.",
+    };
+    format!("{lost} {message}")
+}
+
+/// A few names of a list, and how many more it holds.
+fn some_names(names: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut text = names
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        text.push_str(&format!(" and {} more", names.len() - SHOWN));
+    }
+    text
+}
+
+/// What a restore of the bot's folder did.
+fn checkpoint_restored_text(restored: &[String], removed: &[String], left: &[LeftFile]) -> String {
+    let mut done = Vec::new();
+    if !restored.is_empty() {
+        done.push(format!("restored {}", some_names(restored)));
+    }
+    if !removed.is_empty() {
+        done.push(format!("removed {}", some_names(removed)));
+    }
+    let mut text = if done.is_empty() {
+        "You put the folder back as it was before an earlier turn: nothing differed.".to_owned()
+    } else {
+        format!(
+            "You put the folder back as it was before an earlier turn: {}.",
+            done.join("; ")
+        )
+    };
+    if !left.is_empty() {
+        let why = |file: &LeftFile| match file.cause {
+            LeftCause::NotKept => format!("{} (too large to keep a copy)", file.path),
+            LeftCause::ContentLost => format!("{} (its copy is gone)", file.path),
+            LeftCause::Ignored => format!("{} (git ignored it before that turn)", file.path),
+            LeftCause::Failed | LeftCause::Other => match &file.message {
+                Some(message) => format!("{} ({message})", file.path),
+                None => file.path.clone(),
+            },
+        };
+        let names: Vec<String> = left.iter().map(why).collect();
+        text.push_str(&format!(" Left as they are: {}.", some_names(&names)));
+    }
+    text
 }
 
 /// What a person allowed of a routine the bot proposed.
@@ -1148,6 +1219,28 @@ mod tests {
                 }],
             }),
             "Crow Bot set aside skills nobody used: marked deploy stale."
+        );
+        assert_eq!(
+            notice_text(&Notice::CheckpointSkipped {
+                moment: CheckpointMoment::BeforeTurn,
+                cause: crowbot_protocol::CheckpointCause::Unreadable,
+                path: Some("locked.txt".to_owned()),
+                message: "The daemon could not read locked.txt: permission denied".to_owned(),
+            }),
+            "Crow Bot could not record the bot's folder before this turn, so what it changes cannot be put back from here. The daemon could not read locked.txt: permission denied"
+        );
+        assert_eq!(
+            notice_text(&Notice::CheckpointRestored {
+                turn_event_id: 4,
+                restored: vec!["a.txt".to_owned(), "b.txt".to_owned()],
+                removed: vec!["c.txt".to_owned()],
+                left: vec![LeftFile {
+                    path: "big.bin".to_owned(),
+                    cause: LeftCause::NotKept,
+                    message: None,
+                }],
+            }),
+            "You put the folder back as it was before an earlier turn: restored a.txt, b.txt; removed c.txt. Left as they are: big.bin (too large to keep a copy)."
         );
         assert_eq!(
             notice_text(&Notice::ModelUnavailable {

@@ -114,6 +114,12 @@ fn user() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Whether the daemon runs as root, which reads every file whatever its mode.
+#[cfg(all(unix, test))]
+pub fn is_root() -> bool {
+    user() == 0
+}
+
 /// The name of an account, and its number.
 #[cfg(unix)]
 pub fn account_name(uid: u32) -> String {

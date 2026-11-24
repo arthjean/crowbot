@@ -2,10 +2,10 @@ use std::collections::HashSet;
 
 use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
-    ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, MemoryAuthor, MemoryChange, RoutineChangeKind, RoutinePause, SkillAuthor,
-    SkillChange, TimedEvent, ToolEffect, ToolKind, ToolStatus, TurnEnd, TurnOrigin, TurnRefusal,
-    UserMessage,
+    ApprovalClosure, ApprovalDecision, ApprovalReason, CheckpointCause, CheckpointMoment,
+    ConversationSnapshot, Event, FailureCause, Interruption, LeftFile, MemoryAuthor, MemoryChange,
+    RoutineChangeKind, RoutinePause, SkillAuthor, SkillChange, TimedEvent, ToolEffect, ToolKind,
+    ToolStatus, TurnEnd, TurnOrigin, TurnRefusal, UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -130,6 +130,20 @@ pub enum Notice {
     RoutinePaused {
         routine_id: i64,
         cause: RoutinePause,
+    },
+    /// Crow Bot could not record the bot's folder around a turn.
+    CheckpointSkipped {
+        moment: CheckpointMoment,
+        cause: CheckpointCause,
+        path: Option<String>,
+        message: String,
+    },
+    /// A person put files of the bot's folder back as they were before a turn.
+    CheckpointRestored {
+        turn_event_id: i64,
+        restored: Vec<String>,
+        removed: Vec<String>,
+        left: Vec<LeftFile>,
     },
 }
 
@@ -774,6 +788,36 @@ impl Transcript {
             Event::RoutinePaused { routine_id, cause } => {
                 self.notice(seq, at_ms, Notice::RoutinePaused { routine_id, cause })
             }
+            Event::CheckpointSkipped {
+                moment,
+                cause,
+                path,
+                message,
+            } => self.notice(
+                seq,
+                at_ms,
+                Notice::CheckpointSkipped {
+                    moment,
+                    cause,
+                    path,
+                    message,
+                },
+            ),
+            Event::CheckpointRestored {
+                turn_event_id,
+                restored,
+                removed,
+                left,
+            } => self.notice(
+                seq,
+                at_ms,
+                Notice::CheckpointRestored {
+                    turn_event_id,
+                    restored,
+                    removed,
+                    left,
+                },
+            ),
         }
     }
 

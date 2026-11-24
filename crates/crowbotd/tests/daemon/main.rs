@@ -5,6 +5,7 @@
 
 mod approvals;
 mod bots;
+mod checkpoints;
 mod claude;
 mod conversation;
 mod endpoint;
