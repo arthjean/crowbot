@@ -1804,3 +1804,42 @@ fn a_turn_that_ended_normally_shows_no_status_label(cx: &mut TestAppContext) {
     let kinds: Vec<_> = rows(&workspace, cx).iter().map(kind).collect();
     assert_eq!(kinds, ["day", "user", "answer"]);
 }
+
+#[gpui::test]
+fn a_conversation_shows_the_answers_of_floors_rules_and_failed_saves(cx: &mut TestAppContext) {
+    let answered = |id: &str, decision, reason| Event::ApprovalResolved {
+        id: Some(id.to_owned()),
+        tool_call_id: format!("tool-{id}"),
+        title: Some("rm -rf /".to_owned()),
+        decision,
+        reason: Some(reason),
+    };
+    let (workspace, _daemon, _clock, cx) = start(
+        cx,
+        ended(vec![
+            user("clean up"),
+            answered("a1", ApprovalDecision::Declined, ApprovalReason::Floor),
+            answered(
+                "a2",
+                ApprovalDecision::Declined,
+                ApprovalReason::Rule { id: 3 },
+            ),
+            answered(
+                "a3",
+                ApprovalDecision::Allowed,
+                ApprovalReason::Rule { id: 4 },
+            ),
+            answered(
+                "a4",
+                ApprovalDecision::Declined,
+                ApprovalReason::NotRecorded,
+            ),
+        ]),
+    );
+    let cards = keys(&workspace, cx, "approval");
+    assert_eq!(cards.len(), 4);
+    for card in cards {
+        assert!(shown(cx, named("approval-outcome", card)));
+        assert!(!shown(cx, named("allow", card)));
+    }
+}

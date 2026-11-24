@@ -221,6 +221,11 @@ impl ClientState {
             ClientMessage::Search { request, query } => {
                 daemon.search(request, &query).map(reply).map_err(failed)
             }
+            ClientMessage::ListApprovalRules { bot_id } => daemon.approval_rules(bot_id).map(reply),
+            ClientMessage::AddApprovalRule { bot_id, rule } => daemon
+                .add_approval_rule(bot_id, rule)
+                .map(|rule_id| reply(ServerMessage::ApprovalRuleAdded { bot_id, rule_id })),
+            ClientMessage::DeleteApprovalRule { rule_id } => daemon.delete_approval_rule(rule_id),
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
             }

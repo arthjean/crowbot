@@ -541,22 +541,14 @@ impl Workspace {
                 .unwrap_or_else(|| "Use a tool".to_owned()),
         );
         let waiting = approval.state == ApprovalState::Waiting;
-        let outcome = match (approval.state, approval.automatic) {
-            (ApprovalState::Waiting, _) => None,
-            (ApprovalState::Allowed, Some(ApprovalReason::PermissionLevel)) => {
-                Some(("Allowed by Full access", theme.success_text))
-            }
-            (ApprovalState::Allowed, Some(ApprovalReason::DaemonTool)) => {
-                Some(("Allowed: a Crow Bot tool", theme.success_text))
-            }
-            (ApprovalState::Allowed, _) => Some(("Allowed", theme.success_text)),
-            (ApprovalState::Declined, Some(ApprovalReason::NoAllowOnce)) => {
-                Some(("Denied: it could not be allowed once", theme.danger_text))
-            }
-            (ApprovalState::Declined, _) => Some(("Denied", theme.danger_text)),
-            (ApprovalState::Cancelled, _) => Some(("Cancelled", theme.text_muted)),
-            (ApprovalState::Expired, _) => Some(("Not answered", theme.text_muted)),
-        };
+        let outcome = approval_outcome(approval.state, approval.automatic).map(|(label, tone)| {
+            let color = match tone {
+                Tone::Allowed => theme.success_text,
+                Tone::Denied => theme.danger_text,
+                Tone::Closed => theme.text_muted,
+            };
+            (label, color)
+        });
         let target = approval
             .target
             .as_ref()
@@ -814,8 +806,53 @@ fn render_status(
         .into_any_element()
 }
 
+/// How an outcome of an approval reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    Allowed,
+    Denied,
+    Closed,
+}
+
+/// The line that says how an approval ended, and who ended it when the
+/// daemon did.
+fn approval_outcome(
+    state: ApprovalState,
+    automatic: Option<ApprovalReason>,
+) -> Option<(&'static str, Tone)> {
+    Some(match (state, automatic) {
+        (ApprovalState::Waiting, _) => return None,
+        (ApprovalState::Allowed, Some(ApprovalReason::PermissionLevel)) => {
+            ("Allowed by Full access", Tone::Allowed)
+        }
+        (ApprovalState::Allowed, Some(ApprovalReason::DaemonTool)) => {
+            ("Allowed: a Crow Bot tool", Tone::Allowed)
+        }
+        (ApprovalState::Allowed, Some(ApprovalReason::Rule { .. })) => {
+            ("Allowed by a rule of this bot", Tone::Allowed)
+        }
+        (ApprovalState::Allowed, _) => ("Allowed", Tone::Allowed),
+        (ApprovalState::Declined, Some(ApprovalReason::NoAllowOnce)) => {
+            ("Denied: it could not be allowed once", Tone::Denied)
+        }
+        (ApprovalState::Declined, Some(ApprovalReason::Floor)) => {
+            ("Denied: Crow Bot never allows this", Tone::Denied)
+        }
+        (ApprovalState::Declined, Some(ApprovalReason::Rule { .. })) => {
+            ("Denied by a rule of this bot", Tone::Denied)
+        }
+        (ApprovalState::Declined, Some(ApprovalReason::NotRecorded)) => {
+            ("Denied: the answer could not be saved", Tone::Denied)
+        }
+        (ApprovalState::Declined, _) => ("Denied", Tone::Denied),
+        (ApprovalState::Cancelled, _) => ("Cancelled", Tone::Closed),
+        (ApprovalState::Expired, _) => ("Not answered", Tone::Closed),
+    })
+}
+
 #[cfg(test)]
 mod tests {
+
     use chrono::Duration;
 
     use super::*;
@@ -870,5 +907,27 @@ mod tests {
                 .1
                 .contains("daemon restarted")
         );
+    }
+
+    #[test]
+    fn an_answer_of_a_rule_a_floor_or_a_failed_save_names_who_gave_it() {
+        let outcome = |state, reason| approval_outcome(state, Some(reason));
+        assert_eq!(
+            outcome(ApprovalState::Declined, ApprovalReason::Floor),
+            Some(("Denied: Crow Bot never allows this", Tone::Denied))
+        );
+        assert_eq!(
+            outcome(ApprovalState::Declined, ApprovalReason::Rule { id: 4 }),
+            Some(("Denied by a rule of this bot", Tone::Denied))
+        );
+        assert_eq!(
+            outcome(ApprovalState::Allowed, ApprovalReason::Rule { id: 4 }),
+            Some(("Allowed by a rule of this bot", Tone::Allowed))
+        );
+        assert_eq!(
+            outcome(ApprovalState::Declined, ApprovalReason::NotRecorded),
+            Some(("Denied: the answer could not be saved", Tone::Denied))
+        );
+        assert_eq!(approval_outcome(ApprovalState::Waiting, None), None);
     }
 }

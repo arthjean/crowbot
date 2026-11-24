@@ -166,6 +166,11 @@ Claude and ChatGPT report the compaction itself as a tool call of kind
   real gate is where it executes the tool.
 - A daemon tool whose effect is `Read` declares `readOnlyHint`, so ChatGPT
   calls it without a request.
+- No profile names the folder of a command (`CommandFolder::Unnamed` in
+  `provider/acp.rs`), so an allow rule of a bot never answers a command on
+  these three providers; refuse rules and floors need no folder and apply
+  to all of them (EP-003). A later run that finds the folder in a request
+  of a provider changes that provider's profile, with the field it reads.
 - Grok's usage is not read from `UsageUpdate`; its turns count as turns only
   (D4). The daemon stores a row of usage for a turn whose agent reported a
   context size, a cost, or tokens in the standard fields (US-006): every turn

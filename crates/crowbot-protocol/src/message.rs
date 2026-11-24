@@ -4,9 +4,10 @@ use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event, TurnUsage};
 use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
+use crate::rules::{ApprovalRule, RuleDraft};
 use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -155,6 +156,19 @@ pub enum ClientMessage {
         request: u64,
         query: String,
     },
+    /// Asks for the approval rules of a bot.
+    ListApprovalRules {
+        bot_id: i64,
+    },
+    /// Gives a bot a rule. This message is the only way a rule is made: no
+    /// daemon tool, prompt, or file makes one.
+    AddApprovalRule {
+        bot_id: i64,
+        rule: RuleDraft,
+    },
+    DeleteApprovalRule {
+        rule_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +280,18 @@ pub enum ServerMessage {
     ProviderModels(ProviderModels),
     DaemonInfo(DaemonInfo),
     SearchResults(SearchResults),
+    /// The approval rules of a bot, the oldest first. Answers
+    /// `ListApprovalRules`, and every attached client receives it after a
+    /// rule of the bot is added or deleted.
+    ApprovalRules {
+        bot_id: i64,
+        rules: Vec<ApprovalRule>,
+    },
+    /// Answers the client that added a rule, after `ApprovalRules`.
+    ApprovalRuleAdded {
+        bot_id: i64,
+        rule_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

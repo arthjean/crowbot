@@ -168,6 +168,14 @@ pub enum ApprovalReason {
     /// The agent asked to call a tool of the daemon, which the daemon gates
     /// itself where it runs the tool.
     DaemonTool,
+    /// A built-in refusal: the command would destroy the computer, the
+    /// user's home folder, or the daemon itself, whatever the level.
+    Floor,
+    /// A rule a person gave the bot, refuse or allow.
+    Rule { id: i64 },
+    /// The answer could not be written to the database, so the daemon
+    /// declined the request rather than let run what the history would miss.
+    NotRecorded,
 }
 
 /// What a daemon tool may change: nothing, state of the bot that the daemon
@@ -367,6 +375,29 @@ pub enum TurnEnd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_approval_reason_of_a_rule_carries_the_rule_and_the_others_keep_their_names() {
+        let wire = |reason: ApprovalReason| serde_json::to_string(&reason).unwrap();
+        assert_eq!(wire(ApprovalReason::Rule { id: 7 }), r#"{"rule":{"id":7}}"#);
+        assert_eq!(wire(ApprovalReason::Floor), r#""floor""#);
+        assert_eq!(wire(ApprovalReason::NotRecorded), r#""not_recorded""#);
+        assert_eq!(
+            wire(ApprovalReason::PermissionLevel),
+            r#""permission_level""#
+        );
+        for reason in [
+            ApprovalReason::Rule { id: 7 },
+            ApprovalReason::Floor,
+            ApprovalReason::NotRecorded,
+            ApprovalReason::DaemonTool,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<ApprovalReason>(&wire(reason)).unwrap(),
+                reason
+            );
+        }
+    }
 
     #[test]
     fn an_approval_resolved_by_an_older_daemon_still_loads() {

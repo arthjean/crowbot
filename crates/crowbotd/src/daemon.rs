@@ -14,11 +14,13 @@ use crowbot_protocol::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH as INSTRUCTIONS_LENGTH,
     BOT_MODEL_LENGTH as MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH as TITLE_LENGTH, BotDraft,
     BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, PROTOCOL_VERSION,
-    PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage,
-    TOOL_CALL_LIMIT_MAX, mascot_at,
+    PermissionLevel, Preferences, PreferencesPatch, RULE_ARGUMENT_BYTES, RULE_ARGUMENTS,
+    RULE_PROGRAM_BYTES, RuleDraft, SIDEBAR_WIDTH_LIMIT, ServerMessage, TOOL_CALL_LIMIT_MAX,
+    mascot_at,
 };
 use tokio::sync::oneshot;
 
+use crate::approval::floors::Floors;
 use crate::conversation::{self, Command, ConversationHandle, Sink};
 use crate::private;
 use crate::prompt::Sections;
@@ -129,6 +131,7 @@ pub struct Daemon {
     next_connection: AtomicU64,
     tools: Arc<Registry>,
     sections: Sections,
+    floors: Floors,
 }
 
 impl Daemon {
@@ -141,6 +144,18 @@ impl Daemon {
         runtimes: Runtimes,
     ) -> Self {
         let paused = data_dir.join(PAUSED_FILE).symlink_metadata().is_ok();
+        // A delete of the daemon's data, of its database, or of its own
+        // program is refused whatever the level (US-014).
+        let kept = [
+            Some(data_dir.clone()),
+            Some(database.clone()),
+            std::env::current_exe().ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| std::path::absolute(path).ok())
+        .collect();
+        let floors = Floors::new(std::env::home_dir(), kept);
         Self {
             store,
             database,
@@ -155,7 +170,13 @@ impl Daemon {
             next_connection: AtomicU64::new(1),
             tools: Arc::new(Registry::new()),
             sections: Sections::new(),
+            floors,
         }
+    }
+
+    /// The built-in refusals of this computer.
+    pub fn floors(&self) -> &Floors {
+        &self.floors
     }
 
     /// The daemon's own tools, which every session's bridge serves.
@@ -512,11 +533,57 @@ impl Daemon {
         if trusted(&after) && !trusted(&before) {
             // The requests that already wait are allowed, as later ones will be.
             for handle in self.running_conversations(bot_id)? {
-                handle.send(Command::PermissionLevelChanged);
+                handle.send(Command::StandingChanged);
             }
         }
         self.publish_bot(bot_id);
         Ok(())
+    }
+
+    pub fn approval_rules(&self, bot_id: i64) -> Result<ServerMessage, Refusal> {
+        let rules = self.store.with(|store| {
+            store
+                .bot(bot_id)?
+                .map(|_| store.approval_rules(bot_id))
+                .transpose()
+        })?;
+        let rules = rules.ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        Ok(ServerMessage::ApprovalRules { bot_id, rules })
+    }
+
+    /// Stores a rule a person gave a bot, and tells every attached client.
+    /// It applies from the next request on, and to a waiting request when a
+    /// person answers it.
+    pub fn add_approval_rule(&self, bot_id: i64, draft: RuleDraft) -> Result<i64, Refusal> {
+        let draft = checked_rule(draft)?;
+        let id = self
+            .store
+            .with(|store| store.add_approval_rule(bot_id, &draft))?
+            .ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        self.publish_rules(bot_id);
+        Ok(id)
+    }
+
+    pub fn delete_approval_rule(&self, rule_id: i64) -> Result<(), Refusal> {
+        let bot_id = self
+            .store
+            .with(|store| store.delete_approval_rule(rule_id))?
+            .ok_or_else(|| Refusal::Other(format!("rule {rule_id} does not exist")))?;
+        self.publish_rules(bot_id);
+        Ok(())
+    }
+
+    /// Tells every attached client the rules of the bot, and each of its
+    /// conversations to answer again the approvals that wait.
+    fn publish_rules(&self, bot_id: i64) {
+        if let Ok(handles) = self.running_conversations(bot_id) {
+            for handle in handles {
+                handle.send(Command::StandingChanged);
+            }
+        }
+        if let Ok(rules) = self.approval_rules(bot_id) {
+            self.state().broadcast(&rules);
+        }
     }
 
     /// The conversations of a bot that have a task in this daemon.
@@ -798,6 +865,41 @@ fn checked_limit(limit: Option<u32>) -> Result<Option<u32>, Refusal> {
         )),
         limit => Ok(limit),
     }
+}
+
+/// A rule names one program, with no space around it, and at most
+/// `RULE_ARGUMENTS` leading arguments.
+fn checked_rule(draft: RuleDraft) -> Result<RuleDraft, Refusal> {
+    let program = draft.program;
+    if program.is_empty() || program.trim() != program || program.contains(char::is_whitespace) {
+        return Err(invalid(
+            "program",
+            "A rule names one program, with no space in it.",
+        ));
+    }
+    if program.len() > RULE_PROGRAM_BYTES || program.contains('\0') {
+        return Err(invalid(
+            "program",
+            format!("A program name is at most {RULE_PROGRAM_BYTES} bytes, with no NUL."),
+        ));
+    }
+    if draft.args.len() > RULE_ARGUMENTS {
+        return Err(invalid(
+            "args",
+            format!("A rule holds at most {RULE_ARGUMENTS} arguments."),
+        ));
+    }
+    if draft
+        .args
+        .iter()
+        .any(|arg| arg.len() > RULE_ARGUMENT_BYTES || arg.contains('\0'))
+    {
+        return Err(invalid(
+            "args",
+            format!("An argument is at most {RULE_ARGUMENT_BYTES} bytes, with no NUL."),
+        ));
+    }
+    Ok(RuleDraft { program, ..draft })
 }
 
 fn checked_patch(patch: BotPatch) -> Result<BotPatch, Refusal> {

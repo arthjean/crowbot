@@ -5,6 +5,7 @@ mod folders;
 mod message;
 mod preferences;
 mod provider;
+mod rules;
 #[cfg(any(test, feature = "scratch"))]
 pub mod scratch;
 mod search;
@@ -34,6 +35,9 @@ pub use preferences::{
 pub use provider::{
     DaemonInfo, ModelChoice, ModelsState, ProviderModels, ProviderState, ProviderStatus,
     RuntimeInstall, SignInMethod,
+};
+pub use rules::{
+    ApprovalRule, RULE_ARGUMENT_BYTES, RULE_ARGUMENTS, RULE_PROGRAM_BYTES, RuleDraft, RuleKind,
 };
 pub use search::{
     ConversationHit, MessageAuthor, MessageHit, SEARCH_MESSAGE_TERM_LENGTH, SEARCH_QUERY_LENGTH,

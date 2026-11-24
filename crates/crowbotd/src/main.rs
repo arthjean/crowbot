@@ -1,3 +1,4 @@
+mod approval;
 mod conversation;
 mod daemon;
 mod digest;

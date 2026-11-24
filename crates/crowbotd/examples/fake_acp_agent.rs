@@ -12,6 +12,8 @@
 //! - `askfile <path>`: the same as `ask`, for a tool call titled `Edit <path>`
 //!   that edits the file at that path.
 //! - `asklong <bytes>`: the same as `ask`, for a command of that many `x` bytes.
+//! - `askin <folder> <command>`: the same as `ask`, for a request that names
+//!   the folder the command runs in as `rawInput.cwd`.
 //! - `work`: think, read `notes.txt` with a tool call that completes, run tests
 //!   with a tool call that fails, then answer.
 //! - `hang <title>`: start a tool call that runs the title as a command, never
@@ -748,13 +750,21 @@ impl Agent {
                     std::thread::sleep(interval);
                 }
             }
-            "ask" | "demand" | "askfile" | "asklong" => {
+            "ask" | "demand" | "askfile" | "asklong" | "askin" => {
                 let tool_call = match command {
                     "askfile" => json!({
                         "title": format!("Edit {rest}"),
                         "kind": "edit",
                         "locations": [{ "path": rest }]
                     }),
+                    "askin" => {
+                        let (folder, command) = rest.split_once(' ').unwrap_or((rest, ""));
+                        json!({
+                            "title": command,
+                            "kind": "execute",
+                            "rawInput": { "command": command, "cwd": folder }
+                        })
+                    }
                     "asklong" => json!({
                         "title": "Run a long command",
                         "kind": "execute",

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::provider::acp::AgentProfile;
+use crate::provider::acp::{AgentProfile, CommandFolder};
 
 pub const PROVIDER: &str = "codex";
 
@@ -60,6 +60,9 @@ pub fn profile(home: &Path) -> AgentProfile {
         folders: vec![home.to_owned()],
         files: vec![(home.join("config.toml"), CONFIG.to_owned())],
         removed: REMOVED.iter().map(|path| home.join(path)).collect(),
+        // No permission request of this provider names the folder of a
+        // command (`docs/harness-providers.md`, A9).
+        command_folder: CommandFolder::Unnamed,
         ..AgentProfile::generic()
     }
 }

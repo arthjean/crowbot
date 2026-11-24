@@ -5,13 +5,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
-    FailureCause, Interruption, MESSAGE_LENGTH, PermissionLevel, QueueState, ServerMessage,
-    TurnEnd, TurnOrigin, UserMessage,
+    FailureCause, Interruption, MESSAGE_LENGTH, QueueState, ServerMessage, TurnEnd, TurnOrigin,
+    UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
+use crate::approval::{self, Answer, Request, Standing};
 use crate::daemon::Daemon;
 use crate::guard::{self, INACTIVITY_LIMIT, Progress, RETRY_DELAYS};
 use crate::handoff::{self, HANDOFF_CHARACTERS};
@@ -97,8 +98,9 @@ pub enum Command {
         following: bool,
         sink: Sink,
     },
-    /// The bot moved to Full access: the approvals that wait are allowed.
-    PermissionLevelChanged,
+    /// The bot moved to Full access, or its rules changed: each approval
+    /// that waits is answered again from the sources as they now stand.
+    StandingChanged,
     /// The bot is being deleted, or the daemon stops: the running turn stops,
     /// then the task ends and tells so through `done`. An agent that has not
     /// ended its turn after `patience` is closed.
@@ -209,6 +211,9 @@ struct RunningTurn {
     usage: Option<(String, Option<String>, Reported)>,
     /// Why the daemon stopped the turn itself, recorded as its end.
     stop_cause: Option<Interruption>,
+    /// An approval could not be stored, so it was declined: the turn ends
+    /// as failed, with this cause.
+    not_recorded: Option<String>,
     /// When the turn last heard from its agent or from a person.
     last_activity: Instant,
 }
@@ -223,6 +228,7 @@ impl Default for RunningTurn {
             progress: Progress::default(),
             usage: None,
             stop_cause: None,
+            not_recorded: None,
             last_activity: Instant::now(),
         }
     }
@@ -290,7 +296,7 @@ struct PendingApproval {
     id: String,
     tool_call_id: String,
     title: Option<String>,
-    cut: bool,
+    request: Request,
     reply: oneshot::Sender<ApprovalAnswer>,
 }
 
@@ -533,7 +539,7 @@ impl Actor {
             Command::DeleteQueued { queue_id, sink } => self.delete_queued(queue_id, &sink),
             Command::SendQueuedNow { queue_id, sink } => self.send_queued_now(queue_id, &sink),
             Command::ResumeQueue { sink } => self.resume_queue(&sink),
-            Command::PermissionLevelChanged => self.permission_level_changed(),
+            Command::StandingChanged => self.review_approvals(),
             Command::ShutDown { done, patience } => self.shut_down(done, patience),
         }
     }
@@ -564,38 +570,117 @@ impl Actor {
         );
     }
 
-    /// The level comes from the bot's record and from nowhere else: no prompt,
-    /// tool result, or file reaches it. A record that cannot be read asks first.
-    fn permission_level(&self) -> PermissionLevel {
-        match self.store.with(|store| store.bot(self.bot_id)) {
-            Ok(Some(row)) => row.bot.permission_level,
-            Ok(None) | Err(_) => PermissionLevel::AskFirst,
-        }
+    /// The level and the rules come from the bot's record and from nowhere
+    /// else: no prompt, tool result, or file reaches them. A record that
+    /// cannot be read is `None`, and nothing is then allowed without a person.
+    fn standing(&self) -> Option<Standing> {
+        self.store
+            .with(|store| {
+                let Some(row) = store.bot(self.bot_id)? else {
+                    return Ok::<_, StoreError>(None);
+                };
+                Ok(Some(Standing {
+                    level: row.bot.permission_level,
+                    folder: PathBuf::from(row.bot.workspace),
+                    rules: store.approval_rules(self.bot_id)?,
+                }))
+            })
+            .ok()
+            .flatten()
     }
 
-    fn permission_level_changed(&mut self) {
-        if self.stop_due.is_some() || self.permission_level() != PermissionLevel::FullAccess {
+    /// Answers again each approval that waits, from the sources as they
+    /// stand now: a request that was cut, or that a source could not read,
+    /// keeps waiting for a person.
+    fn review_approvals(&mut self) {
+        if self.stop_due.is_some() || self.approvals.is_empty() {
             return;
         }
-        // A request whose text was cut was shown as one that can only be
-        // declined: it keeps waiting for that answer.
-        let (cut, shown): (Vec<_>, Vec<_>) = std::mem::take(&mut self.approvals)
-            .into_iter()
-            .partition(|approval| approval.cut);
-        self.approvals = cut;
+        let standing = self.standing();
         self.running.last_activity = Instant::now();
-        for approval in shown {
-            if approval.reply.send(ApprovalAnswer::Allow).is_ok() {
-                self.emit(Event::ApprovalResolved {
-                    id: Some(approval.id),
-                    tool_call_id: approval.tool_call_id,
-                    title: approval.title,
-                    decision: ApprovalDecision::Allowed,
-                    reason: Some(ApprovalReason::PermissionLevel),
-                });
+        for approval in std::mem::take(&mut self.approvals) {
+            match approval::answer(&approval.request, standing.as_ref(), self.daemon.floors()) {
+                Answer::Wait => self.approvals.push(approval),
+                Answer::Allow(reason) => {
+                    self.allow(
+                        Some(approval.id),
+                        approval.tool_call_id,
+                        approval.title,
+                        approval.reply,
+                        Some(reason),
+                    );
+                }
+                Answer::Decline(reason) => self.decline(
+                    Some(approval.id),
+                    approval.tool_call_id,
+                    approval.title,
+                    approval.reply,
+                    reason,
+                ),
             }
         }
         self.sync();
+    }
+
+    /// Allows a request once its answer is in the database, so the history
+    /// never misses an action that ran. An answer that cannot be stored
+    /// declines the request, and the turn then ends as failed. Returns
+    /// whether the agent still waited for the answer.
+    fn allow(
+        &mut self,
+        id: Option<String>,
+        tool_call_id: String,
+        title: Option<String>,
+        reply: oneshot::Sender<ApprovalAnswer>,
+        reason: Option<ApprovalReason>,
+    ) -> bool {
+        if reply.is_closed() {
+            return false;
+        }
+        let allowed = Event::ApprovalResolved {
+            id: id.clone(),
+            tool_call_id: tool_call_id.clone(),
+            title: title.clone(),
+            decision: ApprovalDecision::Allowed,
+            reason,
+        };
+        match self.record(&allowed) {
+            Ok(()) => {
+                reply.send(ApprovalAnswer::Allow).ok();
+                self.send_event(allowed);
+            }
+            Err(error) => {
+                reply.send(ApprovalAnswer::Decline).ok();
+                self.running.not_recorded = Some(error.to_string());
+                self.emit(Event::ApprovalResolved {
+                    id,
+                    tool_call_id,
+                    title,
+                    decision: ApprovalDecision::Declined,
+                    reason: Some(ApprovalReason::NotRecorded),
+                });
+            }
+        }
+        true
+    }
+
+    fn decline(
+        &mut self,
+        id: Option<String>,
+        tool_call_id: String,
+        title: Option<String>,
+        reply: oneshot::Sender<ApprovalAnswer>,
+        reason: ApprovalReason,
+    ) {
+        if reply.send(ApprovalAnswer::Decline).is_ok() {
+            self.emit(Event::ApprovalResolved {
+                id,
+                tool_call_id,
+                title,
+                decision: ApprovalDecision::Declined,
+                reason: Some(reason),
+            });
+        }
     }
 
     fn shut_down(&mut self, done: oneshot::Sender<()>, patience: Duration) {
@@ -1202,7 +1287,13 @@ impl Actor {
                     return;
                 }
                 let tool_call_id = tool_call_id.unwrap_or_else(|| self.new_approval_id());
-                self.ask_approval(tool_call_id, Some(title), target, cut, reply);
+                let request = Request {
+                    target,
+                    cut,
+                    command: false,
+                    folder: None,
+                };
+                self.ask_approval(tool_call_id, Some(title), request, reply);
             }
             ToolSignal::Apply { mutation, reply } => {
                 if !self.turn_open(generation, mutation.turn()) {
@@ -1344,10 +1435,9 @@ impl Actor {
             AgentEvent::ApprovalNeeded {
                 tool_call_id,
                 title,
-                target,
-                cut,
+                request,
                 reply,
-            } => self.ask_approval(tool_call_id, title, target, cut, reply),
+            } => self.ask_approval(tool_call_id, title, request, reply),
             AgentEvent::ApprovalRefused {
                 tool_call_id,
                 title,
@@ -1376,73 +1466,60 @@ impl Actor {
                     });
                     return;
                 }
-                if reply.send(ApprovalAnswer::Allow).is_ok() {
-                    self.emit(Event::ApprovalResolved {
-                        id: Some(id),
-                        tool_call_id,
-                        title,
-                        decision: ApprovalDecision::Allowed,
-                        reason: Some(ApprovalReason::DaemonTool),
-                    });
-                }
+                self.allow(
+                    Some(id),
+                    tool_call_id,
+                    title,
+                    reply,
+                    Some(ApprovalReason::DaemonTool),
+                );
             }
         }
     }
 
-    /// A request that the bot's level answers, or that waits for a person.
-    /// A stop that is under way cancels it.
+    /// A request that the floors, the bot's rules, or its level answer, or
+    /// that waits for a person. A stop that is under way cancels it.
     fn ask_approval(
         &mut self,
         tool_call_id: String,
         title: Option<String>,
-        target: Option<String>,
-        cut: bool,
+        request: Request,
         reply: oneshot::Sender<ApprovalAnswer>,
     ) {
-        {
-            {
-                let id = self.new_approval_id();
-                if self.stop_due.is_some() {
-                    reply.send(ApprovalAnswer::Cancel).ok();
-                    self.emit(Event::ApprovalClosed {
-                        id,
-                        tool_call_id,
-                        title,
-                        reason: ApprovalClosure::Cancelled,
-                    });
-                    return;
-                }
-                if self.permission_level() == PermissionLevel::FullAccess {
-                    if reply.send(ApprovalAnswer::Allow).is_ok() {
-                        self.emit(Event::ApprovalResolved {
-                            id: Some(id),
-                            tool_call_id,
-                            title,
-                            decision: ApprovalDecision::Allowed,
-                            reason: Some(ApprovalReason::PermissionLevel),
-                        });
-                    }
-                    return;
-                }
-                self.approvals.push(PendingApproval {
+        let id = self.new_approval_id();
+        if self.stop_due.is_some() {
+            reply.send(ApprovalAnswer::Cancel).ok();
+            self.emit(Event::ApprovalClosed {
+                id,
+                tool_call_id,
+                title,
+                reason: ApprovalClosure::Cancelled,
+            });
+            return;
+        }
+        let standing = self.standing();
+        match approval::answer(&request, standing.as_ref(), self.daemon.floors()) {
+            Answer::Allow(reason) => {
+                self.allow(Some(id), tool_call_id, title, reply, Some(reason));
+            }
+            Answer::Decline(reason) => self.decline(Some(id), tool_call_id, title, reply, reason),
+            Answer::Wait => {
+                let event = Event::ApprovalRequested {
                     id: id.clone(),
                     tool_call_id: tool_call_id.clone(),
                     title: title.clone(),
-                    cut,
-                    reply,
-                });
-                let folder = self
-                    .session
-                    .as_ref()
-                    .map(|session| session.bot.workspace.clone());
-                self.emit(Event::ApprovalRequested {
+                    target: request.target.clone(),
+                    folder: standing.map(|standing| standing.folder.display().to_string()),
+                    cut: request.cut,
+                };
+                self.approvals.push(PendingApproval {
                     id,
                     tool_call_id,
                     title,
-                    target,
-                    folder,
-                    cut,
+                    request,
+                    reply,
                 });
+                self.emit(event);
                 self.sync();
             }
         }
@@ -1470,25 +1547,55 @@ impl Actor {
         else {
             return refuse("This approval is no longer waiting for an answer.");
         };
-        if self.approvals[index].cut && decision == ApprovalDecision::Allowed {
+        if self.approvals[index].request.cut && decision == ApprovalDecision::Allowed {
             return refuse("This request is too long to show in full, so it can only be declined.");
         }
         let approval = self.approvals.remove(index);
-        let answer = match decision {
-            ApprovalDecision::Allowed => ApprovalAnswer::Allow,
-            ApprovalDecision::Declined => ApprovalAnswer::Decline,
+        let answered = match decision {
+            ApprovalDecision::Allowed => {
+                // The rules are read again: one added while the request
+                // waited refuses it, whatever the person answered.
+                let standing = self.standing();
+                match approval::refusal(&approval.request, standing.as_ref(), self.daemon.floors())
+                {
+                    Some(reason) => {
+                        let open = !approval.reply.is_closed();
+                        self.decline(
+                            Some(approval.id),
+                            approval.tool_call_id,
+                            approval.title,
+                            approval.reply,
+                            reason,
+                        );
+                        open
+                    }
+                    None => self.allow(
+                        Some(approval.id),
+                        approval.tool_call_id,
+                        approval.title,
+                        approval.reply,
+                        None,
+                    ),
+                }
+            }
+            ApprovalDecision::Declined => {
+                let sent = approval.reply.send(ApprovalAnswer::Decline).is_ok();
+                if sent {
+                    self.emit(Event::ApprovalResolved {
+                        id: Some(approval.id),
+                        tool_call_id: approval.tool_call_id,
+                        title: approval.title,
+                        decision,
+                        reason: None,
+                    });
+                }
+                sent
+            }
         };
-        if approval.reply.send(answer).is_err() {
+        if !answered {
             self.sync();
             return refuse("The agent stopped waiting for this approval.");
         }
-        self.emit(Event::ApprovalResolved {
-            id: Some(approval.id),
-            tool_call_id: approval.tool_call_id,
-            title: approval.title,
-            decision,
-            reason: None,
-        });
         // The time a person took to answer is not the agent's silence.
         self.running.last_activity = Instant::now();
         self.sync();
@@ -1576,10 +1683,24 @@ impl Actor {
             reply.send(ApprovalAnswer::Cancel).ok();
         }
         // A turn the daemon's guards stopped ends for their reason, whatever
-        // the agent answered to the stop.
-        let end = match self.running.stop_cause.take() {
-            Some(cause) => Event::TurnInterrupted { cause },
-            None => end,
+        // the agent answered to the stop, and a turn whose approval could
+        // not be stored fails for that.
+        let end = match (
+            self.running.not_recorded.take(),
+            self.running.stop_cause.take(),
+        ) {
+            (Some(error), _) => Event::TurnFailed {
+                message: format!(
+                    "The daemon could not store an answer to an approval, so it declined the request: {error}"
+                ),
+                cause: None,
+                provider: self
+                    .session
+                    .as_ref()
+                    .map(|session| session.bot.provider.clone()),
+            },
+            (None, Some(cause)) => Event::TurnInterrupted { cause },
+            (None, None) => end,
         };
         let completed = matches!(end, Event::TurnEnded(_));
         let retry = self.retry_after(&end);
@@ -1777,6 +1898,14 @@ impl Actor {
     }
 
     fn emit(&mut self, event: Event) {
+        let recorded = self.record(&event);
+        self.report_store(recorded);
+        self.send_event(event);
+    }
+
+    /// Writes an event to the database. Text may wait in memory; any other
+    /// event is committed when this returns.
+    fn record(&mut self, event: &Event) -> Result<(), StoreError> {
         // A turn that answered, ran a tool, or asked to run one is not sent
         // again: a retry could run twice what a person already allowed.
         if matches!(
@@ -1788,8 +1917,10 @@ impl Actor {
         ) {
             self.running.said = true;
         }
-        let recorded = self.recorder.record(event.clone());
-        self.report_store(recorded);
+        self.recorder.record(event.clone())
+    }
+
+    fn send_event(&mut self, event: Event) {
         self.broadcast(ServerMessage::ConversationEvent {
             conversation_id: self.id,
             event,

@@ -1446,6 +1446,43 @@ pub mod tests {
     }
 
     #[test]
+    fn an_answer_of_a_floor_a_rule_or_a_failed_save_stands_alone_with_its_reason() {
+        let answered = |decision, reason| Event::ApprovalResolved {
+            id: Some("a1".to_owned()),
+            tool_call_id: "tool".to_owned(),
+            title: Some("rm -rf /".to_owned()),
+            decision,
+            reason: Some(reason),
+        };
+        for (decision, reason, state) in [
+            (
+                ApprovalDecision::Declined,
+                ApprovalReason::Floor,
+                ApprovalState::Declined,
+            ),
+            (
+                ApprovalDecision::Declined,
+                ApprovalReason::Rule { id: 3 },
+                ApprovalState::Declined,
+            ),
+            (
+                ApprovalDecision::Allowed,
+                ApprovalReason::Rule { id: 4 },
+                ApprovalState::Allowed,
+            ),
+            (
+                ApprovalDecision::Declined,
+                ApprovalReason::NotRecorded,
+                ApprovalState::Declined,
+            ),
+        ] {
+            let transcript = timeline(vec![user("go"), answered(decision, reason)]);
+            assert_eq!(approval(&transcript, 2).state, state);
+            assert_eq!(approval(&transcript, 2).automatic, Some(reason));
+        }
+    }
+
+    #[test]
     fn the_end_of_a_turn_expires_unanswered_requests() {
         let mut transcript = timeline(vec![user("go"), request("a1")]);
         let changed = transcript.apply(at(

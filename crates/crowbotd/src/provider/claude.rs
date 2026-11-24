@@ -1,6 +1,6 @@
 use serde_json::{Map, Value, json};
 
-use crate::provider::acp::AgentProfile;
+use crate::provider::acp::{AgentProfile, CommandFolder};
 
 pub const PROVIDER: &str = "claude";
 
@@ -12,6 +12,9 @@ pub fn profile() -> AgentProfile {
         name: "Claude",
         session_meta: Some(session_meta()),
         session_mode: Some(SESSION_MODE),
+        // No permission request of this provider names the folder of a
+        // command (`docs/harness-providers.md`, A9).
+        command_folder: CommandFolder::Unnamed,
         ..AgentProfile::generic()
     }
 }

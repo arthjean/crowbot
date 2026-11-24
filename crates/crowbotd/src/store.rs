@@ -1,5 +1,6 @@
 mod bots;
 mod preferences;
+mod rules;
 mod search;
 mod sessions;
 mod usage;
@@ -19,7 +20,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -218,6 +219,20 @@ INSERT INTO event_text (rowid, body)
     WHERE kind = 'user_text' AND json_valid(payload) AND json_type(payload, '$.data') = 'object';
 ";
 
+/// The approval rules a person gave each bot: a program and the arguments
+/// a command starts with, as JSON.
+const SCHEMA_V11: &str = "
+CREATE TABLE approval_rules (
+    id INTEGER PRIMARY KEY,
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    kind TEXT NOT NULL,
+    program TEXT NOT NULL,
+    args TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (bot_id, kind, program, args)
+);
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -372,6 +387,9 @@ impl Store {
         }
         if version < 10 {
             transaction.execute_batch(SCHEMA_V10)?;
+        }
+        if version < 11 {
+            transaction.execute_batch(SCHEMA_V11)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;

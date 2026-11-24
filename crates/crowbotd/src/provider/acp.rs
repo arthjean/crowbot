@@ -26,6 +26,7 @@ use crowbot_protocol::{
     TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
 };
 
+use crate::approval::Request;
 use crate::mcp::{SERVER_NAME, ServerCommand};
 use crate::tools::Registry;
 use serde_json::{Map, Value};
@@ -60,6 +61,21 @@ pub struct AgentProfile {
     pub files: Vec<(PathBuf, String)>,
     /// The files and folders the daemon removes before each start.
     pub removed: Vec<PathBuf>,
+    /// Where a permission request names the folder its command runs in.
+    pub command_folder: CommandFolder,
+}
+
+/// Where an agent names the folder of a command it asks to run, in a field
+/// the agent sets and the model does not write. An allow rule applies only
+/// to a command whose folder is named (decision D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandFolder {
+    /// The agent names none: no allow rule applies to its commands. No
+    /// provider names one in its request (`docs/harness-providers.md`, A9).
+    Unnamed,
+    /// `rawInput.cwd` of the request: the form a custom agent, started with
+    /// `--agent`, uses.
+    RequestCwd,
 }
 
 impl AgentProfile {
@@ -77,6 +93,7 @@ impl AgentProfile {
             folders: Vec::new(),
             files: Vec::new(),
             removed: Vec::new(),
+            command_folder: CommandFolder::RequestCwd,
         }
     }
 
@@ -594,8 +611,7 @@ pub enum AgentEvent {
     ApprovalNeeded {
         tool_call_id: String,
         title: Option<String>,
-        target: Option<String>,
-        cut: bool,
+        request: Request,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
     /// The agent asked for an approval that the daemon cannot grant, because the
@@ -857,6 +873,7 @@ pub async fn run_session(
     } = config;
     let update_events = events.clone();
     let approval_events = events.clone();
+    let command_folder = agent.command_folder;
     // The tool calls that name a daemon tool, by their id: ChatGPT's
     // permission request names only the id (`docs/harness-providers.md`).
     let daemon_calls = Arc::new(Mutex::new(HashMap::<String, String>::new()));
@@ -937,7 +954,7 @@ pub async fn run_session(
                         connection: ConnectionTo<Agent>| {
                 let tool_call_id = request.tool_call.tool_call_id.0.to_string();
                 let title = request.tool_call.fields.title.clone();
-                let (target, cut) = approval_target(&request.tool_call.fields);
+                let target = approval_request(&request.tool_call.fields, command_folder);
                 let decline = decline_outcome(&request);
                 let Some(allow) = allow_once_outcome(&request) else {
                     approval_events
@@ -970,8 +987,7 @@ pub async fn run_session(
                     AgentEvent::ApprovalNeeded {
                         tool_call_id,
                         title,
-                        target,
-                        cut,
+                        request: target,
                         reply,
                     }
                 };
@@ -1435,18 +1451,63 @@ fn tool_output(content: &[ToolCallContent], raw_output: Option<&Value>) -> Optio
     Some(output)
 }
 
-fn approval_target(fields: &ToolCallUpdateFields) -> (Option<String>, bool) {
+/// What a permission request asks, as the daemon's rules read it: the
+/// command, or else the path, and the folder of the command when the agent
+/// names it where `command_folder` says.
+fn approval_request(fields: &ToolCallUpdateFields, command_folder: CommandFolder) -> Request {
     let input = fields.raw_input.as_ref().and_then(Value::as_object);
-    let target = string_field(input, &["command"])
+    let command = string_field(input, &["command"]).or_else(|| argv_field(input));
+    let is_command = command.is_some();
+    let target = command
         .or_else(|| first_location(fields.locations.as_deref().unwrap_or_default()))
         .or_else(|| string_field(input, &["file_path", "path"]));
+    let folder = match command_folder {
+        CommandFolder::RequestCwd if is_command => string_field(input, &["cwd"])
+            .map(PathBuf::from)
+            .filter(|folder| folder.is_absolute()),
+        _ => None,
+    };
     match target {
         Some(mut target) => {
             let cut = cut_text(&mut target, APPROVAL_TARGET_BYTES);
-            (Some(target), cut)
+            Request {
+                target: Some(target),
+                cut,
+                command: is_command,
+                folder,
+            }
         }
-        None => (None, false),
+        None => Request::default(),
     }
+}
+
+/// A command given as its list of arguments, as a POSIX shell reads it
+/// back: an argument in single quotes when it needs any.
+fn argv_field(input: Option<&Map<String, Value>>) -> Option<String> {
+    let argv = input?.get("command")?.as_array()?;
+    let words: Option<Vec<&str>> = argv.iter().map(Value::as_str).collect();
+    let words = words.filter(|words| !words.is_empty())?;
+    let quoted: Vec<String> = words
+        .iter()
+        .map(|word| {
+            let plain = !word.is_empty()
+                && word
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+            if plain {
+                (*word).to_owned()
+            } else {
+                format!("'{}'", word.replace('\'', r"'\''"))
+            }
+        })
+        .collect();
+    Some(quoted.join(" "))
+}
+
+#[cfg(test)]
+fn approval_target(fields: &ToolCallUpdateFields) -> (Option<String>, bool) {
+    let request = approval_request(fields, CommandFolder::Unnamed);
+    (request.target, request.cut)
 }
 
 fn text(content: ContentBlock) -> Option<String> {
@@ -2047,6 +2108,48 @@ mod tests {
             updated(ToolCallUpdateFields::new().content(Vec::<ToolCallContent>::new())),
             None
         );
+    }
+
+    #[test]
+    fn the_folder_of_a_command_is_read_only_where_the_profile_says() {
+        let folder = if cfg!(windows) {
+            r"C:\bots\ada"
+        } else {
+            "/bots/ada"
+        };
+        let command = ToolCallUpdateFields::new()
+            .raw_input(json!({ "command": "cargo test", "cwd": folder }));
+        let read = approval_request(&command, CommandFolder::RequestCwd);
+        assert!(read.command);
+        assert_eq!(read.folder, Some(PathBuf::from(folder)));
+        // A provider that names no folder gets none, whatever its input holds.
+        assert_eq!(
+            approval_request(&command, CommandFolder::Unnamed).folder,
+            None
+        );
+        let relative =
+            ToolCallUpdateFields::new().raw_input(json!({ "command": "cargo test", "cwd": "sub" }));
+        assert_eq!(
+            approval_request(&relative, CommandFolder::RequestCwd).folder,
+            None
+        );
+        let file =
+            ToolCallUpdateFields::new().raw_input(json!({ "file_path": "a.txt", "cwd": folder }));
+        let read = approval_request(&file, CommandFolder::RequestCwd);
+        assert!(!read.command);
+        assert_eq!(read.folder, None);
+        for profile in [
+            crate::provider::claude::profile(),
+            crate::provider::codex::profile(Path::new("/home")),
+            crate::provider::grok::profile(Path::new("/home")),
+        ] {
+            assert_eq!(
+                profile.command_folder,
+                CommandFolder::Unnamed,
+                "{}",
+                profile.name
+            );
+        }
     }
 
     #[test]

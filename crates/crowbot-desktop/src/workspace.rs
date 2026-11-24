@@ -809,6 +809,8 @@ impl Workspace {
                 self.models.insert(models.provider.clone(), models);
             }
             ServerMessage::DaemonInfo(info) => self.daemon_info = Some(info),
+            // The rules of a bot have no surface in this client yet (EP-012).
+            ServerMessage::ApprovalRules { .. } | ServerMessage::ApprovalRuleAdded { .. } => {}
             ServerMessage::SearchResults(results) => self.palette_results(results),
             ServerMessage::BotDeleted { bot_id } => {
                 self.deleting.remove(&bot_id);
