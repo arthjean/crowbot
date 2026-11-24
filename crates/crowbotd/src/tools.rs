@@ -2,17 +2,29 @@
 //! has a typed input, whose JSON schema the agent reads, and one effect,
 //! fixed in its type: what the tool may change decides whether a call asks a
 //! person (`mcp.rs`).
+//!
+//! Two rules hold by construction rather than by a check each tool must
+//! remember. A tool runs only with a `TurnPermit`, which the conversation's
+//! `TurnGate` gives while a turn runs and no stop is asked. And a tool whose
+//! effect is `BotState` writes nothing itself: it returns a `Mutation`, which
+//! only a permit makes, and which the conversation applies in its own loop,
+//! where the check that the permit's turn still runs and the write happen in
+//! one step and one transaction with the event they record. A stop that
+//! comes between the call and the write is seen there, so no change reaches
+//! the bot's state after a stop.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crowbot_protocol::{TOOL_OUTPUT_BYTES, ToolEffect, cut_text};
+use crowbot_protocol::{Event, TOOL_OUTPUT_BYTES, ToolEffect, cut_text};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+
+use crate::store::{Store, StoreError};
 
 /// What a provider session is for. A kind may call only the tools that list it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,25 +57,162 @@ pub struct ToolContext {
     pub outputs: Outputs,
 }
 
-pub type ToolFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+/// The proof that a turn of the caller's conversation runs and that no stop
+/// was asked when the call began. Only a `TurnGate` makes one, so a tool,
+/// which needs one to run, cannot run outside a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnPermit {
+    turn: u64,
+}
+
+impl TurnPermit {
+    /// The turn the permit was given in.
+    pub fn turn(self) -> u64 {
+        self.turn
+    }
+
+    /// A change to the bot's own state, made in this permit's turn. The
+    /// conversation applies it only while that turn still runs with no stop
+    /// asked; `apply` runs inside a transaction that also stores the event
+    /// it returns.
+    pub fn mutation(
+        self,
+        apply: impl FnOnce(&Store) -> Result<Applied, StoreError> + Send + 'static,
+    ) -> Mutation {
+        Mutation {
+            turn: self.turn,
+            apply: Box::new(apply),
+        }
+    }
+}
+
+/// The turn gate of one conversation, shared with the endpoints of its
+/// sessions. The conversation opens it when a turn starts and closes it when
+/// a stop is asked and when the turn ends.
+#[derive(Debug, Clone, Default)]
+pub struct TurnGate(Arc<Mutex<Option<u64>>>);
+
+impl TurnGate {
+    pub fn open(&self, turn: u64) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(turn);
+    }
+
+    pub fn close(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// A permit for the turn that runs, or none while no turn runs or a
+    /// stop is under way.
+    pub fn permit(&self) -> Option<TurnPermit> {
+        let turn = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        turn.map(|turn| TurnPermit { turn })
+    }
+}
+
+/// What a mutation gives once applied: the text the agent receives, and the
+/// event the conversation records with the change, in the same transaction.
+pub struct Applied {
+    pub output: String,
+    pub event: Option<Event>,
+}
+
+type Apply = Box<dyn FnOnce(&Store) -> Result<Applied, StoreError> + Send>;
+
+/// A change to the bot's own state, as data: what a `BotState` tool returns
+/// instead of writing.
+pub struct Mutation {
+    turn: u64,
+    apply: Apply,
+}
+
+impl Mutation {
+    /// The turn the change was made in.
+    pub fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    /// Applies the change. The store calls it inside its transaction.
+    pub fn apply(self, store: &Store) -> Result<Applied, StoreError> {
+        (self.apply)(store)
+    }
+}
+
+/// The effects, as types: each says what its tools return, so that a `Read`
+/// or an `External` tool cannot change the bot's state through the daemon,
+/// and a `BotState` tool cannot write but through a `Mutation`.
+pub mod effect {
+    use super::{Done, Mutation, ToolEffect};
+
+    pub trait Effect: Send + Sync + 'static {
+        const EFFECT: ToolEffect;
+        type Output: Send + 'static;
+        fn done(output: Self::Output) -> Done;
+    }
+
+    /// Changes nothing.
+    pub struct Read;
+    /// Changes state of the bot that the daemon versions and can put back.
+    pub struct BotState;
+    /// Reaches outside the bot's own state: it asks a person first.
+    pub struct External;
+
+    impl Effect for Read {
+        const EFFECT: ToolEffect = ToolEffect::Read;
+        type Output = String;
+        fn done(output: String) -> Done {
+            Done::Output(output)
+        }
+    }
+
+    impl Effect for BotState {
+        const EFFECT: ToolEffect = ToolEffect::BotState;
+        type Output = Mutation;
+        fn done(mutation: Mutation) -> Done {
+            Done::Mutation(mutation)
+        }
+    }
+
+    impl Effect for External {
+        const EFFECT: ToolEffect = ToolEffect::External;
+        type Output = String;
+        fn done(output: String) -> Done {
+            Done::Output(output)
+        }
+    }
+}
+
+/// What a call ends with: a text for the agent, or a change for the
+/// conversation to apply.
+pub enum Done {
+    Output(String),
+    Mutation(Mutation),
+}
+
+pub type ToolFuture<T = String> = Pin<Box<dyn Future<Output = Result<T, String>> + Send>>;
 
 /// A call whose arguments fit the tool's input, and that has not run: the
-/// tool runs when the call is invoked, so that nothing of it runs before the
-/// approval an `External` tool waits for (`mcp.rs`).
-pub type ToolCall = Box<dyn FnOnce() -> ToolFuture + Send>;
+/// tool runs when the call is given a permit, so that nothing of it runs
+/// outside a turn or before the approval an `External` tool waits for
+/// (`mcp.rs`).
+pub type ToolCall = Box<dyn FnOnce(TurnPermit) -> ToolFuture<Done> + Send>;
 
 /// A tool: its name, what it tells the model, its effect, the session kinds
 /// that may call it, its input type, and what it does.
 pub trait Tool: Send + Sync + 'static {
-    type Input: DeserializeOwned + JsonSchema + Send;
+    type Input: DeserializeOwned + JsonSchema + Send + 'static;
+    type Effect: effect::Effect;
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
-    const EFFECT: ToolEffect;
     const KINDS: &'static [SessionKind];
 
-    /// Runs the tool. The daemon calls it only once the call may run: after
-    /// the approval of an `External` tool.
-    fn run(&self, context: ToolContext, input: Self::Input) -> ToolFuture;
+    /// Runs the tool, in the permit's turn. The daemon calls it only once
+    /// the call may run: after the approval of an `External` tool.
+    fn run(
+        &self,
+        permit: TurnPermit,
+        context: ToolContext,
+        input: Self::Input,
+    ) -> ToolFuture<<Self::Effect as effect::Effect>::Output>;
 }
 
 type Runner = Box<dyn Fn(ToolContext, Value) -> Result<ToolCall, String> + Send + Sync>;
@@ -80,17 +229,21 @@ pub struct ToolEntry {
 
 impl ToolEntry {
     fn of<T: Tool>(tool: T) -> Self {
+        use effect::Effect;
         let tool = Arc::new(tool);
         Self {
             name: T::NAME,
             description: T::DESCRIPTION,
-            effect: T::EFFECT,
+            effect: T::Effect::EFFECT,
             kinds: T::KINDS,
             schema: input_schema::<T::Input>(),
             runner: Box::new(move |context, arguments| {
                 let input = parse_input::<T::Input>(arguments)?;
                 let tool = tool.clone();
-                Ok(Box::new(move || tool.run(context, input)))
+                Ok(Box::new(move |permit| {
+                    let running = tool.run(permit, context, input);
+                    Box::pin(async move { running.await.map(T::Effect::done) })
+                }))
             }),
         }
     }
@@ -116,8 +269,8 @@ impl ToolEntry {
     }
 
     /// Checks the arguments against the input type and gives the call, which
-    /// runs nothing until it is invoked. An argument that does not fit names
-    /// the first field that is wrong, and the tool does not run.
+    /// runs nothing until it is given a permit. An argument that does not
+    /// fit names the first field that is wrong, and the tool does not run.
     pub fn prepare(&self, context: ToolContext, arguments: Value) -> Result<ToolCall, String> {
         (self.runner)(context, arguments)
     }
@@ -276,12 +429,12 @@ struct ReadOutputInput {
 
 impl Tool for ReadOutput {
     type Input = ReadOutputInput;
+    type Effect = effect::Read;
     const NAME: &'static str = "read_output";
     const DESCRIPTION: &'static str = "Reads the next part of a long output of a Crow Bot tool, from the cursor its last part ends with.";
-    const EFFECT: ToolEffect = ToolEffect::Read;
     const KINDS: &'static [SessionKind] = ALL_KINDS;
 
-    fn run(&self, context: ToolContext, input: ReadOutputInput) -> ToolFuture {
+    fn run(&self, _permit: TurnPermit, context: ToolContext, input: ReadOutputInput) -> ToolFuture {
         let page = context.outputs.read(&input.cursor);
         Box::pin(async move { page })
     }
@@ -305,13 +458,24 @@ mod tests {
 
     impl Tool for Note {
         type Input = NoteInput;
+        type Effect = effect::BotState;
         const NAME: &'static str = "note";
         const DESCRIPTION: &'static str = "Keeps a note.";
-        const EFFECT: ToolEffect = ToolEffect::BotState;
         const KINDS: &'static [SessionKind] = &[SessionKind::Review];
 
-        fn run(&self, _context: ToolContext, input: NoteInput) -> ToolFuture {
-            Box::pin(async move { Ok(input.text) })
+        fn run(
+            &self,
+            permit: TurnPermit,
+            _context: ToolContext,
+            input: NoteInput,
+        ) -> ToolFuture<Mutation> {
+            let mutation = permit.mutation(move |_store| {
+                Ok(Applied {
+                    output: input.text,
+                    event: None,
+                })
+            });
+            Box::pin(async move { Ok(mutation) })
         }
     }
 
@@ -379,8 +543,21 @@ mod tests {
             .unwrap();
         assert!(count.contains("`count`"), "{count}");
         let call = start(serde_json::json!({ "text": "kept" })).ok().unwrap();
-        let ran = call().await;
-        assert_eq!(ran, Ok("kept".to_owned()));
+        // A `BotState` tool gives its change as data, made in the permit's turn.
+        let Ok(Done::Mutation(mutation)) = call(TurnPermit { turn: 7 }).await else {
+            panic!("a BotState tool returns a mutation");
+        };
+        assert_eq!(mutation.turn(), 7);
+    }
+
+    #[test]
+    fn the_gate_gives_a_permit_of_the_open_turn_and_none_once_closed() {
+        let gate = TurnGate::default();
+        assert_eq!(gate.permit(), None);
+        gate.open(3);
+        assert_eq!(gate.permit().map(TurnPermit::turn), Some(3));
+        gate.clone().close();
+        assert_eq!(gate.permit(), None);
     }
 
     #[test]

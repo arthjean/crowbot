@@ -686,6 +686,223 @@ async fn a_request_for_a_tool_the_daemon_does_not_serve_waits_for_a_person() {
     client.until_turn_ends().await;
 }
 
+// The turn gate: no daemon tool runs between turns, and no change of one is
+// applied once a stop is asked (`tools.rs`).
+
+/// The daemon's server of the session, read in a turn that has ended.
+async fn server_after_a_turn(client: &mut Client, conversation: i64) -> Value {
+    let events = turn_events(client, conversation, "mcpconfig").await;
+    the_server(&reported(&reply_of(&events), "mcp=")).clone()
+}
+
+fn tools_call(id: u64, name: &str, arguments: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } })
+}
+
+#[tokio::test]
+async fn a_daemon_tool_called_between_turns_does_not_run_and_the_refusal_is_recorded() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client().await;
+    let (_, conversation) = bot(&mut client, "Between").await;
+    let server = server_after_a_turn(&mut client, conversation).await;
+    let mut relay = bridge(&server);
+    let calls = [
+        tools_call(1, "probe_state", json!({ "text": "between" })),
+        tools_call(2, "probe_read", json!({})),
+    ];
+    for call in calls {
+        let answer = ask_bridge(&mut relay, call).await.unwrap();
+        assert!(answer.get("error").is_some(), "{answer}");
+    }
+    assert!(!daemon.harness_file("state.log").exists());
+    let snapshot = client.open(conversation).await;
+    assert!(
+        support::events(&snapshot).iter().any(|event| matches!(
+            event,
+            Event::ToolRefused { tool, .. } if tool == "probe_state"
+        )),
+        "the refusal is not recorded"
+    );
+    relay.kill().ok();
+}
+
+#[tokio::test]
+async fn a_change_whose_turn_is_stopped_before_it_is_applied_changes_nothing() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client().await;
+    let (_, conversation) = bot(&mut client, "Stopping").await;
+    let server = server_after_a_turn(&mut client, conversation).await;
+    // A turn whose agent ignores the cancel, so that the stop waits.
+    client.say(conversation, "deaf").await;
+    client.until_reply("deaf").await;
+    let mut relay = bridge(&server);
+
+    // In the turn, a change is applied, and names the turn it was made in.
+    let kept = ask_bridge(
+        &mut relay,
+        tools_call(1, "probe_state", json!({ "text": "inside" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(tool_text(&kept), ("kept", false));
+
+    // A change made before the stop and handed over after it.
+    let late = tools_call(
+        2,
+        "probe_state",
+        json!({ "text": "late", "delay_ms": 1500 }),
+    );
+    let pending = tokio::spawn(async move {
+        let answer = ask_bridge(&mut relay, late).await;
+        (relay, answer)
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client
+        .send(ClientMessage::StopTurn {
+            conversation_id: conversation,
+        })
+        .await;
+    let (mut relay, answer) = pending.await.unwrap();
+    let answer = answer.unwrap();
+    let (text, failed) = tool_text(&answer);
+    assert!(failed, "{answer}");
+    assert!(text.contains("stopped"), "{text}");
+    let state = std::fs::read_to_string(daemon.harness_file("state.log")).unwrap();
+    assert!(state.contains("turn=2 inside"), "{state}");
+    assert!(!state.contains("late"), "{state}");
+
+    // While the stop waits for the agent, no tool starts.
+    let refused = ask_bridge(&mut relay, tools_call(3, "probe_read", json!({})))
+        .await
+        .unwrap();
+    assert!(refused.get("error").is_some(), "{refused}");
+    relay.kill().ok();
+}
+
+/// Calls race a stop on bridges of their own: a change the agent was told
+/// is kept is in the bot's state, one it was told is not is absent, every
+/// change names the turn that ran, and none handed over well after the stop
+/// is applied. `scripts/stress-tests.sh` runs it many times at once.
+#[tokio::test]
+async fn changes_that_race_a_stop_are_applied_exactly_when_the_agent_is_told_so() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client().await;
+    let (_, conversation) = bot(&mut client, "Race").await;
+    let server = server_after_a_turn(&mut client, conversation).await;
+    client.say(conversation, "deaf").await;
+    client.until_reply("deaf").await;
+    let delays: Vec<u64> = (0..8).map(|index| index * 150).collect();
+    let mut calls: Vec<_> = delays
+        .iter()
+        .map(|&delay| {
+            let mut relay = bridge(&server);
+            let call = tools_call(
+                delay,
+                "probe_state",
+                json!({ "text": format!("delay-{delay}"), "delay_ms": delay }),
+            );
+            tokio::spawn(async move {
+                let answer = ask_bridge(&mut relay, call).await;
+                relay.kill().ok();
+                (delay, answer)
+            })
+        })
+        .collect();
+    // The change made at once is answered in the turn, however slow the
+    // computer; the stop comes after it, while the others still work.
+    let mut answers = vec![calls.remove(0).await.unwrap()];
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client
+        .send(ClientMessage::StopTurn {
+            conversation_id: conversation,
+        })
+        .await;
+    for call in calls {
+        answers.push(call.await.unwrap());
+    }
+    let state = std::fs::read_to_string(daemon.harness_file("state.log")).unwrap_or_default();
+    for (delay, answer) in answers {
+        let answer = answer.unwrap();
+        let kept = answer["result"]["isError"] == false;
+        let line = format!("turn=2 delay-{delay}\n");
+        assert_eq!(
+            kept,
+            state.contains(&line),
+            "delay {delay}: {answer} / {state}"
+        );
+        if delay == 0 {
+            assert!(kept, "a change made at once in the turn is kept: {answer}");
+        }
+        if delay == delays[delays.len() - 1] {
+            assert!(
+                !kept,
+                "a change handed over after the stop is not kept: {answer}"
+            );
+        }
+    }
+    assert!(
+        state.lines().all(|line| line.contains(" turn=2 ")),
+        "{state}"
+    );
+}
+
+#[tokio::test]
+async fn a_request_for_a_daemon_tool_while_the_turn_stops_is_cancelled() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client().await;
+    let (_, conversation) = bot(&mut client, "Late").await;
+    client
+        .say(conversation, r#"mcplate probe_state {"text":"late"}"#)
+        .await;
+    client.until_reply("waiting").await;
+    client
+        .send(ClientMessage::StopTurn {
+            conversation_id: conversation,
+        })
+        .await;
+    let mut events = Vec::new();
+    loop {
+        if let ServerMessage::ConversationEvent {
+            conversation_id,
+            event,
+            ..
+        } = client.next().await
+            && conversation_id == conversation
+        {
+            let ended = event.ends_turn();
+            events.push(event);
+            if ended {
+                break;
+            }
+        }
+    }
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            Event::ApprovalResolved {
+                reason: Some(ApprovalReason::DaemonTool),
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Event::ApprovalClosed {
+                reason: ApprovalClosure::Cancelled,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        reply_of(&events).contains("permission=cancelled"),
+        "{events:?}"
+    );
+    assert!(!daemon.harness_file("state.log").exists());
+}
+
 /// A real turn on each signed-in provider calls a daemon tool through the
 /// bridge (`docs/harness-providers.md`). It spends the user's own usage, so
 /// it runs only on request, with `CROWBOT_REAL_PROVIDERS` naming the data

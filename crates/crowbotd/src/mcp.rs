@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 pub use bridge::{BRIDGE, run as run_bridge};
 
 use crate::provider::acp::ApprovalAnswer;
-use crate::tools::{Registry, ToolContext};
+use crate::tools::{Done, Mutation, Registry, ToolContext, TurnGate};
 
 /// The name of the daemon's server, which agents put in front of its tools:
 /// `mcp__crowbot__<tool>` for Claude, `mcp.crowbot.<tool>` for ChatGPT, and
@@ -40,8 +40,10 @@ const INVALID_REQUEST: i64 = -32600;
 /// What a call asks of the conversation it belongs to.
 pub enum ToolSignal {
     /// An `External` tool waits for an approval, which the bot's permission
-    /// level and a person give as for any other request.
+    /// level and a person give as for any other request, in the turn its
+    /// permit was given in.
     Approval {
+        turn: u64,
         /// The agent's id of the tool call, when the agent sent it with the
         /// call.
         tool_call_id: Option<String>,
@@ -50,7 +52,14 @@ pub enum ToolSignal {
         cut: bool,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
-    /// A tool that this session may not call, or that does not exist.
+    /// A change to the bot's own state, which the conversation applies only
+    /// while the turn it was made in still runs with no stop asked.
+    Apply {
+        mutation: Mutation,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// A tool that this session may not call, that does not exist, or that
+    /// was called while no turn ran.
     Refused { tool: String, message: String },
 }
 
@@ -81,6 +90,7 @@ impl SessionEndpoint {
     pub fn open(
         registry: Arc<Registry>,
         context: ToolContext,
+        gate: TurnGate,
         signals: mpsc::UnboundedSender<ToolSignal>,
     ) -> std::io::Result<Self> {
         let endpoint = session_endpoint();
@@ -89,6 +99,7 @@ impl SessionEndpoint {
         let session = Arc::new(Session {
             registry,
             context,
+            gate,
             signals,
             ended: ended.clone(),
         });
@@ -165,6 +176,8 @@ fn session_endpoint() -> Endpoint {
 struct Session {
     registry: Arc<Registry>,
     context: ToolContext,
+    /// Open while a turn of the conversation runs and no stop is asked.
+    gate: TurnGate,
     signals: mpsc::UnboundedSender<ToolSignal>,
     ended: Arc<AtomicBool>,
 }
@@ -269,12 +282,7 @@ async fn call(session: &Session, id: Value, params: Value) -> Value {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return error(id, INVALID_PARAMS, "A tool call names its tool.");
     };
-    let tool = session
-        .registry
-        .get(name)
-        .filter(|tool| tool.allows(session.context.kind));
-    let Some(tool) = tool else {
-        let message = format!("This session has no tool named {name}.");
+    let refuse = |message: String| {
         session
             .signals
             .send(ToolSignal::Refused {
@@ -282,7 +290,14 @@ async fn call(session: &Session, id: Value, params: Value) -> Value {
                 message: message.clone(),
             })
             .ok();
-        return error(id, INVALID_PARAMS, &message);
+        error(id.clone(), INVALID_PARAMS, &message)
+    };
+    let tool = session
+        .registry
+        .get(name)
+        .filter(|tool| tool.allows(session.context.kind));
+    let Some(tool) = tool else {
+        return refuse(format!("This session has no tool named {name}."));
     };
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
     let shown_arguments = arguments.to_string();
@@ -290,11 +305,19 @@ async fn call(session: &Session, id: Value, params: Value) -> Value {
         Ok(call) => call,
         Err(message) => return tool_result(id, message, true),
     };
+    // Every call, of every effect, belongs to the turn that runs: none runs
+    // between turns or once a stop is asked.
+    let Some(permit) = session.gate.permit() else {
+        return refuse(format!(
+            "No turn of this conversation runs, or it is being stopped, so the tool {name} did not run."
+        ));
+    };
     if tool.effect == ToolEffect::External {
         let mut target = format!("{name} {shown_arguments}");
         let cut = cut_text(&mut target, APPROVAL_TARGET_BYTES);
         let (reply, answer) = oneshot::channel();
         let asked = session.signals.send(ToolSignal::Approval {
+            turn: permit.turn(),
             tool_call_id: agent_call_id(&params),
             title: format!("Crow Bot tool {name}"),
             target: Some(target),
@@ -315,22 +338,38 @@ async fn call(session: &Session, id: Value, params: Value) -> Value {
                     true,
                 );
             }
-            ApprovalAnswer::Cancel => {
-                return tool_result(
-                    id,
-                    "The turn was stopped before this call ran, so nothing was changed.".to_owned(),
-                    true,
-                );
-            }
+            ApprovalAnswer::Cancel => return tool_result(id, stopped(), true),
         }
         if session.ended.load(Ordering::SeqCst) {
             return error(id, INVALID_REQUEST, "The session of this server ended.");
         }
     }
-    match call().await {
+    let output = match call(permit).await {
+        Ok(Done::Output(output)) => Ok(output),
+        Ok(Done::Mutation(mutation)) => apply(session, mutation).await,
+        Err(message) => Err(message),
+    };
+    match output {
         Ok(output) => tool_result(id, session.context.outputs.deliver(output), false),
         Err(message) => tool_result(id, message, true),
     }
+}
+
+fn stopped() -> String {
+    "The turn was stopped before this call ran, so nothing was changed.".to_owned()
+}
+
+/// Hands a change to the conversation, which applies it or refuses it.
+async fn apply(session: &Session, mutation: Mutation) -> Result<String, String> {
+    let (reply, applied) = oneshot::channel();
+    if session
+        .signals
+        .send(ToolSignal::Apply { mutation, reply })
+        .is_err()
+    {
+        return Err(stopped());
+    }
+    applied.await.unwrap_or_else(|_| Err(stopped()))
 }
 
 #[cfg(test)]
@@ -348,6 +387,7 @@ mod tests {
                 kind,
                 outputs: Outputs::default(),
             },
+            gate: TurnGate::default(),
             signals,
             ended: Arc::new(AtomicBool::new(false)),
         };
@@ -411,6 +451,23 @@ mod tests {
             signals.try_recv(),
             Ok(ToolSignal::Refused { tool, .. }) if tool == "nothing"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_call_runs_only_while_the_gate_is_open() {
+        let (session, mut signals) = session(SessionKind::Conversation);
+        let call = json!({ "id": 5, "method": "tools/call", "params": { "name": "read_output", "arguments": { "cursor": "output-1:0" } } });
+        let refused = answer(&session, call.clone()).await.unwrap();
+        assert_eq!(refused["error"]["code"], INVALID_PARAMS, "{refused}");
+        assert!(matches!(
+            signals.try_recv(),
+            Ok(ToolSignal::Refused { tool, .. }) if tool == "read_output"
+        ));
+        session.gate.open(1);
+        let ran = answer(&session, call).await.unwrap();
+        // The tool ran: its own answer says the cursor names no output.
+        assert_eq!(ran["result"]["isError"], true, "{ran}");
+        assert!(signals.try_recv().is_err());
     }
 
     #[tokio::test]

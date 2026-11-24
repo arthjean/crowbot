@@ -55,6 +55,9 @@
 //!   the tool call's id; report the result's text and whether it failed.
 //! - `mcpanon <tool> [arguments]`: the same with a permission request and a
 //!   tool call that name the tool in their title only.
+//! - `mcplate <tool> [arguments]`: say `waiting`, wait for a cancel, then do
+//!   as `mcpcall` and end as cancelled: an agent that asks for a daemon tool
+//!   while its turn is being stopped.
 //! - `mcppid`: report the process id of the running MCP server.
 //!
 //! The command is the last part of a prompt: the parts before it are reported
@@ -855,6 +858,14 @@ impl Agent {
                 let params = serde_json::from_str(params).unwrap_or(Value::Null);
                 let answer = self.mcp_request(method, params);
                 self.say(session, &format!("answer={answer}"));
+            }
+            "mcplate" => {
+                let (tool, arguments) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let arguments: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+                self.say(session, "waiting");
+                self.wait_for_cancel();
+                let report = self.mcp_call(session, tool, arguments, false);
+                self.say(session, &report);
             }
             "mcpcall" | "mcpanon" => {
                 let (tool, arguments) = rest.split_once(' ').unwrap_or((rest, "{}"));

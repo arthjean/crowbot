@@ -23,7 +23,7 @@ use crate::store::{
     BotRow, Conversation, EventsPage, ProviderSession, Recorder, SharedStore, StoreError,
     session_fingerprint,
 };
-use crate::tools::{Outputs, SessionKind, ToolContext};
+use crate::tools::{Outputs, SessionKind, ToolContext, TurnGate};
 
 /// How long an agent gets to end its turn after a stop, before its process is closed.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -155,6 +155,8 @@ pub fn spawn(daemon: Arc<Daemon>, conversation: &Conversation) -> ConversationHa
         approvals: Vec::new(),
         next_approval: now_ms(),
         turn_active: false,
+        turn: 0,
+        gate: TurnGate::default(),
         stop_due: None,
         next_after_stop: false,
     };
@@ -296,6 +298,11 @@ struct Actor {
     approvals: Vec<PendingApproval>,
     next_approval: u64,
     turn_active: bool,
+    /// The number of the turn that runs, or that ran last.
+    turn: u64,
+    /// Open while a turn runs and no stop is asked: the daemon's tools run
+    /// only with a permit of it (`tools.rs`).
+    gate: TurnGate,
     /// Set while a stop waits for the agent to end the turn.
     stop_due: Option<Instant>,
     /// Set by "send now": the next queued message starts however the turn ends.
@@ -652,7 +659,7 @@ impl Actor {
             }
             return;
         }
-        self.turn_active = true;
+        self.begin_turn();
         self.accept_message(sink);
         let delivery = self.prepare();
         let note = delivery.as_ref().ok().and_then(Delivery::note);
@@ -662,6 +669,22 @@ impl Actor {
         self.give_title(&text);
         self.sync();
         self.deliver(delivery, text);
+    }
+
+    /// A turn starts: the daemon's tools may run, with permits of this turn.
+    fn begin_turn(&mut self) {
+        self.turn_active = true;
+        self.turn += 1;
+        self.gate.open(self.turn);
+    }
+
+    /// The turn `turn` runs and no stop is asked: a daemon tool of that turn
+    /// may still act.
+    fn turn_open(&self, generation: u64, turn: u64) -> bool {
+        self.is_current(generation)
+            && self.turn_active
+            && self.stop_due.is_none()
+            && self.turn == turn
     }
 
     fn deliver(&mut self, delivery: Result<Delivery, TurnFailure>, text: String) {
@@ -948,7 +971,12 @@ impl Actor {
             kind: SessionKind::Conversation,
             outputs: Outputs::default(),
         };
-        match SessionEndpoint::open(self.daemon.tools().clone(), context, signals) {
+        match SessionEndpoint::open(
+            self.daemon.tools().clone(),
+            context,
+            self.gate.clone(),
+            signals,
+        ) {
             Ok(endpoint) => Some(endpoint),
             Err(error) => {
                 eprintln!(
@@ -960,9 +988,11 @@ impl Actor {
         }
     }
 
-    /// A call to a daemon tool: a refusal is recorded, and an `External`
-    /// tool asks as any other request does. A call of a session that ended,
-    /// or outside a turn, is cancelled.
+    /// A call to a daemon tool: a refusal is recorded, an `External` tool
+    /// asks as any other request does, and a change to the bot's state is
+    /// applied. Each is answered as cancelled unless the turn its permit was
+    /// given in still runs with no stop asked: the check and the write happen
+    /// here, in one step of the conversation's loop and one transaction.
     fn tool_signal(&mut self, generation: u64, signal: ToolSignal) {
         match signal {
             ToolSignal::Refused { tool, message } => {
@@ -971,18 +1001,57 @@ impl Actor {
                 }
             }
             ToolSignal::Approval {
+                turn,
                 tool_call_id,
                 title,
                 target,
                 cut,
                 reply,
             } => {
-                if !self.is_current(generation) || !self.turn_active {
+                if !self.turn_open(generation, turn) {
                     reply.send(ApprovalAnswer::Cancel).ok();
                     return;
                 }
                 let tool_call_id = tool_call_id.unwrap_or_else(|| self.new_approval_id());
                 self.ask_approval(tool_call_id, Some(title), target, cut, reply);
+            }
+            ToolSignal::Apply { mutation, reply } => {
+                if !self.turn_open(generation, mutation.turn()) {
+                    reply
+                        .send(Err(
+                            "The turn was stopped before this change was applied, so nothing was changed."
+                                .to_owned(),
+                        ))
+                        .ok();
+                    return;
+                }
+                // Text still in memory reaches the database first, so that
+                // the change's event keeps its place in the conversation.
+                let closed = self.recorder.close();
+                self.report_store(closed);
+                match self
+                    .store
+                    .with(|store| store.apply_mutation(self.id, mutation))
+                {
+                    Ok(applied) => {
+                        if let Some(event) = applied.event {
+                            self.broadcast(ServerMessage::ConversationEvent {
+                                conversation_id: self.id,
+                                event,
+                                at_ms: at_ms(),
+                            });
+                        }
+                        reply.send(Ok(applied.output)).ok();
+                    }
+                    Err(error) => {
+                        reply
+                            .send(Err(format!(
+                                "The change could not be stored, so nothing was changed: {error}"
+                            )))
+                            .ok();
+                        self.report_store(Err::<(), _>(error));
+                    }
+                }
             }
         }
     }
@@ -1080,18 +1149,33 @@ impl Actor {
                 decision: ApprovalDecision::Declined,
                 reason: Some(ApprovalReason::NoAllowOnce),
             }),
-            AgentEvent::DaemonToolAllowed {
+            AgentEvent::DaemonToolRequested {
                 tool_call_id,
                 title,
+                reply,
             } => {
                 let id = self.new_approval_id();
-                self.emit(Event::ApprovalResolved {
-                    id: Some(id),
-                    tool_call_id,
-                    title,
-                    decision: ApprovalDecision::Allowed,
-                    reason: Some(ApprovalReason::DaemonTool),
-                });
+                // The daemon allows its own tool only within a turn that is
+                // not being stopped: the tool's gate would refuse it anyway.
+                if !self.turn_active || self.stop_due.is_some() {
+                    reply.send(ApprovalAnswer::Cancel).ok();
+                    self.emit(Event::ApprovalClosed {
+                        id,
+                        tool_call_id,
+                        title,
+                        reason: ApprovalClosure::Cancelled,
+                    });
+                    return;
+                }
+                if reply.send(ApprovalAnswer::Allow).is_ok() {
+                    self.emit(Event::ApprovalResolved {
+                        id: Some(id),
+                        tool_call_id,
+                        title,
+                        decision: ApprovalDecision::Allowed,
+                        reason: Some(ApprovalReason::DaemonTool),
+                    });
+                }
             }
         }
     }
@@ -1221,6 +1305,8 @@ impl Actor {
         if !self.turn_active {
             return;
         }
+        // From here no daemon tool starts, and no change of one is applied.
+        self.gate.close();
         if let Some(due) = self.stop_due {
             // A shorter patience, the one of a daemon that stops, wins.
             self.stop_due = Some(due.min(Instant::now() + patience));
@@ -1287,6 +1373,7 @@ impl Actor {
             self.report_store(marked);
         }
         self.turn_active = false;
+        self.gate.close();
         self.stop_due = None;
         let closed = self.recorder.close();
         self.report_store(closed);
@@ -1338,7 +1425,7 @@ impl Actor {
             .with(|store| store.start_queued(self.id, note.clone()))
         {
             Ok(Some(text)) => {
-                self.turn_active = true;
+                self.begin_turn();
                 self.broadcast(ServerMessage::ConversationEvent {
                     conversation_id: self.id,
                     event: Event::UserText(UserMessage::new(text.clone()).with_note(note)),

@@ -7,13 +7,15 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crowbot_protocol::ToolEffect;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::digest::sha256_hex;
 use crate::prompt::{Section, SectionState, Sections};
-use crate::tools::{ALL_KINDS, Registry, SessionKind, Tool, ToolContext, ToolFuture};
+use crate::tools::{
+    ALL_KINDS, Applied, Mutation, Registry, SessionKind, Tool, ToolContext, ToolFuture, TurnPermit,
+    effect,
+};
 
 const VARIABLE: &str = "CROWBOT_TEST_HARNESS";
 
@@ -90,6 +92,17 @@ struct TextInput {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct StateInput {
+    /// What to keep.
+    text: String,
+    /// How long the tool works before it gives its change, so that a test
+    /// can stop the turn in between.
+    #[serde(default)]
+    delay_ms: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct BigInput {
     /// How many bytes the output holds.
     bytes: usize,
@@ -100,6 +113,10 @@ fn who(context: &ToolContext) -> String {
         "bot={} conversation={}",
         context.bot_id, context.conversation_id
     )
+}
+
+fn turn_of(permit: TurnPermit) -> String {
+    format!("turn={}", permit.turn())
 }
 
 fn append(file: &Path, line: &str) -> Result<(), String> {
@@ -115,12 +132,12 @@ struct ProbeRead;
 
 impl Tool for ProbeRead {
     type Input = NoInput;
+    type Effect = effect::Read;
     const NAME: &'static str = "probe_read";
     const DESCRIPTION: &'static str = "Tells which bot and conversation call it.";
-    const EFFECT: ToolEffect = ToolEffect::Read;
     const KINDS: &'static [SessionKind] = ALL_KINDS;
 
-    fn run(&self, context: ToolContext, _input: NoInput) -> ToolFuture {
+    fn run(&self, _permit: TurnPermit, context: ToolContext, _input: NoInput) -> ToolFuture {
         Box::pin(async move { Ok(who(&context)) })
     }
 }
@@ -128,15 +145,35 @@ impl Tool for ProbeRead {
 struct ProbeState(PathBuf);
 
 impl Tool for ProbeState {
-    type Input = TextInput;
+    type Input = StateInput;
+    type Effect = effect::BotState;
     const NAME: &'static str = "probe_state";
     const DESCRIPTION: &'static str = "Keeps a text in the bot's own state.";
-    const EFFECT: ToolEffect = ToolEffect::BotState;
     const KINDS: &'static [SessionKind] = ALL_KINDS;
 
-    fn run(&self, context: ToolContext, input: TextInput) -> ToolFuture {
-        let written = append(&self.0, &format!("{} {}", who(&context), input.text));
-        Box::pin(async move { written.map(|()| "kept".to_owned()) })
+    /// The line reaches the file only when the conversation applies the
+    /// change, and names the turn the change was made in.
+    fn run(
+        &self,
+        permit: TurnPermit,
+        context: ToolContext,
+        input: StateInput,
+    ) -> ToolFuture<Mutation> {
+        let file = self.0.clone();
+        let line = format!("{} {} {}", who(&context), turn_of(permit), input.text);
+        Box::pin(async move {
+            if let Some(delay) = input.delay_ms {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            Ok(permit.mutation(move |_store| {
+                append(&file, &line)
+                    .map_err(|error| crate::store::StoreError::Io(std::io::Error::other(error)))?;
+                Ok(Applied {
+                    output: "kept".to_owned(),
+                    event: None,
+                })
+            }))
+        })
     }
 }
 
@@ -144,15 +181,18 @@ struct ProbeExternal(PathBuf);
 
 impl Tool for ProbeExternal {
     type Input = TextInput;
+    type Effect = effect::External;
     const NAME: &'static str = "probe_external";
     const DESCRIPTION: &'static str = "Sends a text outside the bot's own state.";
-    const EFFECT: ToolEffect = ToolEffect::External;
     const KINDS: &'static [SessionKind] = ALL_KINDS;
 
     /// It writes before its future is polled, so that the tests of an
     /// approval show the daemon calls `run` only once the call may run.
-    fn run(&self, context: ToolContext, input: TextInput) -> ToolFuture {
-        let sent = append(&self.0, &format!("{} {}", who(&context), input.text));
+    fn run(&self, permit: TurnPermit, context: ToolContext, input: TextInput) -> ToolFuture {
+        let sent = append(
+            &self.0,
+            &format!("{} {} {}", who(&context), turn_of(permit), input.text),
+        );
         Box::pin(async move { sent.map(|()| "sent".to_owned()) })
     }
 }
@@ -161,12 +201,12 @@ struct ProbeReview;
 
 impl Tool for ProbeReview {
     type Input = NoInput;
+    type Effect = effect::Read;
     const NAME: &'static str = "probe_review";
     const DESCRIPTION: &'static str = "A tool only a review may call.";
-    const EFFECT: ToolEffect = ToolEffect::Read;
     const KINDS: &'static [SessionKind] = &[SessionKind::Review];
 
-    fn run(&self, _context: ToolContext, _input: NoInput) -> ToolFuture {
+    fn run(&self, _permit: TurnPermit, _context: ToolContext, _input: NoInput) -> ToolFuture {
         Box::pin(async { Ok("reviewed".to_owned()) })
     }
 }
@@ -175,12 +215,12 @@ struct ProbeBig;
 
 impl Tool for ProbeBig {
     type Input = BigInput;
+    type Effect = effect::Read;
     const NAME: &'static str = "probe_big";
     const DESCRIPTION: &'static str = "Returns an output of the given size.";
-    const EFFECT: ToolEffect = ToolEffect::Read;
     const KINDS: &'static [SessionKind] = ALL_KINDS;
 
-    fn run(&self, _context: ToolContext, input: BigInput) -> ToolFuture {
+    fn run(&self, _permit: TurnPermit, _context: ToolContext, input: BigInput) -> ToolFuture {
         Box::pin(async move { Ok("x".repeat(input.bytes)) })
     }
 }

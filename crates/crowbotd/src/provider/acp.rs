@@ -591,11 +591,13 @@ pub enum AgentEvent {
         tool_call_id: String,
         title: Option<String>,
     },
-    /// The agent asked to call a daemon tool, which was allowed at once: the
-    /// daemon gates the call where it runs the tool (decision D1).
-    DaemonToolAllowed {
+    /// The agent asked to call a daemon tool. The conversation allows it
+    /// unless no turn runs or a stop is asked: the daemon gates the call
+    /// where it runs the tool (decision D1).
+    DaemonToolRequested {
         tool_call_id: String,
         title: Option<String>,
+        reply: oneshot::Sender<ApprovalAnswer>,
     },
 }
 
@@ -932,25 +934,23 @@ pub async fn run_session(
                         .get(&tool_call_id)
                         .cloned()
                 });
-                if daemon_call.is_some() {
-                    approval_events
-                        .send(AgentEvent::DaemonToolAllowed {
-                            tool_call_id,
-                            title,
-                        })
-                        .ok();
-                    return responder.respond(RequestPermissionResponse::new(allow));
-                }
                 let (reply, decision) = oneshot::channel();
-                approval_events
-                    .send(AgentEvent::ApprovalNeeded {
+                let event = if daemon_call.is_some() {
+                    AgentEvent::DaemonToolRequested {
+                        tool_call_id,
+                        title,
+                        reply,
+                    }
+                } else {
+                    AgentEvent::ApprovalNeeded {
                         tool_call_id,
                         title,
                         target,
                         cut,
                         reply,
-                    })
-                    .ok();
+                    }
+                };
+                approval_events.send(event).ok();
                 connection.spawn(async move {
                     let outcome = match decision.await {
                         Ok(ApprovalAnswer::Allow) => allow,

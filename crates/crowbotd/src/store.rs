@@ -459,6 +459,23 @@ impl Store {
         Ok(titled > 0)
     }
 
+    /// Applies a change to the bot's own state and stores the event it
+    /// records, in one transaction: a change and its event are kept or lost
+    /// together.
+    pub fn apply_mutation(
+        &self,
+        conversation_id: i64,
+        mutation: crate::tools::Mutation,
+    ) -> Result<crate::tools::Applied, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let applied = mutation.apply(self)?;
+        if let Some(event) = &applied.event {
+            self.append(conversation_id, event)?;
+        }
+        transaction.commit()?;
+        Ok(applied)
+    }
+
     pub fn append(&self, conversation_id: i64, event: &Event) -> Result<i64, StoreError> {
         self.connection.execute(
             "INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
@@ -956,6 +973,35 @@ mod tests {
 
     fn store() -> Store {
         Store::from_connection(Connection::open_in_memory().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_mutation_and_its_event_are_kept_or_lost_together() {
+        use crate::tools::{Applied, TurnGate};
+        let store = store();
+        let id = conversation(&store);
+        let gate = TurnGate::default();
+        gate.open(1);
+        let permit = gate.permit().unwrap();
+        let kept = permit.mutation(move |store| {
+            store.set_draft(id, "kept")?;
+            Ok(Applied {
+                output: "done".to_owned(),
+                event: Some(Event::MessageText("changed".to_owned())),
+            })
+        });
+        assert_eq!(store.apply_mutation(id, kept).unwrap().output, "done");
+        assert_eq!(
+            store.events(id).unwrap(),
+            vec![Event::MessageText("changed".to_owned())]
+        );
+        let failed = permit.mutation(move |store| {
+            store.set_draft(id, "lost")?;
+            Err(StoreError::NewerSchema(99))
+        });
+        assert!(store.apply_mutation(id, failed).is_err());
+        assert_eq!(store.events(id).unwrap().len(), 1);
+        assert_eq!(store.draft(id).unwrap(), "kept");
     }
 
     fn bot(store: &Store) -> bots::BotRow {
