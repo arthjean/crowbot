@@ -60,8 +60,8 @@ impl Ignored {
         Self { rules }
     }
 
-    /// Whether the record left `path`, a file, out.
-    pub fn covers(&self, folder: &Path, path: &str) -> bool {
+    /// Whether the record left `path` out: a file, or a folder when `is_dir`.
+    pub fn covers(&self, folder: &Path, path: &str, is_dir: bool) -> bool {
         if self.rules.is_empty() {
             return false;
         }
@@ -72,7 +72,7 @@ impl Ignored {
             let place = parts[..end]
                 .iter()
                 .fold(folder.to_owned(), |place, part| place.join(part));
-            let is_dir = end < parts.len();
+            let is_dir = end < parts.len() || is_dir;
             // The rules of the folders above this entry, the deepest first.
             for depth in (0..end).rev() {
                 let owner = parts[..depth].join("/");

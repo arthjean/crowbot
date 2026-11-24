@@ -313,7 +313,14 @@ impl Checkpoints {
         let before = self
             .store_taken(store, &key, &at, now, &mut state)
             .map_err(|skip| Refused::new(RestoreRefusal::Other, skip.message))?;
-        let mut done = restore::apply(&key, &plan.differences, &plan.folders, &self.objects);
+        let mut done = restore::apply(
+            &key,
+            &plan.differences,
+            &plan.folders,
+            &plan.missing,
+            &plan.extra,
+            &self.objects,
+        );
         done.left.extend(plan.held);
         let event_id = record(Event::CheckpointRestored {
             turn_event_id: request.turn_event_id,
@@ -434,6 +441,12 @@ struct Plan {
     differences: Vec<tree::Difference>,
     /// The folders of the record, which stay when they are left empty.
     folders: BTreeSet<String>,
+    /// The folders of the record that the folder lacks now, among the paths
+    /// named: an empty one holds no file that would bring it back.
+    missing: Vec<String>,
+    /// The folders the folder holds now and the record lacks, among the
+    /// paths named, which go once empty.
+    extra: Vec<String>,
     /// The files the folder holds and the record lacks, which a removal
     /// leaves because the record left them out (`ignored.rs`).
     held: Vec<LeftFile>,
@@ -467,6 +480,7 @@ fn plan(
             })
         };
         let recorded = tree::list(&mut trees, &target.tree)?;
+        let standing = tree::list(&mut trees, &now.tree)?;
         let ignored = Ignored::of(key, &recorded, objects);
         let mut held = Vec::new();
         let differences: Vec<tree::Difference> = tree::diff(&mut trees, &now.tree, &target.tree)?
@@ -479,7 +493,8 @@ fn plan(
                 after: difference.before,
             })
             .filter(|difference| {
-                let left_out = difference.before.is_none() && ignored.covers(key, &difference.path);
+                let left_out =
+                    difference.before.is_none() && ignored.covers(key, &difference.path, false);
                 if left_out {
                     held.push(LeftFile {
                         path: difference.path.clone(),
@@ -509,7 +524,14 @@ fn plan(
                             .as_ref()
                             .is_some_and(|root| root.holds(&difference.path))
                 }
-                Some(Node::File { kept, .. }) => !kept,
+                Some(Node::File {
+                    kept: false,
+                    sha256,
+                    ..
+                }) => !matches!(
+                    &difference.before,
+                    Some(Node::File { sha256: recorded, .. }) if recorded == sha256
+                ),
                 Some(_) => false,
             };
             let conflicts: Vec<String> = differences
@@ -531,6 +553,22 @@ fn plan(
         }
         Ok(Plan {
             differences,
+            extra: standing
+                .folders
+                .iter()
+                .filter(|folder| {
+                    covers(folder)
+                        && !recorded.folders.contains(*folder)
+                        && !ignored.covers(key, folder, true)
+                })
+                .cloned()
+                .collect(),
+            missing: recorded
+                .folders
+                .iter()
+                .filter(|folder| covers(folder) && !standing.folders.contains(*folder))
+                .cloned()
+                .collect(),
             folders: recorded.folders,
             held,
         })

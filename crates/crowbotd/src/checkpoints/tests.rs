@@ -564,3 +564,200 @@ fn a_restore_over_a_file_whose_content_no_record_kept_needs_a_confirmation() {
     };
     assert_eq!(removed, ["data.csv"]);
 }
+
+#[cfg(unix)]
+fn mode(bench: &Bench, path: &str) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(bench.path(path))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+#[cfg(unix)]
+fn chmod(bench: &Bench, path: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(bench.path(path), fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restore_brings_back_the_permission_bits_and_never_set_user_id() {
+    let mut bench = Bench::new();
+    bench.write("token.txt", b"KEY=1");
+    chmod(&bench, "token.txt", 0o600);
+    bench.write("run.sh", b"echo");
+    chmod(&bench, "run.sh", 0o750);
+    bench.write("tool", b"binary");
+    chmod(&bench, "tool", 0o4755);
+    let large = vec![b'x'; usize::try_from(CHECKPOINT_FILE_BYTES).unwrap() + 1];
+    bench.write("large.bin", &large);
+    chmod(&bench, "large.bin", 0o640);
+    let turn = bench.before();
+    fs::remove_file(bench.path("token.txt")).unwrap();
+    fs::remove_file(bench.path("tool")).unwrap();
+    chmod(&bench, "run.sh", 0o644);
+    chmod(&bench, "large.bin", 0o666);
+    bench.after(turn);
+    let changes = bench
+        .checkpoints
+        .changes(&bench.store, bench.conversation_id, turn)
+        .unwrap();
+    let listed: Vec<(&str, FileChangeKind)> = changes
+        .changes
+        .iter()
+        .map(|change| (change.path.as_str(), change.kind))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("large.bin", FileChangeKind::Changed),
+            ("run.sh", FileChangeKind::Changed),
+            ("token.txt", FileChangeKind::Removed),
+            ("tool", FileChangeKind::Removed),
+        ]
+    );
+    assert_eq!(
+        changes.changes[1].before.as_ref().unwrap().mode,
+        Some(0o750)
+    );
+    let Event::CheckpointRestored { restored, left, .. } =
+        bench.restore(turn, None, false).unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(restored, ["large.bin", "run.sh", "token.txt", "tool"]);
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(mode(&bench, "token.txt"), 0o600);
+    assert_eq!(mode(&bench, "run.sh"), 0o750);
+    assert_eq!(mode(&bench, "large.bin"), 0o640);
+    assert_eq!(mode(&bench, "tool"), 0o755, "no set-user-id comes back");
+    assert_eq!(bench.read("token.txt").as_deref(), Some(&b"KEY=1"[..]));
+}
+
+#[cfg(unix)]
+struct Draw(u64);
+
+#[cfg(unix)]
+impl Draw {
+    fn next(&mut self, below: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % below
+    }
+
+    fn path(&mut self) -> String {
+        const PARTS: [&str; 4] = ["a", "b", "c", "d"];
+        let depth = 1 + self.next(3);
+        (0..depth)
+            .map(|_| PARTS[usize::try_from(self.next(4)).unwrap()])
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn mode(&mut self) -> u32 {
+        [0o600, 0o640, 0o644, 0o700, 0o755][usize::try_from(self.next(5)).unwrap()]
+    }
+}
+
+#[cfg(unix)]
+fn on_disk(folder: &Path) -> std::collections::BTreeMap<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut found = std::collections::BTreeMap::new();
+    let mut next = vec![folder.to_owned()];
+    while let Some(dir) = next.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = path
+                .strip_prefix(folder)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let state = if metadata.file_type().is_symlink() {
+                format!("link {}", fs::read_link(&path).unwrap().display())
+            } else if metadata.is_dir() {
+                next.push(path);
+                "folder".to_owned()
+            } else {
+                format!(
+                    "file {:o} {}",
+                    metadata.permissions().mode() & 0o7777,
+                    sha256_hex(&fs::read(&path).unwrap())
+                )
+            };
+            found.insert(name, state);
+        }
+    }
+    found
+}
+
+#[cfg(unix)]
+fn mutate(bench: &Bench, draw: &mut Draw) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = draw.path();
+    let place = bench.path(&path);
+    if fs::symlink_metadata(&place).is_ok_and(|metadata| metadata.is_dir()) {
+        if draw.next(2) == 0 {
+            fs::remove_dir_all(&place).unwrap();
+        }
+        return;
+    }
+    let mut ancestor = place.parent();
+    while let Some(dir) = ancestor {
+        if dir == Path::new(&bench.folder) {
+            break;
+        }
+        if fs::symlink_metadata(dir).is_ok_and(|metadata| !metadata.is_dir()) {
+            fs::remove_file(dir).unwrap();
+        }
+        ancestor = dir.parent();
+    }
+    fs::create_dir_all(place.parent().unwrap()).unwrap();
+    match draw.next(5) {
+        0 => {
+            fs::remove_file(&place).ok();
+        }
+        1 => {
+            fs::remove_file(&place).ok();
+            std::os::unix::fs::symlink(format!("target-{}", draw.next(3)), &place).unwrap();
+        }
+        2 if place.is_file() => {
+            fs::set_permissions(&place, fs::Permissions::from_mode(draw.mode())).unwrap();
+        }
+        _ => {
+            fs::remove_file(&place).ok();
+            fs::write(&place, format!("content {}", draw.next(4))).unwrap();
+            fs::set_permissions(&place, fs::Permissions::from_mode(draw.mode())).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn any_folder_a_turn_changes_comes_back_as_it_was() {
+    for seed in 0..200 {
+        let mut bench = Bench::new();
+        let mut draw = Draw(seed);
+        for _ in 0..12 {
+            mutate(&bench, &mut draw);
+        }
+        let before = on_disk(Path::new(&bench.folder));
+        let turn = bench.before();
+        for _ in 0..1 + draw.next(10) {
+            mutate(&bench, &mut draw);
+        }
+        bench.after(turn);
+        let Event::CheckpointRestored { left, .. } = bench
+            .restore(turn, None, false)
+            .unwrap_or_else(|refused| panic!("seed {seed}: {refused:?}"))
+        else {
+            unreachable!()
+        };
+        assert!(left.is_empty(), "seed {seed}: {left:?}");
+        assert_eq!(on_disk(Path::new(&bench.folder)), before, "seed {seed}");
+    }
+}

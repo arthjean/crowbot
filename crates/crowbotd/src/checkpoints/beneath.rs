@@ -321,6 +321,16 @@ mod sys {
             written
         }
 
+        pub fn set_mode(&self, part: &str, mode: u32) -> io::Result<()> {
+            let file = self.open_file(part)?;
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            let mode = libc::mode_t::try_from(mode & 0o777).unwrap_or(0o600);
+            // SAFETY: the descriptor is open for the life of `file`.
+            checked(unsafe { libc::fchmod(file.as_raw_fd(), mode) })
+        }
+
         fn unlink(&self, part: &str, flags: libc::c_int) -> io::Result<()> {
             let part = name(part)?;
             // SAFETY: `part` is a valid C string that outlives the call.
@@ -498,6 +508,21 @@ mod sys {
                 std::fs::remove_file(&partial).ok();
             }
             written
+        }
+
+        pub fn set_mode(&self, part: &str, mode: u32) -> io::Result<()> {
+            let path = self.path.join(part);
+            let metadata = path.symlink_metadata()?;
+            if !metadata.is_file() {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            let mut permissions = metadata.permissions();
+            #[allow(
+                clippy::permissions_set_readonly_false,
+                reason = "Windows clears the read-only attribute alone"
+            )]
+            permissions.set_readonly(mode & 0o222 == 0);
+            std::fs::set_permissions(path, permissions)
         }
 
         pub fn remove_file(&self, part: &str) -> io::Result<()> {

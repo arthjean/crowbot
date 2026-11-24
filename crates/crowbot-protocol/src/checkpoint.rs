@@ -59,6 +59,11 @@ pub struct FileState {
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub executable: bool,
+    /// The permission bits (`0o777` at most). On Windows, `0o444` for a
+    /// read-only file and `0o666` otherwise. Absent from a record taken
+    /// before the daemon kept them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
     /// The daemon kept the content, so a restore can write it back. A file
     /// over the size a record keeps has its hash alone.
     pub kept: bool,

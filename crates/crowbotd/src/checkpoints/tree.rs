@@ -21,6 +21,8 @@ pub enum Node {
         sha256: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         executable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<u32>,
         kept: bool,
     },
     /// A symbolic link, with its target as the link holds it.
@@ -37,6 +39,7 @@ impl Node {
                 size,
                 sha256,
                 executable,
+                mode,
                 kept,
             } => Some(FileState {
                 kind: FileKind::File,
@@ -44,6 +47,7 @@ impl Node {
                 sha256: sha256.clone(),
                 target: None,
                 executable: *executable,
+                mode: *mode,
                 kept: *kept,
             }),
             Self::Link { target } => Some(FileState {
@@ -52,6 +56,7 @@ impl Node {
                 sha256: sha256_hex(target.as_bytes()),
                 target: Some(target.clone()),
                 executable: false,
+                mode: None,
                 kept: true,
             }),
             Self::Folder { .. } => None,
@@ -59,19 +64,28 @@ impl Node {
     }
 
     /// Whether two entries hold the same thing. The size follows the hash,
-    /// and whether a content was kept says nothing of the file.
+    /// whether a content was kept says nothing of the file, and a record
+    /// taken before the daemon kept the permission bits says nothing of them.
     pub fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (
                 Self::File {
-                    sha256, executable, ..
+                    sha256,
+                    executable,
+                    mode,
+                    ..
                 },
                 Self::File {
                     sha256: other_sha256,
                     executable: other_executable,
+                    mode: other_mode,
                     ..
                 },
-            ) => sha256 == other_sha256 && executable == other_executable,
+            ) => {
+                sha256 == other_sha256
+                    && executable == other_executable
+                    && (mode.is_none() || other_mode.is_none() || mode == other_mode)
+            }
             _ => self == other,
         }
     }
@@ -275,6 +289,7 @@ mod tests {
                 size: 1,
                 sha256: sha256.to_owned(),
                 executable: false,
+                mode: None,
                 kept: true,
             },
         }
@@ -307,6 +322,28 @@ mod tests {
     }
 
     #[test]
+    fn a_record_taken_before_the_permission_bits_reads_and_matches_any() {
+        let old: Vec<Entry> = serde_json::from_str(
+            r#"[{"name":"a","kind":"file","size":1,"sha256":"1","executable":true,"kept":true}]"#,
+        )
+        .unwrap();
+        let Node::File { mode, .. } = &old[0].node else {
+            unreachable!()
+        };
+        assert_eq!(*mode, None);
+        let with = |mode| Node::File {
+            size: 1,
+            sha256: "1".to_owned(),
+            executable: true,
+            mode,
+            kept: true,
+        };
+        assert!(old[0].node.same(&with(Some(0o755))));
+        assert!(with(Some(0o755)).same(&with(Some(0o755))));
+        assert!(!with(Some(0o755)).same(&with(Some(0o700))));
+    }
+
+    #[test]
     fn a_kept_content_is_not_a_change() {
         let kept = file("a", "1").node;
         let Node::File { size, sha256, .. } = kept.clone() else {
@@ -316,6 +353,7 @@ mod tests {
             size,
             sha256,
             executable: false,
+            mode: None,
             kept: false,
         };
         assert!(kept.same(&hash_alone));

@@ -53,6 +53,7 @@ struct Stamp {
     changed_ns: i128,
     inode: u64,
     executable: bool,
+    mode: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +107,7 @@ fn stamp(metadata: &std::fs::Metadata) -> Stamp {
                 + i128::from(metadata.ctime_nsec()),
             inode: metadata.ino(),
             executable: metadata.mode() & 0o111 != 0,
+            mode: metadata.mode() & 0o777,
         }
     }
     #[cfg(not(unix))]
@@ -115,6 +117,11 @@ fn stamp(metadata: &std::fs::Metadata) -> Stamp {
         changed_ns: nanos(metadata.created()),
         inode: 0,
         executable: false,
+        mode: if metadata.permissions().readonly() {
+            0o444
+        } else {
+            0o666
+        },
     }
 }
 
@@ -482,6 +489,7 @@ fn build(entries: &[(String, Kind)], hashed: &HashedFiles) -> Taken {
                     size: hashed.size,
                     sha256: hashed.sha256.clone(),
                     executable: hashed.stamp.executable,
+                    mode: Some(hashed.stamp.mode),
                     kept: hashed.kept,
                 }
             }
@@ -564,6 +572,7 @@ mod tests {
             changed_ns: 0,
             inode: 0,
             executable: false,
+            mode: 0o600,
         };
         let folder = dir.path().join("bot");
         std::fs::create_dir(&folder).unwrap();
