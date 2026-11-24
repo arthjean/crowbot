@@ -810,7 +810,9 @@ impl Workspace {
             }
             ServerMessage::DaemonInfo(info) => self.daemon_info = Some(info),
             // The rules of a bot have no surface in this client yet (EP-012).
-            ServerMessage::ApprovalRules { .. } | ServerMessage::ApprovalRuleAdded { .. } => {}
+            ServerMessage::ApprovalRules { .. }
+            | ServerMessage::ApprovalRuleAdded { .. }
+            | ServerMessage::Memory { .. } => {}
             ServerMessage::SearchResults(results) => self.palette_results(results),
             ServerMessage::BotDeleted { bot_id } => {
                 self.deleting.remove(&bot_id);

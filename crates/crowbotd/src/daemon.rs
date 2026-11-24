@@ -13,10 +13,10 @@ use std::time::Duration;
 use crowbot_protocol::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH as INSTRUCTIONS_LENGTH,
     BOT_MODEL_LENGTH as MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH as TITLE_LENGTH, BotDraft,
-    BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, PROTOCOL_VERSION,
-    PermissionLevel, Preferences, PreferencesPatch, RULE_ARGUMENT_BYTES, RULE_ARGUMENTS,
-    RULE_PROGRAM_BYTES, RuleDraft, SIDEBAR_WIDTH_LIMIT, ServerMessage, TOOL_CALL_LIMIT_MAX,
-    mascot_at,
+    BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, MemoryChange, MemoryOperation,
+    MemoryScope, PROTOCOL_VERSION, PermissionLevel, Preferences, PreferencesPatch,
+    RULE_ARGUMENT_BYTES, RULE_ARGUMENTS, RULE_PROGRAM_BYTES, RuleDraft, SIDEBAR_WIDTH_LIMIT,
+    ServerMessage, TOOL_CALL_LIMIT_MAX, mascot_at,
 };
 use tokio::sync::oneshot;
 
@@ -156,6 +156,8 @@ impl Daemon {
         .filter_map(|path| std::path::absolute(path).ok())
         .collect();
         let floors = Floors::new(std::env::home_dir(), kept);
+        let tools = Arc::new(Registry::new(&store));
+        let sections = Sections::new(&store);
         Self {
             store,
             database,
@@ -168,8 +170,8 @@ impl Daemon {
                 ..State::default()
             }),
             next_connection: AtomicU64::new(1),
-            tools: Arc::new(Registry::new()),
-            sections: Sections::new(),
+            tools,
+            sections,
             floors,
         }
     }
@@ -571,6 +573,60 @@ impl Daemon {
             .ok_or_else(|| Refusal::Other(format!("rule {rule_id} does not exist")))?;
         self.publish_rules(bot_id);
         Ok(())
+    }
+
+    /// The active memory a bot sees.
+    pub fn memory(&self, bot_id: i64) -> Result<ServerMessage, Refusal> {
+        let entries = self
+            .store
+            .with(|store| store.bot(bot_id)?.map(|_| store.memory(bot_id)).transpose())?;
+        let entries = entries.ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        Ok(ServerMessage::Memory { bot_id, entries })
+    }
+
+    /// Hands a person's change of a bot's memory to the bot's current
+    /// conversation, which records it among its events and tells every
+    /// attached client the memory that results.
+    pub fn change_memory(
+        self: &Arc<Self>,
+        bot_id: i64,
+        operations: Vec<MemoryOperation>,
+        sink: Sink,
+    ) -> Result<(), Refusal> {
+        let row = self
+            .store
+            .with(|store| store.bot(bot_id))?
+            .ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        let conversation_id = if row.current_conversation_id > 0 {
+            row.current_conversation_id
+        } else {
+            self.new_conversation(bot_id).map_err(Refusal::Other)?.id
+        };
+        let handle = self.conversation(conversation_id).map_err(Refusal::Other)?;
+        handle.send(Command::ChangeMemory { operations, sink });
+        Ok(())
+    }
+
+    /// Tells every attached client the memory of a bot after a change, and
+    /// that of every other bot when the change touched the user's entries,
+    /// which every bot reads.
+    pub fn publish_memory(&self, bot_id: i64, changes: &[MemoryChange]) {
+        let everyone = changes
+            .iter()
+            .any(|change| change.scope == MemoryScope::User);
+        let others = if everyone {
+            self.store
+                .with(|store| store.bots())
+                .map(|rows| rows.into_iter().map(|row| row.bot.id).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for id in std::iter::once(bot_id).chain(others.into_iter().filter(|id| *id != bot_id)) {
+            if let Ok(memory) = self.memory(id) {
+                self.state().broadcast(&memory);
+            }
+        }
     }
 
     /// Tells every attached client the rules of the bot, and each of its

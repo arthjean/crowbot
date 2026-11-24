@@ -226,6 +226,10 @@ impl ClientState {
                 .add_approval_rule(bot_id, rule)
                 .map(|rule_id| reply(ServerMessage::ApprovalRuleAdded { bot_id, rule_id })),
             ClientMessage::DeleteApprovalRule { rule_id } => daemon.delete_approval_rule(rule_id),
+            ClientMessage::ListMemory { bot_id } => daemon.memory(bot_id).map(reply),
+            ClientMessage::ChangeMemory { bot_id, operations } => {
+                daemon.change_memory(bot_id, operations, sink.clone())
+            }
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
             }

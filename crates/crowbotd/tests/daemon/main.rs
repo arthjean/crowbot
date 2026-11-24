@@ -10,6 +10,7 @@ mod conversation;
 mod endpoint;
 #[cfg(target_os = "linux")]
 mod guard;
+mod memory;
 mod prompt;
 mod providers;
 mod queue;

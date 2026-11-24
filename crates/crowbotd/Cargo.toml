@@ -14,6 +14,7 @@ workspace = true
 agent-client-protocol = { version = "=5.2.0", features = ["process", "unstable_auth_status", "unstable_end_turn_token_usage"] }
 crowbot-protocol = { workspace = true, features = ["transport"] }
 flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+regex = "1.13.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "system-proxy"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = { version = "1.2.3", default-features = false, features = ["derive", "std"] }
@@ -23,6 +24,7 @@ serde_path_to_error = "0.1.20"
 sha2 = "0.11.1"
 tar = { version = "0.4.46", default-features = false }
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-normalization = "0.1.26"
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]

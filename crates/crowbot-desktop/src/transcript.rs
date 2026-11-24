@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, TimedEvent, ToolEffect, ToolKind, ToolStatus, TurnEnd, TurnOrigin, UserMessage,
+    Interruption, MemoryAuthor, MemoryChange, TimedEvent, ToolEffect, ToolKind, ToolStatus,
+    TurnEnd, TurnOrigin, UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -83,6 +84,11 @@ pub enum Notice {
     ToolRefused {
         tool: String,
         message: String,
+    },
+    /// The bot's memory changed: what each operation of one change did.
+    MemoryChanged {
+        author: MemoryAuthor,
+        changes: Vec<MemoryChange>,
     },
 }
 
@@ -672,6 +678,9 @@ impl Transcript {
             }
             Event::ToolRefused { tool, message } => {
                 self.notice(seq, at_ms, Notice::ToolRefused { tool, message })
+            }
+            Event::MemoryChanged { author, changes } => {
+                self.notice(seq, at_ms, Notice::MemoryChanged { author, changes })
             }
         }
     }

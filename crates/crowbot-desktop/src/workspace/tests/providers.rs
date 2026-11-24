@@ -487,6 +487,51 @@ fn a_conversation_with_daemon_tools_and_a_note_opens_and_shows_each_row(cx: &mut
     );
 }
 
+/// A conversation that holds a change of the bot's memory opens, and the
+/// change shows as a notice of what was kept (EP-004 of the harness PRD).
+#[gpui::test]
+fn a_conversation_with_a_memory_change_opens_and_shows_it(cx: &mut TestAppContext) {
+    use crowbot_protocol::{MemoryAuthor, MemoryChange, MemoryChangeKind, MemoryScope};
+
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::user_text("remember that I live in Lyon"),
+                Event::MemoryChanged {
+                    author: MemoryAuthor::Bot,
+                    changes: vec![MemoryChange {
+                        kind: MemoryChangeKind::Added,
+                        entry_id: 1,
+                        replaced_id: None,
+                        scope: MemoryScope::User,
+                        text: "The user lives in Lyon.".to_owned(),
+                        core: true,
+                    }],
+                },
+                Event::MessageText("Noted.".to_owned()),
+                Event::TurnEnded(TurnEnd::Completed),
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 1);
+    assert!(shown(cx, notices[0]), "{}", notices[0]);
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::MemoryChanged { changes, .. })
+            if changes[0].text == "The user lives in Lyon."
+    )));
+}
+
 /// A conversation that holds a turn the daemon started and turns its guards
 /// stopped opens, and each row says so (EP-002 of the harness PRD).
 #[gpui::test]

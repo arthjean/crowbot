@@ -2,6 +2,7 @@ mod bot;
 mod endpoint;
 mod event;
 mod folders;
+mod memory;
 mod message;
 mod preferences;
 mod provider;
@@ -25,6 +26,11 @@ pub use event::{
     ToolStatus, TurnEnd, TurnOrigin, TurnUsage, UserMessage, cut_text,
 };
 pub use folders::Folders;
+pub use memory::{
+    CORE_MEMORY_BOT_CHARACTERS, CORE_MEMORY_USER_CHARACTERS, MEMORY_ENTRY_CHARACTERS,
+    MEMORY_OPERATIONS, MemoryAuthor, MemoryChange, MemoryChangeKind, MemoryEntry, MemoryOperation,
+    MemoryScope, ScanCategory, ScanFinding, ScanSeverity,
+};
 pub use message::{
     ClientMessage, ConversationSnapshot, ConversationSummary, MESSAGE_LENGTH, PROTOCOL_VERSION,
     QueueState, QueuedMessage, ServerMessage, TimedEvent,

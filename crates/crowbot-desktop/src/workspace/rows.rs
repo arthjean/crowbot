@@ -2,7 +2,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
-use crowbot_protocol::{ApprovalDecision, ApprovalReason, FailureCause, ProviderState, TurnOrigin};
+use crowbot_protocol::{
+    ApprovalDecision, ApprovalReason, FailureCause, MemoryAuthor, MemoryChange, MemoryChangeKind,
+    ProviderState, TurnOrigin,
+};
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
     Stateful, Window, div, prelude::*,
@@ -187,7 +190,30 @@ pub(super) fn notice_text(notice: &Notice) -> String {
         Notice::ToolRefused { tool, message } => {
             format!("Crow Bot did not run the tool {tool}: {message}")
         }
+        Notice::MemoryChanged { author, changes } => memory_text(*author, changes),
     }
+}
+
+/// What a change of memory did, in the words of the person who reads it.
+fn memory_text(author: MemoryAuthor, changes: &[MemoryChange]) -> String {
+    let who = match author {
+        MemoryAuthor::Bot => "The bot changed its memory",
+        MemoryAuthor::Review => "The bot's review changed its memory",
+        MemoryAuthor::User => "You changed the bot's memory",
+    };
+    let parts: Vec<String> = changes
+        .iter()
+        .map(|change| match change.kind {
+            MemoryChangeKind::Added => format!("kept \u{201c}{}\u{201d}", change.text),
+            MemoryChangeKind::Corrected => format!(
+                "corrected #{} to \u{201c}{}\u{201d}",
+                change.replaced_id.unwrap_or_default(),
+                change.text
+            ),
+            MemoryChangeKind::Retired => format!("retired \u{201c}{}\u{201d}", change.text),
+        })
+        .collect();
+    format!("{who}: {}.", parts.join("; "))
 }
 
 fn column(key: i64, top: gpui::Pixels, last: bool, body: impl IntoElement) -> AnyElement {
@@ -854,6 +880,7 @@ fn approval_outcome(
 mod tests {
 
     use chrono::Duration;
+    use crowbot_protocol::MemoryScope;
 
     use super::*;
 
@@ -889,6 +916,30 @@ mod tests {
                 to: "codex".to_owned(),
             }),
             "The bot moved from Claude to ChatGPT. ChatGPT received what was said before."
+        );
+        assert_eq!(
+            notice_text(&Notice::MemoryChanged {
+                author: MemoryAuthor::Bot,
+                changes: vec![
+                    MemoryChange {
+                        kind: MemoryChangeKind::Added,
+                        entry_id: 3,
+                        replaced_id: None,
+                        scope: MemoryScope::User,
+                        text: "Lives in Lyon".to_owned(),
+                        core: true,
+                    },
+                    MemoryChange {
+                        kind: MemoryChangeKind::Corrected,
+                        entry_id: 4,
+                        replaced_id: Some(1),
+                        scope: MemoryScope::Bot,
+                        text: "Uses bun".to_owned(),
+                        core: false,
+                    },
+                ],
+            }),
+            "The bot changed its memory: kept \u{201c}Lives in Lyon\u{201d}; corrected #1 to \u{201c}Uses bun\u{201d}."
         );
         assert_eq!(
             notice_text(&Notice::ModelUnavailable {

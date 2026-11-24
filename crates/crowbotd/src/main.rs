@@ -4,13 +4,16 @@ mod daemon;
 mod digest;
 mod guard;
 mod handoff;
+mod history;
 mod instance;
 mod lifetime;
 mod mcp;
+mod memory;
 mod private;
 mod prompt;
 mod provider;
 mod runtime;
+mod scan;
 mod server;
 #[cfg(target_os = "linux")]
 mod sign_in_page;

@@ -1,4 +1,5 @@
 mod bots;
+mod memory;
 mod preferences;
 mod rules;
 mod search;
@@ -6,6 +7,8 @@ mod sessions;
 mod usage;
 
 pub use bots::{BotRow, NewBot};
+pub use memory::{MemoryWriter, OperationResult};
+pub use search::{HistorySearch, HistoryWindow};
 pub use sessions::{ProviderSession, ProviderSetting, session_fingerprint};
 pub use usage::{Reported, Tokens};
 
@@ -20,7 +23,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -233,6 +236,84 @@ CREATE TABLE approval_rules (
 );
 ";
 
+/// Memory entries, each a row that is never rewritten but to retire it: a
+/// correction retires the entry and adds one that names it. The log of
+/// changes gives each add and retire a sequence number, which the prompt
+/// sections take as their version. The search index holds the text of the
+/// active entries, by word, and the title and input of each tool call.
+const SCHEMA_V12: &str = "
+CREATE TABLE memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope TEXT NOT NULL,
+    bot_id INTEGER REFERENCES bots(id),
+    text TEXT NOT NULL,
+    normalized TEXT NOT NULL,
+    core INTEGER NOT NULL DEFAULT 0,
+    author TEXT NOT NULL,
+    source_event_id INTEGER,
+    replaces INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    retired_at_ms INTEGER
+);
+CREATE INDEX memory_active ON memory(scope, bot_id) WHERE retired_at_ms IS NULL;
+CREATE TABLE memory_changes (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX memory_changes_by_entry ON memory_changes(entry_id);
+CREATE VIRTUAL TABLE memory_text USING fts5(
+    body,
+    tokenize = 'unicode61 remove_diacritics 2',
+    content = '',
+    contentless_delete = 1
+);
+CREATE TRIGGER memory_text_insert AFTER INSERT ON memory
+WHEN new.retired_at_ms IS NULL
+BEGIN
+    INSERT INTO memory_text (rowid, body) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER memory_text_retire AFTER UPDATE OF retired_at_ms ON memory
+WHEN old.retired_at_ms IS NULL AND new.retired_at_ms IS NOT NULL
+BEGIN
+    DELETE FROM memory_text WHERE rowid = old.id;
+END;
+CREATE TRIGGER memory_text_delete AFTER DELETE ON memory
+WHEN old.retired_at_ms IS NULL
+BEGIN
+    DELETE FROM memory_text WHERE rowid = old.id;
+END;
+CREATE TRIGGER tool_text_insert AFTER INSERT ON events
+WHEN new.kind = 'tool_call_started' AND json_valid(new.payload)
+BEGIN
+    INSERT INTO event_text (rowid, body) VALUES (new.id,
+        COALESCE(json_extract(new.payload, '$.data.title'), '') || ' ' ||
+        COALESCE(json_extract(new.payload, '$.data.input'), ''));
+END;
+CREATE TRIGGER tool_text_update AFTER UPDATE OF payload ON events
+WHEN new.kind = 'tool_call_started'
+BEGIN
+    DELETE FROM event_text WHERE rowid = old.id;
+    INSERT INTO event_text (rowid, body)
+        SELECT new.id,
+            COALESCE(json_extract(new.payload, '$.data.title'), '') || ' ' ||
+            COALESCE(json_extract(new.payload, '$.data.input'), '')
+        WHERE json_valid(new.payload);
+END;
+CREATE TRIGGER tool_text_delete AFTER DELETE ON events
+WHEN old.kind = 'tool_call_started'
+BEGIN
+    DELETE FROM event_text WHERE rowid = old.id;
+END;
+INSERT INTO event_text (rowid, body)
+    SELECT id,
+        COALESCE(json_extract(payload, '$.data.title'), '') || ' ' ||
+        COALESCE(json_extract(payload, '$.data.input'), '')
+    FROM events
+    WHERE kind = 'tool_call_started' AND json_valid(payload);
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -267,6 +348,9 @@ pub enum StoreError {
     Json(serde_json::Error),
     Io(std::io::Error),
     NewerSchema(i64),
+    /// A change the caller asked for that the store does not make, with
+    /// the words that say why. Nothing of it was written.
+    Refused(String),
 }
 
 impl fmt::Display for StoreError {
@@ -279,6 +363,7 @@ impl fmt::Display for StoreError {
                 formatter,
                 "the database has schema version {version}, newer than this daemon supports ({SCHEMA_VERSION})"
             ),
+            Self::Refused(message) => formatter.write_str(message),
         }
     }
 }
@@ -390,6 +475,9 @@ impl Store {
         }
         if version < 11 {
             transaction.execute_batch(SCHEMA_V11)?;
+        }
+        if version < 12 {
+            transaction.execute_batch(SCHEMA_V12)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -882,6 +970,7 @@ fn kind(event: &Event) -> &'static str {
         Event::ModelUnavailable { .. } => "model_unavailable",
         Event::ProviderChanged { .. } => "provider_changed",
         Event::ToolRefused { .. } => "tool_refused",
+        Event::MemoryChanged { .. } => "memory_changed",
     }
 }
 
@@ -902,6 +991,12 @@ pub struct SharedStore(Arc<Mutex<Store>>);
 impl SharedStore {
     pub fn new(store: Store) -> Self {
         Self(Arc::new(Mutex::new(store)))
+    }
+
+    /// A store in memory, for the tests of modules that need one.
+    #[cfg(test)]
+    pub fn in_memory() -> Self {
+        Self::new(Store::from_connection(Connection::open_in_memory().unwrap()).unwrap())
     }
 
     pub fn with<R>(&self, read_or_write: impl FnOnce(&Store) -> R) -> R {

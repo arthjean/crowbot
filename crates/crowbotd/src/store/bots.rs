@@ -285,6 +285,15 @@ impl Store {
         transaction.execute("DELETE FROM conversations WHERE bot_id = ?1", params![id])?;
         transaction.execute("DELETE FROM bot_models WHERE bot_id = ?1", params![id])?;
         transaction.execute("DELETE FROM approval_rules WHERE bot_id = ?1", params![id])?;
+        transaction.execute(
+            "DELETE FROM memory_changes WHERE entry_id IN
+                (SELECT id FROM memory WHERE scope = 'bot' AND bot_id = ?1)",
+            params![id],
+        )?;
+        transaction.execute(
+            "DELETE FROM memory WHERE scope = 'bot' AND bot_id = ?1",
+            params![id],
+        )?;
         let deleted = transaction.execute("DELETE FROM bots WHERE id = ?1", params![id])?;
         transaction.commit()?;
         Ok(deleted > 0)

@@ -380,7 +380,7 @@ mod tests {
     fn session(kind: SessionKind) -> (Session, mpsc::UnboundedReceiver<ToolSignal>) {
         let (signals, received) = mpsc::unbounded_channel();
         let session = Session {
-            registry: Arc::new(Registry::new()),
+            registry: Arc::new(Registry::new(&crate::store::SharedStore::in_memory())),
             context: ToolContext {
                 bot_id: 1,
                 conversation_id: 2,

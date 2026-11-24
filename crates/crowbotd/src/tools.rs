@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::store::{Store, StoreError};
+use crate::store::{SharedStore, Store, StoreError};
 
 /// What a provider session is for. A kind may call only the tools that list it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,11 +316,13 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new() -> Self {
+    pub fn new(store: &SharedStore) -> Self {
         let mut registry = Self {
             tools: BTreeMap::new(),
         };
         registry.add(ReadOutput);
+        registry.add(crate::memory::MemoryTool);
+        registry.add(crate::history::SessionSearch(store.clone()));
         #[cfg(debug_assertions)]
         if let Some(folder) = crate::test_harness::folder() {
             crate::test_harness::add_tools(&mut registry, &folder);
@@ -490,7 +492,7 @@ mod tests {
 
     #[test]
     fn the_schema_comes_from_the_input_type() {
-        let mut registry = Registry::new();
+        let mut registry = Registry::new(&SharedStore::in_memory());
         registry.add(Note);
         let listing = registry.get("note").unwrap().listing();
         let schema = &listing["inputSchema"];
@@ -507,7 +509,7 @@ mod tests {
 
     #[test]
     fn each_kind_sees_the_tools_that_list_it() {
-        let mut registry = Registry::new();
+        let mut registry = Registry::new(&SharedStore::in_memory());
         registry.add(Note);
         let names = |kind| {
             registry
@@ -524,9 +526,28 @@ mod tests {
         assert_eq!(registry.effect("nothing"), None);
     }
 
+    #[test]
+    fn a_delegated_session_has_no_memory_tool_and_every_kind_can_search() {
+        let registry = Registry::new(&SharedStore::in_memory());
+        let has = |kind, name| registry.for_kind(kind).any(|tool| tool.name == name);
+        assert!(!has(SessionKind::Delegated, "memory"));
+        for kind in [
+            SessionKind::Conversation,
+            SessionKind::Routine,
+            SessionKind::Review,
+        ] {
+            assert!(has(kind, "memory"), "{kind:?}");
+        }
+        for kind in ALL_KINDS {
+            assert!(has(*kind, "session_search"), "{kind:?}");
+        }
+        assert_eq!(registry.effect("memory"), Some(ToolEffect::BotState));
+        assert_eq!(registry.effect("session_search"), Some(ToolEffect::Read));
+    }
+
     #[tokio::test]
     async fn arguments_that_do_not_fit_name_their_first_wrong_field_and_run_nothing() {
-        let mut registry = Registry::new();
+        let mut registry = Registry::new(&SharedStore::in_memory());
         registry.add(Note);
         let note = registry.get("note").unwrap();
         let start = |arguments: Value| note.prepare(context(SessionKind::Review), arguments);

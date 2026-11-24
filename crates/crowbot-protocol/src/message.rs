@@ -2,12 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::bot::{BotDraft, BotPatch, BotSummary, present};
 use crate::event::{ApprovalDecision, Event, TurnUsage};
+use crate::memory::{MemoryEntry, MemoryOperation};
 use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
 use crate::rules::{ApprovalRule, RuleDraft};
 use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -169,6 +170,16 @@ pub enum ClientMessage {
     DeleteApprovalRule {
         rule_id: i64,
     },
+    /// Asks for the active memory of a bot: its own entries and the user's.
+    ListMemory {
+        bot_id: i64,
+    },
+    /// Adds, corrects, or retires memory entries as a person, all or none.
+    /// The change is recorded in the bot's current conversation.
+    ChangeMemory {
+        bot_id: i64,
+        operations: Vec<MemoryOperation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +302,12 @@ pub enum ServerMessage {
     ApprovalRuleAdded {
         bot_id: i64,
         rule_id: i64,
+    },
+    /// The active memory of a bot, the oldest first. Answers `ListMemory`,
+    /// and every attached client receives it after the memory changes.
+    Memory {
+        bot_id: i64,
+        entries: Vec<MemoryEntry>,
     },
 }
 

@@ -1,8 +1,8 @@
 use crowbot_protocol::{
     ConversationHit, Event, MessageAuthor, MessageHit, SEARCH_MESSAGE_TERM_LENGTH,
-    SEARCH_QUERY_LENGTH, SearchResults,
+    SEARCH_QUERY_LENGTH, SearchResults, TimedEvent,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use super::{Store, StoreError};
 
@@ -137,6 +137,7 @@ impl Store {
              JOIN events e ON e.id = event_text.rowid
              JOIN conversations c ON c.id = e.conversation_id
              WHERE event_text MATCH ?1 AND c.bot_id IS NOT NULL
+                AND e.kind IN ('user_text', 'message_text')
              ORDER BY event_text.rowid DESC LIMIT ?2",
         )?;
         let rows = statement
@@ -170,6 +171,180 @@ impl Store {
     }
 }
 
+/// How many conversations a search of a bot's history gives at most.
+pub const HISTORY_CONVERSATIONS: usize = 10;
+/// How many hits of one conversation a search of a bot's history gives.
+pub const HISTORY_HITS: usize = 3;
+/// How many matching events a search of a bot's history reads at most.
+const HISTORY_ROWS: i64 = 200;
+
+/// One event of a bot's history that a search matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryHit {
+    pub event_id: i64,
+    pub at_ms: i64,
+    /// Who wrote it: `user`, `bot`, or `tool call`.
+    pub author: &'static str,
+    pub snippet: String,
+}
+
+/// The hits of one conversation, the newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryConversation {
+    pub conversation_id: i64,
+    pub title: Option<String>,
+    pub last_activity_ms: i64,
+    pub hits: Vec<HistoryHit>,
+}
+
+/// The events around one event of a bot's history, with the title of
+/// their conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryWindow {
+    pub title: Option<String>,
+    pub events: Vec<TimedEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistorySearch {
+    /// No word of the query is as long as `SEARCH_MESSAGE_TERM_LENGTH`, so
+    /// nothing was searched.
+    TooShort,
+    Found(Vec<HistoryConversation>),
+}
+
+impl Store {
+    /// Searches the messages and tool calls of a bot's conversations, except
+    /// `running`, by every word of the query, and groups the hits by
+    /// conversation, the most recent hit first. It reads the database only.
+    pub fn search_history(
+        &self,
+        bot_id: i64,
+        running: i64,
+        query: &str,
+    ) -> Result<HistorySearch, StoreError> {
+        let query: String = query.trim().chars().take(SEARCH_QUERY_LENGTH).collect();
+        let terms = message_terms(&query);
+        if terms.is_empty() {
+            return Ok(HistorySearch::TooShort);
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT e.id, e.conversation_id, e.payload, e.created_at_ms, c.title,
+                (SELECT MAX(created_at_ms) FROM events WHERE conversation_id = c.id)
+             FROM event_text
+             JOIN events e ON e.id = event_text.rowid
+             JOIN conversations c ON c.id = e.conversation_id
+             WHERE event_text MATCH ?1 AND c.bot_id = ?2 AND c.id != ?3
+                AND e.kind IN ('user_text', 'message_text', 'tool_call_started')
+             ORDER BY event_text.rowid DESC LIMIT ?4",
+        )?;
+        let rows = statement
+            .query_map(
+                params![match_expression(&terms), bot_id, running, HISTORY_ROWS],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut found: Vec<HistoryConversation> = Vec::new();
+        for (event_id, conversation_id, payload, at_ms, title, last) in rows {
+            let (author, text) = match serde_json::from_str(&payload)? {
+                Event::UserText(message) => ("user", message.text),
+                Event::MessageText(text) => ("bot", text),
+                Event::ToolCallStarted { title, input, .. } => (
+                    "tool call",
+                    match input {
+                        Some(input) => format!("{title} {input}"),
+                        None => title,
+                    },
+                ),
+                _ => continue,
+            };
+            let at = match found
+                .iter()
+                .position(|group| group.conversation_id == conversation_id)
+            {
+                Some(at) => at,
+                None if found.len() < HISTORY_CONVERSATIONS => {
+                    found.push(HistoryConversation {
+                        conversation_id,
+                        title,
+                        last_activity_ms: last.unwrap_or(at_ms),
+                        hits: Vec::new(),
+                    });
+                    found.len() - 1
+                }
+                None => continue,
+            };
+            let group = &mut found[at];
+            if group.hits.len() < HISTORY_HITS {
+                group.hits.push(HistoryHit {
+                    event_id,
+                    at_ms,
+                    author,
+                    snippet: snippet(&text, &terms),
+                });
+            }
+        }
+        Ok(HistorySearch::Found(found))
+    }
+
+    /// The events around `event_id` in a conversation of the bot: up to
+    /// `radius` before it, the event, and up to `radius` after it, with the
+    /// conversation's title. `None` when the event is not in that
+    /// conversation of that bot.
+    pub fn history_window(
+        &self,
+        bot_id: i64,
+        conversation_id: i64,
+        event_id: i64,
+        radius: usize,
+    ) -> Result<Option<HistoryWindow>, StoreError> {
+        let title = self
+            .connection
+            .query_row(
+                "SELECT c.title FROM events e JOIN conversations c ON c.id = e.conversation_id
+                 WHERE e.id = ?1 AND c.id = ?2 AND c.bot_id = ?3",
+                params![event_id, conversation_id, bot_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(title) = title else {
+            return Ok(None);
+        };
+        let radius = i64::try_from(radius).unwrap_or(i64::MAX);
+        let read = |sql: &str| -> Result<Vec<(i64, String, i64)>, StoreError> {
+            let mut statement = self.connection.prepare(sql)?;
+            let rows = statement
+                .query_map(params![conversation_id, event_id, radius], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        let mut rows = read(
+            "SELECT id, payload, created_at_ms FROM events
+             WHERE conversation_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+        )?;
+        rows.reverse();
+        rows.extend(read(
+            "SELECT id, payload, created_at_ms FROM events
+             WHERE conversation_id = ?1 AND id >= ?2 ORDER BY id LIMIT ?3 + 1",
+        )?);
+        Ok(Some(HistoryWindow {
+            title,
+            events: super::timed(rows)?,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -179,7 +354,7 @@ mod tests {
 
     use super::super::{
         EventsWindow, NewBot, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
-        SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_VERSION,
+        SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_VERSION,
     };
     use super::*;
 
@@ -219,6 +394,135 @@ mod tests {
             .append(conversation_id, &Event::TurnEnded(TurnEnd::Completed))
             .unwrap();
         (user, answer)
+    }
+
+    fn tool_call(store: &Store, conversation_id: i64, title: &str, input: &str) -> i64 {
+        store
+            .append(
+                conversation_id,
+                &Event::ToolCallStarted {
+                    id: "t1".to_owned(),
+                    title: title.to_owned(),
+                    status: None,
+                    kind: None,
+                    input: Some(input.to_owned()),
+                    effect: None,
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_history_search_groups_the_hits_of_the_bot_by_conversation_and_leaves_out_the_running_one()
+    {
+        let store = store();
+        let (ada, first) = bot(&store, "Ada", "");
+        let (grace, other) = bot(&store, "Grace", "");
+        let second = store.new_conversation(ada).unwrap().unwrap().id;
+        let running = store.new_conversation(ada).unwrap().unwrap().id;
+        let (asked, _) = turn(&store, first, "the albatross migrates north", "noted");
+        let (_, answered) = turn(&store, second, "and then?", "the albatross came back");
+        turn(&store, running, "albatross again", "yes");
+        turn(&store, other, "albatross for Grace", "ok");
+        let tool = tool_call(
+            &store,
+            second,
+            "Run cargo test",
+            "cargo test --package albatross",
+        );
+        let HistorySearch::Found(found) = store.search_history(ada, running, "albatross").unwrap()
+        else {
+            panic!("the query has a long word");
+        };
+        let conversations: Vec<i64> = found.iter().map(|group| group.conversation_id).collect();
+        assert_eq!(conversations, [second, first]);
+        let hits: Vec<(i64, &str)> = found[0]
+            .hits
+            .iter()
+            .map(|hit| (hit.event_id, hit.author))
+            .collect();
+        assert_eq!(hits, [(tool, "tool call"), (answered, "bot")]);
+        assert!(
+            found[0].hits[0]
+                .snippet
+                .contains("cargo test --package albatross")
+        );
+        assert_eq!(found[1].hits[0].event_id, asked);
+        assert!(found.iter().all(|group| group.conversation_id != other));
+        let HistorySearch::Found(by_title) = store.search_history(ada, running, "cargo").unwrap()
+        else {
+            panic!("the query has a long word");
+        };
+        assert_eq!(by_title[0].hits[0].event_id, tool);
+        assert_eq!(
+            store.search_history(ada, running, "an ox").unwrap(),
+            HistorySearch::TooShort
+        );
+        assert_eq!(
+            store.search_history(grace, other, "albatross").unwrap(),
+            HistorySearch::Found(Vec::new())
+        );
+        // The client's search reads messages only.
+        assert!(store.search(1, "cargo").unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn a_history_window_holds_the_events_around_one_of_the_bot() {
+        let store = store();
+        let (ada, first) = bot(&store, "Ada", "");
+        let (grace, _) = bot(&store, "Grace", "");
+        let mut ids = Vec::new();
+        for index in 0..15 {
+            ids.push(turn(&store, first, &format!("question {index}"), "answer").0);
+        }
+        let focus = ids[7];
+        let events = store
+            .history_window(ada, first, focus, 4)
+            .unwrap()
+            .unwrap()
+            .events;
+        let window: Vec<i64> = events.iter().map(|event| event.id).collect();
+        assert_eq!(window, ((focus - 4)..=(focus + 4)).collect::<Vec<_>>());
+        assert!(
+            store
+                .history_window(grace, first, focus, 4)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .history_window(ada, first + 1, focus, 4)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_version_11_database_indexes_its_tool_calls() {
+        let connection = Connection::open_in_memory().unwrap();
+        for schema in [
+            SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+            SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
+        ] {
+            connection.execute_batch(schema).unwrap();
+        }
+        connection.pragma_update(None, "user_version", 11).unwrap();
+        connection
+            .execute_batch(
+                r##"INSERT INTO bots (name, avatar_color, avatar_glyph, provider, workspace, created_at_ms)
+                    VALUES ('Atlas', '#3b82f6', 'A', 'claude', '/work', 5);
+                 INSERT INTO conversations (bot_id, provider, cwd, created_at_ms)
+                    VALUES (1, 'claude', '/work', 6), (1, 'claude', '/work', 6);
+                 INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES
+                    (1, 'tool_call_started', '{"type":"tool_call_started","data":{"id":"t","title":"Read notes","status":null,"input":"pelican.txt"}}', 7);"##,
+            )
+            .unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        let HistorySearch::Found(found) = store.search_history(1, 2, "pelican").unwrap() else {
+            panic!("the query has a long word");
+        };
+        assert_eq!(found[0].hits[0].event_id, 1);
+        assert!(store.memory(1).unwrap().is_empty());
     }
 
     fn snippets(results: &SearchResults) -> Vec<&str> {

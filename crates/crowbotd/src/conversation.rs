@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
-    FailureCause, Interruption, MESSAGE_LENGTH, QueueState, ServerMessage, TurnEnd, TurnOrigin,
-    UserMessage,
+    FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryOperation, QueueState,
+    ServerMessage, TurnEnd, TurnOrigin, UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -22,8 +22,8 @@ use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
 use crate::store::{
-    BotRow, Conversation, EventsPage, ProviderSession, Recorder, Reported, SharedStore, StoreError,
-    Tokens, session_fingerprint,
+    BotRow, Conversation, EventsPage, MemoryWriter, ProviderSession, Recorder, Reported,
+    SharedStore, StoreError, Tokens, session_fingerprint,
 };
 use crate::tools::{Outputs, SessionKind, ToolContext, TurnGate};
 
@@ -101,6 +101,12 @@ pub enum Command {
     /// The bot moved to Full access, or its rules changed: each approval
     /// that waits is answered again from the sources as they now stand.
     StandingChanged,
+    /// A person changes the bot's memory; the change is recorded in this
+    /// conversation, in its place among the events.
+    ChangeMemory {
+        operations: Vec<MemoryOperation>,
+        sink: Sink,
+    },
     /// The bot is being deleted, or the daemon stops: the running turn stops,
     /// then the task ends and tells so through `done`. An agent that has not
     /// ended its turn after `patience` is closed.
@@ -193,6 +199,11 @@ struct Session {
     _endpoint: Option<SessionEndpoint>,
     /// The provider's id of the session, once the agent started it.
     provider_session_id: Option<String>,
+    /// The size of the context the agent reported last.
+    context_used: Option<u64>,
+    /// The agent reported a smaller context than before: it compacted it,
+    /// and the next note sends again what renews (`prompt.rs`).
+    compacted: bool,
 }
 
 /// What the daemon watches in the turn that runs (`guard.rs`).
@@ -540,7 +551,41 @@ impl Actor {
             Command::SendQueuedNow { queue_id, sink } => self.send_queued_now(queue_id, &sink),
             Command::ResumeQueue { sink } => self.resume_queue(&sink),
             Command::StandingChanged => self.review_approvals(),
+            Command::ChangeMemory { operations, sink } => self.change_memory(&operations, &sink),
             Command::ShutDown { done, patience } => self.shut_down(done, patience),
+        }
+    }
+
+    /// Applies a person's change of the bot's memory, all or none, with the
+    /// event that records it, after the text still in memory.
+    fn change_memory(&mut self, operations: &[MemoryOperation], sink: &Sink) {
+        let closed = self.recorder.close();
+        self.report_store(closed);
+        let writer = MemoryWriter {
+            author: MemoryAuthor::User,
+            bot_id: self.bot_id,
+            default_source: None,
+        };
+        let id = self.id;
+        match self
+            .store
+            .with(|store| store.record_memory_change(id, &writer, operations))
+        {
+            Ok(event) => {
+                let changes = match &event {
+                    Some(Event::MemoryChanged { changes, .. }) => changes.clone(),
+                    _ => Vec::new(),
+                };
+                if let Some(event) = event {
+                    self.broadcast(ServerMessage::ConversationEvent {
+                        conversation_id: self.id,
+                        event,
+                        at_ms: at_ms(),
+                    });
+                }
+                self.daemon.publish_memory(self.bot_id, &changes);
+            }
+            Err(error) => report(sink, error.to_string()),
         }
     }
 
@@ -841,7 +886,7 @@ impl Actor {
     fn start_turn(&mut self, text: String, origin: TurnOrigin, retries: usize) {
         self.begin_turn(&text, origin);
         self.running.retries = retries;
-        let delivery = self.prepare();
+        let delivery = self.prepare(&text);
         let note = delivery.as_ref().ok().and_then(Delivery::note);
         self.emit(Event::UserText(
             UserMessage::new(text.clone())
@@ -979,10 +1024,25 @@ impl Actor {
     }
 
     /// Reads how the next message reaches an agent, and what changed since
-    /// that session saw the sections of its system prompt. Another provider,
-    /// new instructions, a new model, a new reasoning level, or a new folder
-    /// take a new provider session: the one that runs keeps the old ones.
-    fn prepare(&mut self) -> Result<Delivery, TurnFailure> {
+    /// that session saw the sections of its system prompt, followed by the
+    /// memory the message recalls. Another provider, new instructions, a new
+    /// model, a new reasoning level, or a new folder take a new provider
+    /// session: the one that runs keeps the old ones.
+    fn prepare(&mut self, text: &str) -> Result<Delivery, TurnFailure> {
+        let recalled = crate::memory::recall(&self.store, self.bot_id, text);
+        let mut delivery = self.prepare_session()?;
+        let note = match &mut delivery {
+            Delivery::Live { note, .. } => note,
+            Delivery::Start(plan) => &mut plan.note,
+        };
+        *note = match (note.take(), recalled) {
+            (Some(changed), Some(recalled)) => Some(format!("{changed}\n\n{recalled}")),
+            (changed, recalled) => changed.or(recalled),
+        };
+        Ok(delivery)
+    }
+
+    fn prepare_session(&mut self) -> Result<Delivery, TurnFailure> {
         let (conversation, bot) = self
             .store
             .with(|store| {
@@ -1009,8 +1069,14 @@ impl Actor {
         {
             self.close_session();
         }
-        if let Some(session) = &self.session {
-            let (note, seen) = self.daemon.sections().note(self.bot_id, &session.sections);
+        if let Some(session) = &mut self.session {
+            // A context that shrank was compacted: the sections it may have
+            // lost come again in this note.
+            let renew = std::mem::take(&mut session.compacted);
+            let (note, seen) = self
+                .daemon
+                .sections()
+                .note(self.bot_id, &session.sections, renew);
             return Ok(Delivery::Live { note, seen });
         }
         let provider = bot.bot.provider.clone();
@@ -1105,7 +1171,10 @@ impl Actor {
         let snapshot = self.daemon.sections().snapshot(self.bot_id);
         let system_prompt = Sections::system_prompt(&bot.instructions, &snapshot);
         let (note, sections) = match &resumed {
-            Some(session) => self.daemon.sections().note(self.bot_id, &session.sections),
+            Some(session) => self
+                .daemon
+                .sections()
+                .note(self.bot_id, &session.sections, false),
             None => (None, snapshot.versions),
         };
         Ok(Plan {
@@ -1224,6 +1293,8 @@ impl Actor {
             sections,
             _endpoint: endpoint,
             provider_session_id: None,
+            context_used: None,
+            compacted: false,
         })
     }
 
@@ -1315,13 +1386,23 @@ impl Actor {
                 {
                     Ok(applied) => {
                         if let Some(event) = applied.event {
+                            let memory = match &event {
+                                Event::MemoryChanged { changes, .. } => Some(changes.clone()),
+                                _ => None,
+                            };
                             self.broadcast(ServerMessage::ConversationEvent {
                                 conversation_id: self.id,
                                 event,
                                 at_ms: at_ms(),
                             });
+                            if let Some(changes) = memory {
+                                self.daemon.publish_memory(self.bot_id, &changes);
+                            }
                         }
                         reply.send(Ok(applied.output)).ok();
+                    }
+                    Err(StoreError::Refused(message)) => {
+                        reply.send(Err(message)).ok();
                     }
                     Err(error) => {
                         reply
@@ -1402,13 +1483,21 @@ impl Actor {
                     model: None,
                 });
             }
-            AgentEvent::Usage { used, size, cost } => self.record_usage(|reported| {
-                reported.context = Some((used, size));
-                // Claude sends the cost on the last update of a turn only.
-                if cost.is_some() {
-                    reported.session_cost = cost;
+            AgentEvent::Usage { used, size, cost } => {
+                if let Some(session) = self.session.as_mut() {
+                    if session.context_used.is_some_and(|last| used < last) {
+                        session.compacted = true;
+                    }
+                    session.context_used = Some(used);
                 }
-            }),
+                self.record_usage(|reported| {
+                    reported.context = Some((used, size));
+                    // Claude sends the cost on the last update of a turn only.
+                    if cost.is_some() {
+                        reported.session_cost = cost;
+                    }
+                });
+            }
             AgentEvent::TurnTokens {
                 input,
                 output,
@@ -1789,10 +1878,14 @@ impl Actor {
         if self.turn_active {
             return;
         }
-        if self.queue().is_ok_and(|queue| queue.messages.is_empty()) {
+        let Some(next) = self
+            .queue()
+            .ok()
+            .and_then(|queue| queue.messages.into_iter().next())
+        else {
             return;
-        }
-        let delivery = self.prepare();
+        };
+        let delivery = self.prepare(&next.text);
         let note = delivery.as_ref().ok().and_then(Delivery::note);
         match self
             .store

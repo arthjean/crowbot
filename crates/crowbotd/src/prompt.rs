@@ -24,6 +24,11 @@ pub trait Section: Send + Sync {
     fn current(&self, bot_id: i64) -> Option<SectionState>;
     /// What changed since the version `seen`, for the note.
     fn difference(&self, bot_id: i64, seen: Option<&str>, now: Option<&SectionState>) -> String;
+    /// Whether the section is sent again, whole, once the agent compacted
+    /// its context, which may have dropped the system prompt's text.
+    fn renews(&self) -> bool {
+        false
+    }
 }
 
 /// What a session was given when it opened.
@@ -41,11 +46,13 @@ pub struct Sections {
 
 /// The block before the person's text that tells what changed.
 const NOTE_HEAD: &str = "[Crow Bot note: what follows changed since this session started, and replaces what the session was given then.]";
+/// The line before a section sent again after a compaction.
+const RENEWED_HEAD: &str = "[Crow Bot note: your context was compacted, so this part of your system prompt is sent again.]";
 
 impl Sections {
-    pub fn new() -> Self {
-        #[allow(unused_mut)]
+    pub fn new(store: &crate::store::SharedStore) -> Self {
         let mut sections = Self::default();
+        crate::memory::add_sections(&mut sections, store);
         #[cfg(debug_assertions)]
         if let Some(folder) = crate::test_harness::folder() {
             crate::test_harness::add_sections(&mut sections, &folder);
@@ -89,10 +96,13 @@ impl Sections {
 
     /// The note of what changed since the versions `seen`, and the versions
     /// the session has seen once it reads the note. No change, no note.
+    /// With `renew`, the agent compacted its context: each section that
+    /// renews comes again whole, before what changed in it.
     pub fn note(
         &self,
         bot_id: i64,
         seen: &BTreeMap<String, String>,
+        renew: bool,
     ) -> (Option<String>, BTreeMap<String, String>) {
         let mut now = BTreeMap::new();
         let mut parts = Vec::new();
@@ -102,6 +112,9 @@ impl Sections {
             let before = seen.get(id).map(String::as_str);
             if let Some(state) = &state {
                 now.insert(id.to_owned(), state.version.clone());
+                if renew && section.renews() && !state.text.trim().is_empty() {
+                    parts.push(format!("{RENEWED_HEAD}\n{}", state.text));
+                }
             }
             if before != state.as_ref().map(|state| state.version.as_str()) {
                 parts.push(section.difference(bot_id, before, state.as_ref()));
@@ -194,18 +207,18 @@ mod tests {
         sections.register(memory);
         sections.register(skills);
         let seen = sections.snapshot(1).versions;
-        let (none, same) = sections.note(1, &seen);
+        let (none, same) = sections.note(1, &seen, false);
         assert_eq!(none, None);
         assert_eq!(same, seen);
         *memory_text.lock().unwrap() = Some("two".to_owned());
         *skills_text.lock().unwrap() = None;
-        let (note, now) = sections.note(1, &seen);
+        let (note, now) = sections.note(1, &seen, false);
         let note = note.unwrap();
         assert!(note.starts_with(NOTE_HEAD), "{note}");
         assert!(note.contains("memory is now: two"), "{note}");
         assert!(note.contains("skills is gone"), "{note}");
         assert_eq!(now.get("memory").map(String::as_str), Some("v-two"));
         assert!(!now.contains_key("skills"));
-        assert_eq!(sections.note(1, &now).0, None);
+        assert_eq!(sections.note(1, &now, false).0, None);
     }
 }

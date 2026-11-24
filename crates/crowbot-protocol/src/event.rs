@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::memory::{MemoryAuthor, MemoryChange};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
@@ -85,6 +87,12 @@ pub enum Event {
     ToolRefused {
         tool: String,
         message: String,
+    },
+    /// The bot's memory changed: what each operation of one call or one
+    /// client message did, applied together.
+    MemoryChanged {
+        author: MemoryAuthor,
+        changes: Vec<MemoryChange>,
     },
 }
 
