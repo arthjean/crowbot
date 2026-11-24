@@ -23,6 +23,17 @@
 //! - `fail auth`: fail the turn as a provider that needs a sign-in.
 //! - `fail limit`: fail the turn as a provider whose usage limit is reached.
 //! - `fail other`: fail the turn with an error kind that has no known cause.
+//! - `failfirst <n> <path> <command>`: fail as `fail other` while the counter
+//!   in the file is below `n`, counting up; then run the command.
+//! - `sayfail <text>`: answer with the text, then fail as `fail other`.
+//! - `toolfail`: start a tool call, then fail as `fail other`.
+//! - `spend <used> <size> <cost> <input> <output>`: send a `UsageUpdate` of
+//!   that context size and that cumulative cost in USD, answer `spent`, and
+//!   end with those input and output tokens; a `-` leaves a figure out.
+//! - `calls <count> <inputs> <outputs>`: run `count` tool calls titled
+//!   `Read`, each completed at once, whose inputs and outputs go round the
+//!   comma-separated lists (`_` sends no output), then answer `calls done`.
+//!   A cancel ends it between two calls.
 //! - `sample <interval ms>`: answer with a Markdown text that holds every kind
 //!   of block, one word per interval, and end as cancelled when a cancel arrives.
 //! - `deaf`: never end the turn, and ignore the cancel and the end of stdin;
@@ -410,6 +421,25 @@ struct Session {
     mcp_servers: Value,
 }
 
+/// A prompt `failfirst <n> <path> <command>`: `Ok` when this turn fails,
+/// with the counter of the file one higher, and the command to run otherwise.
+fn failing_first(text: &str) -> Option<Result<(), String>> {
+    let rest = text.strip_prefix("failfirst ")?;
+    let mut fields = rest.splitn(3, ' ');
+    let limit: u32 = fields.next()?.parse().ok()?;
+    let path = fields.next()?;
+    let command = fields.next().unwrap_or_default().to_owned();
+    let failed: u32 = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0);
+    if failed < limit {
+        std::fs::write(path, (failed + 1).to_string()).ok();
+        return Some(Ok(()));
+    }
+    Some(Err(command))
+}
+
 fn texts(blocks: &Value) -> Vec<String> {
     blocks
         .as_array()
@@ -686,6 +716,20 @@ impl Agent {
         let session = &params["sessionId"];
         let mut parts = texts(&params["prompt"]);
         let text = parts.pop().unwrap_or_default();
+        let text = match failing_first(&text) {
+            Some(Ok(())) => {
+                return self.fail(
+                    id,
+                    json!({
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": { "errorKind": "worker_shutdown" }
+                    }),
+                );
+            }
+            Some(Err(command)) => command,
+            None => text,
+        };
         let text = text.as_str();
         let (command, rest) = text.split_once(' ').unwrap_or((text, ""));
         match command {
@@ -796,6 +840,78 @@ impl Agent {
                     }),
                 };
                 return self.fail(id, error);
+            }
+            "sayfail" | "toolfail" => {
+                if command == "sayfail" {
+                    self.say(session, rest);
+                } else {
+                    self.start_tool(
+                        session,
+                        json!({ "title": "Run", "kind": "execute", "status": "in_progress" }),
+                    );
+                }
+                return self.fail(
+                    id,
+                    json!({
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": { "errorKind": "worker_shutdown" }
+                    }),
+                );
+            }
+            "spend" => {
+                let figures: Vec<Option<f64>> =
+                    rest.split(' ').map(|figure| figure.parse().ok()).collect();
+                let figure = |index: usize| figures.get(index).copied().flatten();
+                if let (Some(used), Some(size)) = (figure(0), figure(1)) {
+                    let mut update = json!({
+                        "sessionUpdate": "usage_update",
+                        "used": used as u64,
+                        "size": size as u64
+                    });
+                    if let Some(cost) = figure(2) {
+                        update["cost"] = json!({ "amount": cost, "currency": "USD" });
+                    }
+                    self.update(session, update);
+                }
+                self.say(session, "spent");
+                let mut answer = json!({ "stopReason": "end_turn" });
+                if let (Some(input), Some(output)) = (figure(3), figure(4)) {
+                    let (input, output) = (input as u64, output as u64);
+                    answer["usage"] = json!({
+                        "inputTokens": input,
+                        "outputTokens": output,
+                        "totalTokens": input + output
+                    });
+                }
+                return self.respond(id, answer);
+            }
+            "calls" => {
+                let mut fields = rest.split(' ');
+                let count: usize = fields.next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                let inputs: Vec<&str> = fields.next().unwrap_or("a").split(',').collect();
+                let outputs: Vec<&str> = fields.next().unwrap_or("_").split(',').collect();
+                for index in 0..count {
+                    if self.cancelled.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let call = self.start_tool(
+                        session,
+                        json!({
+                            "title": "Read",
+                            "kind": "read",
+                            "status": "in_progress",
+                            "rawInput": { "file_path": inputs[index % inputs.len()] }
+                        }),
+                    );
+                    let output =
+                        Some(outputs[index % outputs.len()]).filter(|output| *output != "_");
+                    self.update_tool(session, &call, "completed", output);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if !self.cancelled.load(Ordering::SeqCst) {
+                    self.say(session, "calls done");
+                }
             }
             "sample" => {
                 let interval = Duration::from_millis(rest.parse().unwrap_or(1));

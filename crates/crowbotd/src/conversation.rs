@@ -6,13 +6,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
     FailureCause, Interruption, MESSAGE_LENGTH, PermissionLevel, QueueState, ServerMessage,
-    TurnEnd, UserMessage,
+    TurnEnd, TurnOrigin, UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
 use crate::daemon::Daemon;
+use crate::guard::{self, INACTIVITY_LIMIT, Progress, RETRY_DELAYS};
 use crate::handoff::{self, HANDOFF_CHARACTERS};
 use crate::mcp::{SessionEndpoint, ToolSignal};
 use crate::prompt::Sections;
@@ -20,8 +21,8 @@ use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
 use crate::store::{
-    BotRow, Conversation, EventsPage, ProviderSession, Recorder, SharedStore, StoreError,
-    session_fingerprint,
+    BotRow, Conversation, EventsPage, ProviderSession, Recorder, Reported, SharedStore, StoreError,
+    Tokens, session_fingerprint,
 };
 use crate::tools::{Outputs, SessionKind, ToolContext, TurnGate};
 
@@ -159,6 +160,8 @@ pub fn spawn(daemon: Arc<Daemon>, conversation: &Conversation) -> ConversationHa
         gate: TurnGate::default(),
         stop_due: None,
         next_after_stop: false,
+        running: RunningTurn::default(),
+        retry: None,
     };
     tokio::spawn(actor.run(receiver));
     ConversationHandle { inputs }
@@ -186,6 +189,51 @@ struct Session {
     sections: BTreeMap<String, String>,
     /// The daemon's tools for this session. Dropped with the session.
     _endpoint: Option<SessionEndpoint>,
+    /// The provider's id of the session, once the agent started it.
+    provider_session_id: Option<String>,
+}
+
+/// What the daemon watches in the turn that runs (`guard.rs`).
+struct RunningTurn {
+    origin: TurnOrigin,
+    /// The message that started the turn, which a retry sends again.
+    text: String,
+    /// The retries sent before this turn: 0 for a turn of its own.
+    retries: usize,
+    /// The agent said something, started a tool call, or asked to run one:
+    /// a failure that follows is not retried.
+    said: bool,
+    progress: Progress,
+    /// What the agent reported the turn consumed, and the provider and the
+    /// provider session that reported it.
+    usage: Option<(String, Option<String>, Reported)>,
+    /// Why the daemon stopped the turn itself, recorded as its end.
+    stop_cause: Option<Interruption>,
+    /// When the turn last heard from its agent or from a person.
+    last_activity: Instant,
+}
+
+impl Default for RunningTurn {
+    fn default() -> Self {
+        Self {
+            origin: TurnOrigin::User,
+            text: String::new(),
+            retries: 0,
+            said: false,
+            progress: Progress::default(),
+            usage: None,
+            stop_cause: None,
+            last_activity: Instant::now(),
+        }
+    }
+}
+
+/// The same message, to send again once `due` passes.
+struct Retry {
+    text: String,
+    /// The retries sent before this one.
+    retries: usize,
+    due: Instant,
 }
 
 /// How a message reaches an agent: through the session that runs, or a
@@ -307,6 +355,9 @@ struct Actor {
     stop_due: Option<Instant>,
     /// Set by "send now": the next queued message starts however the turn ends.
     next_after_stop: bool,
+    running: RunningTurn,
+    /// A failed turn waits to be sent again.
+    retry: Option<Retry>,
 }
 
 impl Actor {
@@ -326,13 +377,19 @@ impl Actor {
                 Some(Input::Command(command)) => self.handle_command(command),
                 Some(Input::Agent { generation, event }) => {
                     if self.is_current(generation) {
+                        self.running.last_activity = Instant::now();
                         self.handle_agent(event);
                     }
                 }
                 Some(Input::SessionClosed { generation, result }) => {
                     self.session_closed(generation, result);
                 }
-                Some(Input::Tool { generation, signal }) => self.tool_signal(generation, signal),
+                Some(Input::Tool { generation, signal }) => {
+                    if self.is_current(generation) {
+                        self.running.last_activity = Instant::now();
+                    }
+                    self.tool_signal(generation, signal);
+                }
                 None => break,
             }
             if self.finished {
@@ -342,10 +399,25 @@ impl Actor {
     }
 
     fn next_deadline(&self) -> Option<Instant> {
-        match (self.recorder.save_due(), self.stop_due) {
-            (Some(save), Some(stop)) => Some(save.min(stop)),
-            (save, stop) => save.or(stop),
-        }
+        [
+            self.recorder.save_due(),
+            self.stop_due,
+            self.inactive_due(),
+            self.retry.as_ref().map(|retry| retry.due),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// When a turn the daemon started, which waits on no person, has heard
+    /// nothing from its agent for too long.
+    fn inactive_due(&self) -> Option<Instant> {
+        (self.turn_active
+            && self.running.origin != TurnOrigin::User
+            && self.approvals.is_empty()
+            && self.stop_due.is_none())
+        .then(|| self.running.last_activity + guard::scaled(INACTIVITY_LIMIT))
     }
 
     fn deadline_passed(&mut self) {
@@ -359,6 +431,12 @@ impl Actor {
             self.end_turn(Event::TurnInterrupted {
                 cause: Interruption::AgentUnresponsive,
             });
+        }
+        if self.inactive_due().is_some_and(|due| due <= now) {
+            self.guard_stop(Interruption::Inactive);
+        }
+        if self.retry.as_ref().is_some_and(|retry| retry.due <= now) {
+            self.send_retry();
         }
     }
 
@@ -442,7 +520,11 @@ impl Actor {
                 decision,
                 sink,
             } => self.resolve_approval(&approval_id, decision, &sink),
-            Command::Stop => self.stop(STOP_TIMEOUT),
+            Command::Stop => {
+                // A person who stops the conversation stops its retry too.
+                self.retry = None;
+                self.stop(STOP_TIMEOUT);
+            }
             Command::EditQueued {
                 queue_id,
                 text,
@@ -501,6 +583,7 @@ impl Actor {
             .into_iter()
             .partition(|approval| approval.cut);
         self.approvals = cut;
+        self.running.last_activity = Instant::now();
         for approval in shown {
             if approval.reply.send(ApprovalAnswer::Allow).is_ok() {
                 self.emit(Event::ApprovalResolved {
@@ -563,7 +646,7 @@ impl Actor {
 
     fn snapshot(&mut self) -> Result<ConversationSnapshot, String> {
         self.recorder.save().map_err(|error| error.to_string())?;
-        let (conversation, page, draft, queue) = self
+        let (conversation, page, draft, queue, usage) = self
             .store
             .with(|store| {
                 Ok((
@@ -571,6 +654,7 @@ impl Actor {
                     store.events_page(self.id, None, PAGE_EVENTS)?,
                     store.draft(self.id)?,
                     store.queue(self.id)?,
+                    store.last_usage(self.id)?,
                 ))
             })
             .map_err(|error: StoreError| error.to_string())?;
@@ -593,6 +677,7 @@ impl Actor {
                 .as_ref()
                 .filter(|_| self.turn_active)
                 .map(|session| session.bot.model.clone()),
+            usage,
         })
     }
 
@@ -652,6 +737,8 @@ impl Actor {
         if self.turn_active || !queue.messages.is_empty() {
             match self.store.with(|store| store.enqueue(self.id, &text)) {
                 Ok(()) => {
+                    // The person wrote again: the failed turn is not sent again.
+                    self.retry = None;
                     self.accept_message(sink);
                     self.broadcast_queue();
                 }
@@ -659,23 +746,124 @@ impl Actor {
             }
             return;
         }
-        self.begin_turn();
         self.accept_message(sink);
+        self.start_turn(text, TurnOrigin::User, 0);
+    }
+
+    /// Starts a turn with a message that is not in the queue: a person's, or
+    /// one the daemon sends on its own. `retries` counts the retries sent
+    /// before it, set before delivery, which can end the turn at once.
+    fn start_turn(&mut self, text: String, origin: TurnOrigin, retries: usize) {
+        self.begin_turn(&text, origin);
+        self.running.retries = retries;
         let delivery = self.prepare();
         let note = delivery.as_ref().ok().and_then(Delivery::note);
         self.emit(Event::UserText(
-            UserMessage::new(text.clone()).with_note(note),
+            UserMessage::new(text.clone())
+                .with_note(note)
+                .with_origin(origin),
         ));
         self.give_title(&text);
         self.sync();
         self.deliver(delivery, text);
     }
 
-    /// A turn starts: the daemon's tools may run, with permits of this turn.
-    fn begin_turn(&mut self) {
+    /// A turn starts: the daemon's tools may run, with permits of this turn,
+    /// and the guards watch it from its first event. A retry that waited is
+    /// dropped: another turn took its place.
+    fn begin_turn(&mut self, text: &str, origin: TurnOrigin) {
         self.turn_active = true;
         self.turn += 1;
         self.gate.open(self.turn);
+        self.retry = None;
+        self.running = RunningTurn {
+            origin,
+            text: text.to_owned(),
+            ..RunningTurn::default()
+        };
+    }
+
+    /// Sends again the message of a turn that failed before it said
+    /// anything, unless a turn runs, the conversation closes, or the daemon
+    /// is paused: a paused daemon starts no turn of its own.
+    fn send_retry(&mut self) {
+        let Some(retry) = self.retry.take() else {
+            return;
+        };
+        if self.turn_active || self.closing.is_some() {
+            return;
+        }
+        if self.daemon.paused() {
+            eprintln!(
+                "[crowbotd] conversation {}: the daemon is paused, so the failed turn is not sent again",
+                self.id
+            );
+            return;
+        }
+        self.start_turn(retry.text, TurnOrigin::Retry, retry.retries);
+    }
+
+    /// Stops the running turn for a reason of the daemon's guards, which is
+    /// recorded as the turn's end.
+    fn guard_stop(&mut self, cause: Interruption) {
+        if !self.turn_active || self.stop_due.is_some() || self.running.stop_cause.is_some() {
+            return;
+        }
+        eprintln!(
+            "[crowbotd] conversation {}: the turn is stopped ({cause:?})",
+            self.id
+        );
+        self.running.stop_cause = Some(cause);
+        self.stop(STOP_TIMEOUT);
+    }
+
+    /// What an event of the agent tells the guards: a turn that repeats
+    /// itself, or one that asks for more tool calls than its bot allows,
+    /// stops.
+    fn watch(&mut self, event: &Event) {
+        if !self.turn_active {
+            return;
+        }
+        let seen = self.running.progress.observe(event);
+        if seen.no_progress {
+            return self.guard_stop(Interruption::NoProgress);
+        }
+        if seen.new_call
+            && self
+                .tool_call_limit()
+                .is_some_and(|limit| self.running.progress.calls() > limit)
+        {
+            self.guard_stop(Interruption::BudgetExhausted);
+        }
+    }
+
+    /// The bot's limit of tool calls per turn, read from its record at each
+    /// call, so that a lower limit stops a turn that already runs.
+    fn tool_call_limit(&self) -> Option<usize> {
+        let limit = match self.store.with(|store| store.bot(self.bot_id)) {
+            Ok(Some(row)) => row.bot.tool_call_limit,
+            Ok(None) | Err(_) => None,
+        };
+        limit.and_then(|limit| usize::try_from(limit).ok())
+    }
+
+    /// Keeps what the agent reports the running turn consumed.
+    fn record_usage(&mut self, report: impl FnOnce(&mut Reported)) {
+        if !self.turn_active {
+            return;
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        let source = (
+            session.bot.provider.clone(),
+            session.provider_session_id.clone(),
+        );
+        let usage = self
+            .running
+            .usage
+            .get_or_insert_with(|| (source.0, source.1, Reported::default()));
+        report(&mut usage.2);
     }
 
     /// The turn `turn` runs and no stop is asked: a daemon tool of that turn
@@ -950,6 +1138,7 @@ impl Actor {
             task: task.abort_handle(),
             sections,
             _endpoint: endpoint,
+            provider_session_id: None,
         })
     }
 
@@ -1072,6 +1261,7 @@ impl Actor {
                 let Some(session) = self.session.as_mut() else {
                     return;
                 };
+                session.provider_session_id = Some(provider_session_id.clone());
                 let provider = session.bot.provider.clone();
                 let fingerprint = session_fingerprint(&session.bot);
                 let sections = session.sections.clone();
@@ -1121,6 +1311,24 @@ impl Actor {
                     model: None,
                 });
             }
+            AgentEvent::Usage { used, size, cost } => self.record_usage(|reported| {
+                reported.context = Some((used, size));
+                // Claude sends the cost on the last update of a turn only.
+                if cost.is_some() {
+                    reported.session_cost = cost;
+                }
+            }),
+            AgentEvent::TurnTokens {
+                input,
+                output,
+                total,
+            } => self.record_usage(|reported| {
+                reported.tokens = Some(Tokens {
+                    input,
+                    output,
+                    total,
+                });
+            }),
             AgentEvent::Event(event) => {
                 if event.ends_turn() {
                     // A turn ends once: an end that arrives after the turn was
@@ -1129,7 +1337,8 @@ impl Actor {
                         self.end_turn(event);
                     }
                 } else {
-                    self.emit(event);
+                    self.emit(event.clone());
+                    self.watch(&event);
                 }
             }
             AgentEvent::ApprovalNeeded {
@@ -1280,6 +1489,8 @@ impl Actor {
             decision,
             reason: None,
         });
+        // The time a person took to answer is not the agent's silence.
+        self.running.last_activity = Instant::now();
         self.sync();
     }
 
@@ -1364,7 +1575,22 @@ impl Actor {
         for reply in self.close_approvals() {
             reply.send(ApprovalAnswer::Cancel).ok();
         }
+        // A turn the daemon's guards stopped ends for their reason, whatever
+        // the agent answered to the stop.
+        let end = match self.running.stop_cause.take() {
+            Some(cause) => Event::TurnInterrupted { cause },
+            None => end,
+        };
         let completed = matches!(end, Event::TurnEnded(_));
+        let retry = self.retry_after(&end);
+        if let Some((provider, session_id, reported)) = self.running.usage.take() {
+            let closed = self.recorder.close();
+            self.report_store(closed);
+            let stored = self.store.with(|store| {
+                store.record_usage(self.id, &provider, session_id.as_deref(), &reported)
+            });
+            self.report_store(stored);
+        }
         self.emit(end);
         if !self.followers.is_empty() {
             // A client has the end of the conversation on screen: the turn
@@ -1393,6 +1619,13 @@ impl Actor {
         if self.closing.is_some() {
             return;
         }
+        if let Some(wait) = retry {
+            self.retry = Some(Retry {
+                text: std::mem::take(&mut self.running.text),
+                retries: self.running.retries + 1,
+                due: Instant::now() + guard::scaled(wait),
+            });
+        }
         let queue = match self.queue() {
             Ok(queue) => queue,
             Err(error) => return self.report_store(Err::<(), _>(error)),
@@ -1411,6 +1644,26 @@ impl Actor {
         }
     }
 
+    /// The wait before the turn that ends with `end` is sent again: a turn
+    /// that failed for no cause the agent named, before it said anything or
+    /// started a tool call, while retries are left. A sign-in or a usage
+    /// limit does not pass with a wait, and a failure before any provider
+    /// ran (a missing folder) would fail the same way.
+    fn retry_after(&self, end: &Event) -> Option<std::time::Duration> {
+        let Event::TurnFailed {
+            cause: None | Some(FailureCause::Other),
+            provider: Some(_),
+            ..
+        } = end
+        else {
+            return None;
+        };
+        if self.running.said {
+            return None;
+        }
+        RETRY_DELAYS.get(self.running.retries).copied()
+    }
+
     fn start_next_queued(&mut self) {
         if self.turn_active {
             return;
@@ -1425,7 +1678,7 @@ impl Actor {
             .with(|store| store.start_queued(self.id, note.clone()))
         {
             Ok(Some(text)) => {
-                self.begin_turn();
+                self.begin_turn(&text, TurnOrigin::User);
                 self.broadcast(ServerMessage::ConversationEvent {
                     conversation_id: self.id,
                     event: Event::UserText(UserMessage::new(text.clone()).with_note(note)),
@@ -1524,6 +1777,17 @@ impl Actor {
     }
 
     fn emit(&mut self, event: Event) {
+        // A turn that answered, ran a tool, or asked to run one is not sent
+        // again: a retry could run twice what a person already allowed.
+        if matches!(
+            event,
+            Event::MessageText(_)
+                | Event::ToolCallStarted { .. }
+                | Event::ApprovalRequested { .. }
+                | Event::ApprovalResolved { .. }
+        ) {
+            self.running.said = true;
+        }
         let recorded = self.recorder.record(event.clone());
         self.report_store(recorded);
         self.broadcast(ServerMessage::ConversationEvent {

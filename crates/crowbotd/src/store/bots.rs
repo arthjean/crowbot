@@ -11,7 +11,7 @@ use super::{Store, StoreError, now_ms, title_of};
 const BOT_COLUMNS: &str =
     "id, name, title, instructions, avatar_color, avatar_shape, provider, model,
     permission_level, workspace, pinned, hidden, created_at_ms, current_conversation_id,
-    session_revision, effort";
+    session_revision, effort, tool_call_limit";
 
 /// The bot that takes the conversations stored before bots existed.
 const ADOPTER_NAME: &str = "Crow";
@@ -35,6 +35,7 @@ pub struct NewBot {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_level: PermissionLevel,
+    pub tool_call_limit: Option<u32>,
     pub workspace: String,
 }
 
@@ -96,6 +97,7 @@ fn bot_row(row: &Row<'_>) -> rusqlite::Result<BotRow> {
             model: row.get(7)?,
             effort: row.get(15)?,
             permission_level: level_from(&row.get::<_, String>(8)?),
+            tool_call_limit: row.get(16)?,
             workspace: row.get(9)?,
             pinned: row.get(10)?,
             hidden: row.get(11)?,
@@ -112,8 +114,9 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO bots (name, title, instructions, avatar_color, avatar_glyph, avatar_shape,
-                provider, model, permission_level, workspace, created_at_ms, effort)
-             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                provider, model, permission_level, workspace, created_at_ms, effort,
+                tool_call_limit)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 new.name,
                 new.title,
@@ -125,7 +128,8 @@ impl Store {
                 level_name(new.permission_level),
                 new.workspace,
                 now_ms(),
-                new.effort
+                new.effort,
+                new.tool_call_limit
             ],
         )?;
         let id = transaction.last_insert_rowid();
@@ -189,6 +193,7 @@ impl Store {
             effort,
             provider,
             permission_level,
+            tool_call_limit,
             workspace,
             pinned,
             hidden,
@@ -218,6 +223,7 @@ impl Store {
         bot.model = model.unwrap_or(bot.model);
         bot.effort = effort.unwrap_or(bot.effort);
         bot.permission_level = permission_level.unwrap_or(bot.permission_level);
+        bot.tool_call_limit = tool_call_limit.unwrap_or(bot.tool_call_limit);
         bot.workspace = workspace.unwrap_or(bot.workspace);
         bot.pinned = pinned.unwrap_or(bot.pinned);
         bot.hidden = hidden.unwrap_or(bot.hidden);
@@ -226,7 +232,7 @@ impl Store {
             "UPDATE bots SET name = ?2, title = ?3, instructions = ?4, avatar_color = ?5,
                 avatar_shape = ?6, model = ?7, permission_level = ?8, workspace = ?9,
                 pinned = ?10, hidden = ?11, session_revision = ?12, provider = ?13,
-                effort = ?14
+                effort = ?14, tool_call_limit = ?15
              WHERE id = ?1",
             params![
                 id,
@@ -242,7 +248,8 @@ impl Store {
                 bot.hidden,
                 revision,
                 bot.provider,
-                bot.effort
+                bot.effort,
+                bot.tool_call_limit
             ],
         )?;
         transaction.commit()?;
@@ -266,7 +273,7 @@ impl Store {
     /// Removes a bot with its conversations, their events, and their queues.
     pub fn delete_bot(&self, id: i64) -> Result<bool, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
-        for owned in ["queue", "events", "provider_sessions"] {
+        for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN
@@ -291,7 +298,7 @@ impl Store {
         let Some(current) = self.insert_conversation(bot_id)? else {
             return Ok(None);
         };
-        for owned in ["queue", "events", "provider_sessions"] {
+        for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN
@@ -591,6 +598,7 @@ mod tests {
             model: Some("opus".to_owned()),
             effort: None,
             permission_level: PermissionLevel::AskFirst,
+            tool_call_limit: None,
             workspace: "/bots/atlas".to_owned(),
         }
     }

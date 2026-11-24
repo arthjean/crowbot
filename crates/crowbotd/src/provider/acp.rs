@@ -22,7 +22,7 @@ use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, UntypedMessage,
 };
 use crowbot_protocol::{
-    APPROVAL_TARGET_BYTES, Event, FailureCause, ModelChoice, ProviderState, TOOL_INPUT_BYTES,
+    APPROVAL_TARGET_BYTES, Cost, Event, FailureCause, ModelChoice, ProviderState, TOOL_INPUT_BYTES,
     TOOL_OUTPUT_BYTES, ToolKind, ToolStatus, TurnEnd, cut_text,
 };
 
@@ -578,6 +578,19 @@ pub enum AgentEvent {
     ModelUnavailable {
         model: String,
     },
+    /// The size of the context and the cumulative cost of the session, as
+    /// the agent last reported them (`UsageUpdate`).
+    Usage {
+        used: u64,
+        size: u64,
+        cost: Option<Cost>,
+    },
+    /// The tokens of the turn, which the answer to its prompt carried.
+    TurnTokens {
+        input: u64,
+        output: u64,
+        total: u64,
+    },
     ApprovalNeeded {
         tool_call_id: String,
         title: Option<String>,
@@ -896,6 +909,18 @@ pub async fn run_session(
                         .insert(id, name.clone());
                     tool = Some(name);
                 }
+                if let SessionUpdate::UsageUpdate(usage) = &notification.update {
+                    update_events
+                        .send(AgentEvent::Usage {
+                            used: usage.used,
+                            size: usage.size,
+                            cost: usage.cost.as_ref().map(|cost| Cost {
+                                amount: cost.amount,
+                                currency: cost.currency.clone(),
+                            }),
+                        })
+                        .ok();
+                }
                 if let Some(mut event) = translate(notification.update) {
                     if let (Event::ToolCallStarted { effect, .. }, Some(tool)) = (&mut event, &tool) {
                         *effect = tools.effect(tool);
@@ -1125,6 +1150,15 @@ pub async fn run_session(
                         },
                     }
                 };
+                if let Some(usage) = &response.usage {
+                    events
+                        .send(AgentEvent::TurnTokens {
+                            input: usage.input_tokens,
+                            output: usage.output_tokens,
+                            total: usage.total_tokens,
+                        })
+                        .ok();
+                }
                 events
                     .send(AgentEvent::Event(Event::TurnEnded(turn_end(
                         response.stop_reason,

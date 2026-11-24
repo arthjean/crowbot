@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, TimedEvent, ToolEffect, ToolKind, ToolStatus, TurnEnd, UserMessage,
+    Interruption, TimedEvent, ToolEffect, ToolKind, ToolStatus, TurnEnd, TurnOrigin, UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -51,6 +51,12 @@ pub enum Status {
     Stopped,
     DaemonRestarted,
     Unresponsive,
+    /// The daemon stopped a turn that repeated the same tool calls.
+    NoProgress,
+    /// The daemon stopped a turn of its own whose agent went silent.
+    Inactive,
+    /// The daemon stopped a turn over its bot's tool call limit.
+    ToolCallLimit,
     LengthLimit,
     RequestLimit,
     Refused,
@@ -98,6 +104,8 @@ pub enum RowKind {
         text: String,
         /// What the daemon told the session before the message.
         note: Option<String>,
+        /// Who started the turn: a person, or the daemon on its own.
+        origin: TurnOrigin,
     },
     Steps {
         steps: Vec<Step>,
@@ -433,7 +441,7 @@ impl Transcript {
         let at_ms = timed.at_ms;
         let end = self.rows.len();
         match timed.event {
-            Event::UserText(UserMessage { text, note }) => {
+            Event::UserText(UserMessage { text, note, origin }) => {
                 self.close_turn(None);
                 self.day_row(seq, at_ms);
                 self.turn = Some(Turn {
@@ -443,7 +451,7 @@ impl Transcript {
                 self.rows.push(Row {
                     key: key(seq, Slot::Main),
                     at_ms,
-                    kind: RowKind::User { text, note },
+                    kind: RowKind::User { text, note, origin },
                 });
                 end
             }
@@ -637,6 +645,9 @@ impl Transcript {
                 let status = match cause {
                     Interruption::DaemonRestarted => Status::DaemonRestarted,
                     Interruption::AgentUnresponsive => Status::Unresponsive,
+                    Interruption::NoProgress => Status::NoProgress,
+                    Interruption::Inactive => Status::Inactive,
+                    Interruption::BudgetExhausted => Status::ToolCallLimit,
                 };
                 self.end_turn(seq, at_ms, Some(status))
             }
@@ -931,6 +942,7 @@ pub mod tests {
             pending_approvals: pending.iter().map(|id| (*id).to_owned()).collect(),
             queue: QueueState::default(),
             turn_model: None,
+            usage: None,
         }
     }
 
@@ -1314,7 +1326,7 @@ pub mod tests {
         assert_eq!(kinds(&transcript), ["day", "user", "steps", "notice"]);
         assert!(matches!(
             &transcript.rows()[1].kind,
-            RowKind::User { text, note: Some(note) } if text == "go" && note == "changed"
+            RowKind::User { text, note: Some(note), .. } if text == "go" && note == "changed"
         ));
         let step = &steps(&transcript)[0];
         assert_eq!(step.effect, Some(ToolEffect::BotState));
@@ -1322,6 +1334,37 @@ pub mod tests {
         assert!(matches!(
             &transcript.rows()[3].kind,
             RowKind::Notice(Notice::ToolRefused { tool, .. }) if tool == "review"
+        ));
+    }
+
+    #[test]
+    fn a_retried_message_keeps_its_origin_and_a_guarded_stop_its_cause() {
+        let transcript = Transcript::from_snapshot(snapshot(
+            vec![
+                at(
+                    NOON,
+                    Event::UserText(UserMessage::new("go").with_origin(TurnOrigin::Retry)),
+                ),
+                at(
+                    NOON + 1_000,
+                    Event::TurnInterrupted {
+                        cause: Interruption::NoProgress,
+                    },
+                ),
+            ],
+            false,
+            &[],
+        ));
+        assert!(matches!(
+            &transcript.rows()[1].kind,
+            RowKind::User {
+                origin: TurnOrigin::Retry,
+                ..
+            }
+        ));
+        assert!(matches!(
+            transcript.rows()[2].kind,
+            RowKind::Status(Status::NoProgress)
         ));
     }
 

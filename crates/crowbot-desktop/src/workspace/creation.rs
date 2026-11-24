@@ -482,6 +482,7 @@ impl Workspace {
             model: None,
             effort: None,
             permission_level: PermissionLevel::AskFirst,
+            tool_call_limit: None,
             workspace: String::new(),
             pinned: false,
             hidden: false,

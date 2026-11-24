@@ -167,7 +167,15 @@ Claude and ChatGPT report the compaction itself as a tool call of kind
 - A daemon tool whose effect is `Read` declares `readOnlyHint`, so ChatGPT
   calls it without a request.
 - Grok's usage is not read from `UsageUpdate`; its turns count as turns only
-  (D4).
+  (D4). The daemon stores a row of usage for a turn whose agent reported a
+  context size, a cost, or tokens in the standard fields (US-006): every turn
+  of Claude, every turn of ChatGPT (no cost), and no turn of Grok, whose
+  counts in `_meta` are not read.
+- The guard against a turn that makes no progress (US-008) compares the
+  title, the input, and the output of each tool call that ended. ChatGPT's
+  shell commands carry no output in the fields the daemon reads (A6), so on
+  ChatGPT five runs in a row of the same command stop the turn even when
+  their results differ.
 
 ## Runs through the daemon
 

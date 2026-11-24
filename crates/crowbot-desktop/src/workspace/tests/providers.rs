@@ -10,7 +10,7 @@ use crowbot_protocol::{
 use gpui::{ScrollDelta, ScrollEvent};
 
 use super::*;
-use crate::transcript::RowKind;
+use crate::transcript::{RowKind, Status};
 
 fn status(id: &str, name: &str, state: ProviderState) -> ProviderStatus {
     ProviderStatus {
@@ -485,6 +485,69 @@ fn a_conversation_with_daemon_tools_and_a_note_opens_and_shows_each_row(cx: &mut
             .any(|row| matches!(row.kind, RowKind::Approval(_))),
         "a daemon tool's approval has no card of its own"
     );
+}
+
+/// A conversation that holds a turn the daemon started and turns its guards
+/// stopped opens, and each row says so (EP-002 of the harness PRD).
+#[gpui::test]
+fn a_retried_turn_and_turns_the_daemon_stopped_open_and_say_so(cx: &mut TestAppContext) {
+    use crowbot_protocol::{Interruption, TurnOrigin, UserMessage};
+
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    let stopped = |cause| Event::TurnInterrupted { cause };
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::user_text("go"),
+                stopped(Interruption::NoProgress),
+                Event::UserText(UserMessage::new("go").with_origin(TurnOrigin::Retry)),
+                stopped(Interruption::Inactive),
+                Event::user_text("count"),
+                stopped(Interruption::BudgetExhausted),
+            ],
+        )),
+        cx,
+    );
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    let users: Vec<(i64, TurnOrigin)> = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::User { origin, .. } => Some((row.key, *origin)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        users.iter().map(|(_, origin)| *origin).collect::<Vec<_>>(),
+        [TurnOrigin::User, TurnOrigin::Retry, TurnOrigin::User]
+    );
+    for (key, origin) in &users {
+        let label: &'static str = Box::leak(format!("origin-{key}").into_boxed_str());
+        assert_eq!(shown(cx, label), *origin != TurnOrigin::User, "{label}");
+    }
+    let statuses: Vec<(i64, Status)> = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::Status(status) => Some((row.key, status.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|(_, status)| status.clone())
+            .collect::<Vec<_>>(),
+        [Status::NoProgress, Status::Inactive, Status::ToolCallLimit]
+    );
+    for (key, _) in &statuses {
+        let row: &'static str = Box::leak(format!("status-{key}").into_boxed_str());
+        assert!(shown(cx, row), "{row}");
+    }
 }
 
 #[gpui::test]

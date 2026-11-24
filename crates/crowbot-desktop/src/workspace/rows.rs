@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use chrono::{DateTime, Datelike, Local, TimeZone};
-use crowbot_protocol::{ApprovalDecision, ApprovalReason, FailureCause, ProviderState};
+use crowbot_protocol::{ApprovalDecision, ApprovalReason, FailureCause, ProviderState, TurnOrigin};
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
     Stateful, Window, div, prelude::*,
@@ -95,6 +95,19 @@ pub(super) fn provider_name(provider: Option<&str>) -> &str {
     }
 }
 
+/// Who started a turn, for the turns a person did not start.
+pub(super) fn origin_label(origin: TurnOrigin) -> Option<&'static str> {
+    match origin {
+        TurnOrigin::User => None,
+        TurnOrigin::Retry => Some("Sent again by Crow Bot after a failure"),
+        TurnOrigin::Routine => Some("Started by a routine"),
+        TurnOrigin::Review => Some("Started by a review"),
+        TurnOrigin::Goal => Some("Started for a goal"),
+        TurnOrigin::Delegation => Some("Started by a delegation"),
+        TurnOrigin::Budget => Some("Started by a budget check"),
+    }
+}
+
 pub(super) fn status_text(status: &Status) -> (&'static str, String) {
     match status {
         Status::Stopped => ("Stopped", String::new()),
@@ -105,6 +118,19 @@ pub(super) fn status_text(status: &Status) -> (&'static str, String) {
         Status::Unresponsive => (
             "Interrupted",
             "The agent stopped answering, so the turn was ended.".to_owned(),
+        ),
+        Status::NoProgress => (
+            "Stopped",
+            "The bot repeated the same steps with the same results, so Crow Bot stopped the turn."
+                .to_owned(),
+        ),
+        Status::Inactive => (
+            "Stopped",
+            "The agent sent nothing for too long, so Crow Bot stopped the turn.".to_owned(),
+        ),
+        Status::ToolCallLimit => (
+            "Stopped",
+            "The turn reached the bot's limit of tool calls.".to_owned(),
         ),
         Status::LengthLimit => (
             "Stopped",
@@ -365,7 +391,7 @@ impl Workspace {
                     .child(text);
                 return column(key, layout::ROW_GAP, last, note);
             }
-            RowKind::User { .. } => {
+            RowKind::User { origin, .. } => {
                 let bubble = self
                     .message_text(key, &blocks, theme.text, theme, cx)
                     .debug_selector(move || format!("bubble-{key}"))
@@ -382,7 +408,25 @@ impl Workspace {
                     .gap(space::S2)
                     .child(self.message_actions(row, theme, cx))
                     .child(bubble);
-                return column(key, top, last, line);
+                // A turn the daemon started says so above its message.
+                let Some(label) = origin_label(*origin) else {
+                    return column(key, top, last, line);
+                };
+                let started = div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(space::S1)
+                    .child(
+                        div()
+                            .debug_selector(move || format!("origin-{key}"))
+                            .text_size(text::SM.size)
+                            .line_height(text::SM.leading)
+                            .text_color(theme.text_muted)
+                            .child(label),
+                    )
+                    .child(line);
+                return column(key, top, last, started);
             }
             RowKind::Answer { .. } => {
                 let ghost = blocks

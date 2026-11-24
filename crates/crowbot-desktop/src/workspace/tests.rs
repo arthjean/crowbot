@@ -90,6 +90,7 @@ fn timed_snapshot(id: i64, bot_id: i64, events: Vec<TimedEvent>) -> Conversation
         pending_approvals: Vec::new(),
         queue: QueueState::default(),
         turn_model: None,
+        usage: None,
     }
 }
 

@@ -14,11 +14,13 @@ use crowbot_protocol::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH as INSTRUCTIONS_LENGTH,
     BOT_MODEL_LENGTH as MODEL_LENGTH, BOT_NAME_LENGTH, BOT_TITLE_LENGTH as TITLE_LENGTH, BotDraft,
     BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, PROTOCOL_VERSION,
-    PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage, mascot_at,
+    PermissionLevel, Preferences, PreferencesPatch, SIDEBAR_WIDTH_LIMIT, ServerMessage,
+    TOOL_CALL_LIMIT_MAX, mascot_at,
 };
 use tokio::sync::oneshot;
 
 use crate::conversation::{self, Command, ConversationHandle, Sink};
+use crate::private;
 use crate::prompt::Sections;
 use crate::runtime::Runtimes;
 use crate::store::{BotRow, NewBot, SharedStore, StoreError};
@@ -28,6 +30,9 @@ use crate::tools::Registry;
 pub const CUSTOM_PROVIDER: &str = "custom";
 
 const SLUG_LENGTH: usize = 48;
+/// The file of the data folder whose presence pauses the daemon's own turns,
+/// at start and across restarts.
+pub const PAUSED_FILE: &str = "PAUSED";
 /// How long a deleted bot's conversation gets to stop its turn. A turn ends
 /// within the stop timeout of the conversation, which is shorter.
 const SHUTDOWN_PATIENCE: Duration = Duration::from_secs(15);
@@ -99,6 +104,8 @@ struct State {
     deleting: HashSet<i64>,
     /// The daemon was told to stop: no conversation starts a task.
     stopping: bool,
+    /// The daemon starts no turn of its own (`PAUSED_FILE`).
+    paused: bool,
     providers: HashMap<&'static str, providers::ProviderEntry>,
 }
 
@@ -133,6 +140,7 @@ impl Daemon {
         command: Option<String>,
         runtimes: Runtimes,
     ) -> Self {
+        let paused = data_dir.join(PAUSED_FILE).symlink_metadata().is_ok();
         Self {
             store,
             database,
@@ -140,7 +148,10 @@ impl Daemon {
             data_dir,
             command,
             runtimes,
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                paused,
+                ..State::default()
+            }),
             next_connection: AtomicU64::new(1),
             tools: Arc::new(Registry::new()),
             sections: Sections::new(),
@@ -167,7 +178,60 @@ impl Daemon {
             protocol_version: PROTOCOL_VERSION,
             database: self.database.to_string_lossy().into_owned(),
             linger: crate::systemd::linger(),
+            paused: self.paused(),
         })
+    }
+
+    /// Whether the daemon starts no turn of its own. A person's message
+    /// still starts one.
+    pub fn paused(&self) -> bool {
+        self.state().paused
+    }
+
+    /// Stops every new turn the daemon would start on its own, now and after
+    /// a restart. The turns that run go on.
+    pub fn pause(&self) -> Result<(), Refusal> {
+        self.state().paused = true;
+        let file = self.data_dir.join(PAUSED_FILE);
+        let written = private::create_folder(&self.data_dir).and_then(|()| {
+            private::write(
+                &file,
+                "Crow Bot starts no turn of its own while this file exists.\n",
+            )
+        });
+        self.publish_info();
+        written.map_err(|error| {
+            Refusal::Other(format!(
+                "The daemon is paused, but it cannot write {}, so it will not stay paused after a restart: {error}",
+                file.display()
+            ))
+        })
+    }
+
+    /// Lets the daemon start its own turns again. A `PAUSED` file that
+    /// cannot be removed keeps it paused, since it would pause it again at
+    /// the next start.
+    pub fn resume(&self) -> Result<(), Refusal> {
+        let file = self.data_dir.join(PAUSED_FILE);
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Refusal::Other(format!(
+                    "The daemon stays paused: it cannot remove {}: {error}",
+                    file.display()
+                )));
+            }
+        }
+        self.state().paused = false;
+        self.publish_info();
+        Ok(())
+    }
+
+    /// Sends the daemon's info to every attached client.
+    fn publish_info(&self) {
+        let info = self.info();
+        self.state().broadcast(&info);
     }
 
     pub fn search(&self, request: u64, query: &str) -> Result<ServerMessage, String> {
@@ -332,6 +396,7 @@ impl Daemon {
             model: checked_choice("model", draft.model)?,
             effort: checked_choice("effort", draft.effort)?,
             permission_level: draft.permission_level.unwrap_or_default(),
+            tool_call_limit: checked_limit(draft.tool_call_limit)?,
             workspace: String::new(),
             name,
         };
@@ -363,6 +428,7 @@ impl Daemon {
             model: source.model,
             effort: source.effort,
             permission_level: source.permission_level,
+            tool_call_limit: source.tool_call_limit,
             workspace: String::new(),
         };
         self.insert_bot(new, folder)
@@ -723,6 +789,17 @@ fn checked_workspace(workspace: &str) -> Result<String, Refusal> {
     Ok(workspace.to_owned())
 }
 
+/// A tool call limit per turn lets at least one call run.
+fn checked_limit(limit: Option<u32>) -> Result<Option<u32>, Refusal> {
+    match limit {
+        Some(limit) if limit == 0 || limit > TOOL_CALL_LIMIT_MAX => Err(invalid(
+            "tool_call_limit",
+            format!("A limit of tool calls per turn is between 1 and {TOOL_CALL_LIMIT_MAX}."),
+        )),
+        limit => Ok(limit),
+    }
+}
+
 fn checked_patch(patch: BotPatch) -> Result<BotPatch, Refusal> {
     Ok(BotPatch {
         name: patch.name.as_deref().map(checked_name).transpose()?,
@@ -750,6 +827,7 @@ fn checked_patch(patch: BotPatch) -> Result<BotPatch, Refusal> {
             .map(checked_workspace)
             .transpose()?,
         permission_level: patch.permission_level,
+        tool_call_limit: patch.tool_call_limit.map(checked_limit).transpose()?,
         pinned: patch.pinned,
         hidden: patch.hidden,
     })

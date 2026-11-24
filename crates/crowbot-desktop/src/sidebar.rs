@@ -131,6 +131,7 @@ pub mod tests {
                 model: None,
                 effort: None,
                 permission_level: PermissionLevel::AskFirst,
+                tool_call_limit: None,
                 workspace: "/work".to_owned(),
                 pinned: false,
                 hidden: false,

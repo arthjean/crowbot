@@ -247,6 +247,7 @@ async fn a_bot_keeps_all_its_fields_across_a_restart() {
             model: Some("smart".to_owned()),
             effort: None,
             permission_level: Some(PermissionLevel::FullAccess),
+            tool_call_limit: Some(25),
             workspace: Some(folder.to_string_lossy().into_owned()),
         })
         .await;
@@ -260,6 +261,7 @@ async fn a_bot_keeps_all_its_fields_across_a_restart() {
     assert_eq!(bot.provider, "custom");
     assert_eq!(bot.model.as_deref(), Some("smart"));
     assert_eq!(bot.permission_level, PermissionLevel::FullAccess);
+    assert_eq!(bot.tool_call_limit, Some(25));
     assert_eq!(Path::new(&bot.workspace), folder);
     assert!(!bot.pinned && !bot.hidden);
     assert!(bot.created_at_ms > 0);

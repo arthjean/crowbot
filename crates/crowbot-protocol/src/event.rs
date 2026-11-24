@@ -181,13 +181,34 @@ pub enum ToolEffect {
     External,
 }
 
-/// A message a person sent, with the note the daemon put before it: what
-/// changed in what the session was given when it opened. A message with no
-/// note is stored as its text alone, the shape every earlier daemon wrote.
+/// Who started a turn: a person, or the daemon on its own for one of its
+/// reasons. Every turn the daemon starts needs the switch of its origin
+/// (`AGENTS.md`, "A turn the daemon starts needs the user's switch").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    /// A message a person sent from a client.
+    #[default]
+    User,
+    Routine,
+    Review,
+    Goal,
+    Delegation,
+    /// The same message, sent again after a turn that failed before it said
+    /// anything.
+    Retry,
+    Budget,
+}
+
+/// The message that starts a turn, with the note the daemon put before it:
+/// what changed in what the session was given when it opened. A message a
+/// person sent with no note is stored as its text alone, the shape every
+/// earlier daemon wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UserMessage {
     pub text: String,
     pub note: Option<String>,
+    pub origin: TurnOrigin,
 }
 
 impl UserMessage {
@@ -195,12 +216,19 @@ impl UserMessage {
         Self {
             text: text.into(),
             note: None,
+            origin: TurnOrigin::User,
         }
     }
 
     #[must_use]
     pub fn with_note(mut self, note: Option<String>) -> Self {
         self.note = note.filter(|note| !note.is_empty());
+        self
+    }
+
+    #[must_use]
+    pub fn with_origin(mut self, origin: TurnOrigin) -> Self {
+        self.origin = origin;
         self
     }
 }
@@ -213,21 +241,29 @@ impl std::ops::Deref for UserMessage {
     }
 }
 
+fn is_user(origin: &TurnOrigin) -> bool {
+    *origin == TurnOrigin::User
+}
+
 impl Serialize for UserMessage {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(Serialize)]
         struct Noted<'a> {
             text: &'a str,
-            note: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<&'a str>,
+            #[serde(skip_serializing_if = "is_user")]
+            origin: TurnOrigin,
         }
-        match &self.note {
-            None => serializer.serialize_str(&self.text),
-            Some(note) => Noted {
-                text: &self.text,
-                note,
-            }
-            .serialize(serializer),
+        if self.note.is_none() && is_user(&self.origin) {
+            return serializer.serialize_str(&self.text);
         }
+        Noted {
+            text: &self.text,
+            note: self.note.as_deref(),
+            origin: self.origin,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -241,14 +277,61 @@ impl<'de> Deserialize<'de> for UserMessage {
                 text: String,
                 #[serde(default)]
                 note: Option<String>,
+                #[serde(default)]
+                origin: TurnOrigin,
             },
         }
         Ok(match Stored::deserialize(deserializer)? {
             Stored::Text(text) => Self::new(text),
-            Stored::Noted { text, note } => Self::new(text).with_note(note),
+            Stored::Noted { text, note, origin } => {
+                Self::new(text).with_note(note).with_origin(origin)
+            }
         })
     }
 }
+
+/// What an agent reported a turn consumed. A field the agent did not report
+/// is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    /// The provider that ran the turn.
+    pub provider: String,
+    /// The tokens in the context at the end of the turn, out of `context_size`.
+    #[serde(default)]
+    pub context_used: Option<u64>,
+    #[serde(default)]
+    pub context_size: Option<u64>,
+    /// What the provider session has cost so far, at the end of the turn.
+    #[serde(default)]
+    pub session_cost: Option<Cost>,
+    /// What the session cost grew by during the turn.
+    #[serde(default)]
+    pub turn_cost: Option<Cost>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+}
+
+/// An amount of money, or of another unit a provider counts in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Cost {
+    pub amount: f64,
+    /// An ISO 4217 code such as `USD`, or another unit such as `credits`.
+    pub currency: String,
+}
+
+/// Two costs are equal when they hold the same bits: a cost is a figure the
+/// daemon stores and shows, never one it computes a decision from.
+impl PartialEq for Cost {
+    fn eq(&self, other: &Self) -> bool {
+        self.amount.to_bits() == other.amount.to_bits() && self.currency == other.currency
+    }
+}
+
+impl Eq for Cost {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -262,6 +345,12 @@ pub enum ApprovalClosure {
 pub enum Interruption {
     DaemonRestarted,
     AgentUnresponsive,
+    /// The bot repeated the same tool calls with the same results.
+    NoProgress,
+    /// A turn the daemon started received nothing from its agent for too long.
+    Inactive,
+    /// The turn asked for more tool calls than the bot's limit per turn.
+    BudgetExhausted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,6 +571,75 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Event>(no_field).unwrap(),
             Event::user_text("hi")
+        );
+    }
+
+    #[test]
+    fn a_message_keeps_its_origin_and_one_stored_before_origins_is_a_person_s() {
+        let retried = Event::UserText(UserMessage::new("go").with_origin(TurnOrigin::Retry));
+        let stored = serde_json::to_string(&retried).unwrap();
+        assert_eq!(
+            stored,
+            r#"{"type":"user_text","data":{"text":"go","origin":"retry"}}"#
+        );
+        assert_eq!(serde_json::from_str::<Event>(&stored).unwrap(), retried);
+        let noted = r#"{"type":"user_text","data":{"text":"go","note":"changed"}}"#;
+        let Event::UserText(message) = serde_json::from_str::<Event>(noted).unwrap() else {
+            panic!("not a message");
+        };
+        assert_eq!(message.origin, TurnOrigin::User);
+        let Event::UserText(plain) =
+            serde_json::from_str::<Event>(r#"{"type":"user_text","data":"go"}"#).unwrap()
+        else {
+            panic!("not a message");
+        };
+        assert_eq!(plain.origin, TurnOrigin::User);
+        for (origin, name) in [
+            (TurnOrigin::User, "user"),
+            (TurnOrigin::Routine, "routine"),
+            (TurnOrigin::Review, "review"),
+            (TurnOrigin::Goal, "goal"),
+            (TurnOrigin::Delegation, "delegation"),
+            (TurnOrigin::Retry, "retry"),
+            (TurnOrigin::Budget, "budget"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&origin).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn the_causes_of_a_guarded_stop_have_a_stable_stored_shape() {
+        for (cause, name) in [
+            (Interruption::NoProgress, "no_progress"),
+            (Interruption::Inactive, "inactive"),
+            (Interruption::BudgetExhausted, "budget_exhausted"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&Event::TurnInterrupted { cause }).unwrap(),
+                format!(r#"{{"type":"turn_interrupted","data":{{"cause":"{name}"}}}}"#)
+            );
+        }
+    }
+
+    #[test]
+    fn a_usage_that_reported_nothing_more_reads_with_empty_fields() {
+        let usage: TurnUsage = serde_json::from_str(r#"{"provider":"grok"}"#).unwrap();
+        assert_eq!(usage.context_used, None);
+        assert_eq!(usage.turn_cost, None);
+        let cost = Cost {
+            amount: 0.25,
+            currency: "USD".to_owned(),
+        };
+        assert_eq!(cost.clone(), cost);
+        assert_ne!(
+            cost,
+            Cost {
+                amount: 0.25,
+                currency: "credits".to_owned()
+            }
         );
     }
 

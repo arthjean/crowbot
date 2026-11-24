@@ -2,9 +2,11 @@ mod bots;
 mod preferences;
 mod search;
 mod sessions;
+mod usage;
 
 pub use bots::{BotRow, NewBot};
 pub use sessions::{ProviderSession, ProviderSetting, session_fingerprint};
+pub use usage::{Reported, Tokens};
 
 use std::fmt;
 use std::path::Path;
@@ -17,7 +19,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -166,6 +168,54 @@ ALTER TABLE bots ADD COLUMN avatar_shape TEXT NOT NULL DEFAULT 'smooth';
 /// prompt it has seen, at its start and in the notes since, as a JSON object.
 const SCHEMA_V9: &str = "
 ALTER TABLE provider_sessions ADD COLUMN sections TEXT NOT NULL DEFAULT '{}';
+";
+
+/// A bot may have a limit on the tool calls of a turn. What an agent reports
+/// a turn consumed is kept with the event that started the turn. The search
+/// index holds the text of a message that is stored with a note or an
+/// origin, and no longer the JSON around it.
+const SCHEMA_V10: &str = "
+ALTER TABLE bots ADD COLUMN tool_call_limit INTEGER;
+CREATE TABLE turn_usage (
+    turn_event_id INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    provider TEXT NOT NULL,
+    session_id TEXT,
+    context_used INTEGER,
+    context_size INTEGER,
+    session_cost REAL,
+    turn_cost REAL,
+    cost_currency TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    total_tokens INTEGER,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX turn_usage_by_conversation ON turn_usage(conversation_id, turn_event_id);
+DROP TRIGGER event_text_insert;
+DROP TRIGGER event_text_update;
+CREATE TRIGGER event_text_insert AFTER INSERT ON events
+WHEN new.kind IN ('user_text', 'message_text') AND json_valid(new.payload)
+BEGIN
+    INSERT INTO event_text (rowid, body) VALUES (new.id,
+        COALESCE(json_extract(new.payload, '$.data.text'), json_extract(new.payload, '$.data')));
+END;
+CREATE TRIGGER event_text_update AFTER UPDATE OF payload ON events
+WHEN new.kind IN ('user_text', 'message_text')
+BEGIN
+    DELETE FROM event_text WHERE rowid = old.id;
+    INSERT INTO event_text (rowid, body)
+        SELECT new.id,
+            COALESCE(json_extract(new.payload, '$.data.text'), json_extract(new.payload, '$.data'))
+        WHERE json_valid(new.payload);
+END;
+DELETE FROM event_text WHERE rowid IN (
+    SELECT id FROM events
+    WHERE kind = 'user_text' AND json_valid(payload) AND json_type(payload, '$.data') = 'object'
+);
+INSERT INTO event_text (rowid, body)
+    SELECT id, json_extract(payload, '$.data.text') FROM events
+    WHERE kind = 'user_text' AND json_valid(payload) AND json_type(payload, '$.data') = 'object';
 ";
 
 const UNFINISHED_TURNS: &str = "
@@ -319,6 +369,9 @@ impl Store {
         }
         if version < 9 {
             transaction.execute_batch(SCHEMA_V9)?;
+        }
+        if version < 10 {
+            transaction.execute_batch(SCHEMA_V10)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -1018,6 +1071,7 @@ mod tests {
                 model: None,
                 effort: None,
                 permission_level: crowbot_protocol::PermissionLevel::AskFirst,
+                tool_call_limit: None,
                 workspace: "/work".to_owned(),
             })
             .unwrap()

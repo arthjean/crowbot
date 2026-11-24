@@ -229,6 +229,9 @@ pub struct Daemon {
     /// The daemon runs in a user namespace of its own, which takes something
     /// from it.
     confinement: Option<Confinement>,
+    /// What the waits of the daemon's guards are divided by
+    /// (`CROWBOT_TEST_TIME_SCALE`, `guard.rs`).
+    time_scale: Option<u32>,
 }
 
 /// What a daemon in a user namespace of its own goes without. Its account
@@ -249,6 +252,21 @@ impl Daemon {
         Self::start_with(Agent::Scripted {
             system_prompt: false,
         })
+    }
+
+    /// A daemon whose guards wait `scale` times less than a real one.
+    pub fn start_scaled(scale: u32) -> Self {
+        let mut daemon = Self::stopped(Agent::Scripted {
+            system_prompt: false,
+        });
+        daemon.time_scale = Some(scale);
+        daemon.spawn();
+        daemon
+    }
+
+    /// A wait of the daemon's guards, as this daemon applies it.
+    pub fn scaled(&self, wait: Duration) -> Duration {
+        wait / self.time_scale.unwrap_or(1)
     }
 
     /// A daemon whose agent advertises that it takes a system prompt.
@@ -358,6 +376,7 @@ impl Daemon {
             child: None,
             agent,
             confinement: None,
+            time_scale: None,
         }
     }
 
@@ -386,6 +405,9 @@ impl Daemon {
             .open(self.dir.join("daemon.log"))
             .unwrap();
         let mut command = daemon_command(&self.dir, &self.endpoint, self.agent);
+        if let Some(scale) = self.time_scale {
+            command.env("CROWBOT_TEST_TIME_SCALE", scale.to_string());
+        }
         if let Some(confinement) = self.confinement {
             command = confined(command, &self.dir.join("runtimes"), confinement);
         }

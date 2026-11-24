@@ -304,6 +304,7 @@ mod tests {
                 model: None,
                 effort: None,
                 permission_level: PermissionLevel::AskFirst,
+                tool_call_limit: None,
                 workspace: "/bots/atlas".to_owned(),
             })
             .unwrap();

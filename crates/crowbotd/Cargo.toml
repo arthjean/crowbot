@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-agent-client-protocol = { version = "=5.2.0", features = ["process", "unstable_auth_status"] }
+agent-client-protocol = { version = "=5.2.0", features = ["process", "unstable_auth_status", "unstable_end_turn_token_usage"] }
 crowbot-protocol = { workspace = true, features = ["transport"] }
 flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "system-proxy"] }

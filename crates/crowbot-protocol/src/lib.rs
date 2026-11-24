@@ -15,13 +15,13 @@ mod wire;
 pub use bot::{
     AVATAR_COLORS, Avatar, BOT_INSTRUCTIONS_LENGTH, BOT_MODEL_LENGTH, BOT_NAME_LENGTH,
     BOT_TITLE_LENGTH, Bot, BotDraft, BotPatch, BotState, BotSummary, MascotShape, PermissionLevel,
-    mascot_at,
+    TOOL_CALL_LIMIT_MAX, mascot_at,
 };
 pub use endpoint::{Endpoint, SOCKET_PATH_LIMIT};
 pub use event::{
-    APPROVAL_TARGET_BYTES, ApprovalClosure, ApprovalDecision, ApprovalReason, Event, FailureCause,
-    Interruption, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolEffect, ToolKind, ToolStatus, TurnEnd,
-    UserMessage, cut_text,
+    APPROVAL_TARGET_BYTES, ApprovalClosure, ApprovalDecision, ApprovalReason, Cost, Event,
+    FailureCause, Interruption, TOOL_INPUT_BYTES, TOOL_OUTPUT_BYTES, ToolEffect, ToolKind,
+    ToolStatus, TurnEnd, TurnOrigin, TurnUsage, UserMessage, cut_text,
 };
 pub use folders::Folders;
 pub use message::{

@@ -216,6 +216,8 @@ impl ClientState {
                 reply(daemon.info());
                 Ok(())
             }
+            ClientMessage::PauseDaemon => daemon.pause(),
+            ClientMessage::ResumeDaemon => daemon.resume(),
             ClientMessage::Search { request, query } => {
                 daemon.search(request, &query).map(reply).map_err(failed)
             }

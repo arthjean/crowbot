@@ -178,7 +178,8 @@ mod tests {
     use rusqlite::Connection;
 
     use super::super::{
-        EventsWindow, NewBot, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_VERSION,
+        EventsWindow, NewBot, SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+        SCHEMA_V7, SCHEMA_V8, SCHEMA_V9, SCHEMA_VERSION,
     };
     use super::*;
 
@@ -200,6 +201,7 @@ mod tests {
                 model: None,
                 effort: None,
                 permission_level: PermissionLevel::AskFirst,
+                tool_call_limit: None,
                 workspace: "/work".to_owned(),
             })
             .unwrap();
@@ -559,6 +561,62 @@ mod tests {
         assert_eq!(shown[3], hit, "half of the page leads to the hit");
         assert_eq!(window.older, Some(shown[0]));
         assert_eq!(window.newer, Some(shown[7]));
+    }
+
+    #[test]
+    fn a_version_9_database_gains_usage_and_limits_and_indexes_the_text_of_noted_messages() {
+        let connection = Connection::open_in_memory().unwrap();
+        for schema in [
+            SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+            SCHEMA_V9,
+        ] {
+            connection.execute_batch(schema).unwrap();
+        }
+        connection.pragma_update(None, "user_version", 9).unwrap();
+        connection
+            .execute_batch(
+                r##"INSERT INTO bots (name, avatar_color, avatar_glyph, provider, workspace, created_at_ms)
+                    VALUES ('Atlas', '#3b82f6', 'A', 'claude', '/work', 5);
+                 INSERT INTO conversations (bot_id, provider, cwd, created_at_ms)
+                    VALUES (1, 'claude', '/work', 6);
+                 UPDATE bots SET current_conversation_id = 1;
+                 INSERT INTO events (conversation_id, kind, payload, created_at_ms) VALUES
+                    (1, 'user_text', '{"type":"user_text","data":{"text":"find the albatross","note":"memory changed"}}', 7),
+                    (1, 'turn_ended', '{"type":"turn_ended","data":"completed"}', 8);"##,
+            )
+            .unwrap();
+        let store = Store::from_connection(connection).unwrap();
+        let version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(store.bots().unwrap()[0].bot.tool_call_limit, None);
+        assert_eq!(store.events(1).unwrap().len(), 2);
+        assert_eq!(store.last_usage(1).unwrap(), None);
+        let found = |query| {
+            store
+                .search(1, query)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|hit| hit.event_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(found("albatross"), [1]);
+        assert!(found("memory").is_empty());
+        // A message stored from now on with an origin is found by its text alone.
+        store
+            .append(
+                1,
+                &Event::UserText(
+                    crowbot_protocol::UserMessage::new("the albatross again")
+                        .with_origin(crowbot_protocol::TurnOrigin::Retry),
+                ),
+            )
+            .unwrap();
+        assert_eq!(found("albatross"), [3, 1]);
+        assert!(found("retry").is_empty());
     }
 
     #[test]

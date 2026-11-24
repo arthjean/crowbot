@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bot::{BotDraft, BotPatch, BotSummary, present};
-use crate::event::{ApprovalDecision, Event};
+use crate::event::{ApprovalDecision, Event, TurnUsage};
 use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
 use crate::search::SearchResults;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -146,6 +146,11 @@ pub enum ClientMessage {
         provider: String,
     },
     GetDaemonInfo,
+    /// Stops every new turn the daemon would start on its own; the turns
+    /// that run go on. Every attached client receives the daemon's info.
+    PauseDaemon,
+    /// Lets the daemon start its own turns again.
+    ResumeDaemon,
     Search {
         request: u64,
         query: String,
@@ -298,6 +303,10 @@ pub struct ConversationSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub turn_model: Option<Option<String>>,
+    /// What the agent reported the last turn that ended consumed. `None`
+    /// when it reported nothing, or when no turn ended yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TurnUsage>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,6 +341,7 @@ mod tests {
             pending_approvals: Vec::new(),
             queue: QueueState::default(),
             turn_model,
+            usage: None,
         }
     }
 

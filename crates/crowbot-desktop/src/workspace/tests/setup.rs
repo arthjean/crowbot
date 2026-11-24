@@ -1022,6 +1022,7 @@ fn info() -> DaemonInfo {
         protocol_version: 6,
         database: "C:\\Users\\me\\.crowbot\\crowbot.db".to_owned(),
         linger: None,
+        paused: false,
     }
 }
 

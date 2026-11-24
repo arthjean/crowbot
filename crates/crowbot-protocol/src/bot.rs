@@ -8,6 +8,8 @@ pub const BOT_TITLE_LENGTH: usize = 80;
 pub const BOT_INSTRUCTIONS_LENGTH: usize = 20_000;
 /// The longest model name a bot can have, in characters.
 pub const BOT_MODEL_LENGTH: usize = 200;
+/// The highest tool call limit per turn a bot can have.
+pub const TOOL_CALL_LIMIT_MAX: u32 = 10_000;
 /// The colors an avatar is picked from, as `#rrggbb`, in the order of the hue
 /// wheel, then the deep and the neutral tones. A bot created with no avatar
 /// takes the next one of this list.
@@ -104,6 +106,10 @@ pub struct Bot {
     #[serde(default)]
     pub effort: Option<String>,
     pub permission_level: PermissionLevel,
+    /// The tool calls a turn may make. The daemon stops a turn that asks for
+    /// one more. `None` sets no limit.
+    #[serde(default)]
+    pub tool_call_limit: Option<u32>,
     /// The folder the bot works in.
     pub workspace: String,
     pub pinned: bool,
@@ -130,6 +136,8 @@ pub struct BotDraft {
     pub effort: Option<String>,
     #[serde(default)]
     pub permission_level: Option<PermissionLevel>,
+    #[serde(default)]
+    pub tool_call_limit: Option<u32>,
     #[serde(default)]
     pub workspace: Option<String>,
 }
@@ -166,6 +174,13 @@ pub struct BotPatch {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<PermissionLevel>,
+    /// `Some(None)` removes the limit.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tool_call_limit: Option<Option<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

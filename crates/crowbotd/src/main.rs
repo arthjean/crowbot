@@ -1,6 +1,7 @@
 mod conversation;
 mod daemon;
 mod digest;
+mod guard;
 mod handoff;
 mod instance;
 mod lifetime;

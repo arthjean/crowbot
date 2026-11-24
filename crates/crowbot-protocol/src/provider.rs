@@ -123,6 +123,10 @@ pub struct DaemonInfo {
     /// stop when the user logs out. `None` where the notion does not apply.
     #[serde(default)]
     pub linger: Option<bool>,
+    /// The daemon starts no turn of its own: only a person's message starts
+    /// one. The file `PAUSED` of its data folder keeps it so across restarts.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[cfg(test)]
