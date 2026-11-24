@@ -419,6 +419,7 @@ dependencies = [
  "agent-client-protocol",
  "crowbot-protocol",
  "flate2",
+ "jiff",
  "libc",
  "regex",
  "reqwest",

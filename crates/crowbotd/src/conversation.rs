@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
     FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryChange, MemoryOperation,
-    QueueState, ServerMessage, SkillAuthor, SkillChange, TurnEnd, TurnOrigin, TurnRefusal,
-    UserMessage,
+    QueueState, RoutineIncident, RoutinePause, RoutineState, RunOutcome, ServerMessage,
+    SkillAuthor, SkillChange, TurnEnd, TurnOrigin, TurnRefusal, UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -22,9 +22,11 @@ use crate::prompt::Sections;
 use crate::provider::acp::{
     self, AgentEvent, ApprovalAnswer, SessionCommand, SessionConfig, SessionFailure,
 };
+use crate::routines::RUN_RETRY_DELAYS;
 use crate::store::{
     BotRow, Conversation, EventsPage, MemoryWriter, ProviderSession, Recorder, Reported, ReviewRow,
-    SharedStore, SkillPlan, SkillWriter, StoreError, Tokens, TurnEndKind, session_fingerprint,
+    RunEnd, SharedStore, SkillPlan, SkillWriter, StoreError, Tokens, TurnEndKind,
+    session_fingerprint,
 };
 use crate::tools::{Outputs, SessionKind, SkillUses, ToolContext, TurnGate};
 
@@ -108,12 +110,26 @@ pub enum Command {
         operations: Vec<MemoryOperation>,
         sink: Sink,
     },
-    /// A person changes the bot's skills; the change is recorded in this
-    /// conversation, in its place among the events.
+    /// A person, or the curator, changes the bot's skills; the change is
+    /// recorded in this conversation, in its place among the events.
     ChangeSkills {
         plans: Vec<SkillPlan>,
+        author: SkillAuthor,
         sink: Sink,
     },
+    /// The scheduler starts a queued run of this conversation's routine,
+    /// with its prompt.
+    StartRun {
+        run_id: i64,
+        text: String,
+    },
+    /// The daemon records an event of its own here, in its place among the
+    /// events.
+    Notice {
+        event: Event,
+    },
+    /// The routine this conversation belonged to was deleted.
+    RoutineDeleted,
     /// The daemon starts the review this conversation holds, with its prompt.
     Review {
         text: String,
@@ -174,10 +190,21 @@ pub fn spawn(daemon: Arc<Daemon>, conversation: &Conversation) -> ConversationHa
             );
             None
         });
+    let routine = store
+        .with(|store| store.routine_of_conversation(conversation.id))
+        .unwrap_or_else(|error| {
+            eprintln!(
+                "[crowbotd] conversation {}: cannot read whether it is a routine's: {error}",
+                conversation.id
+            );
+            None
+        });
     let actor = Actor {
         id: conversation.id,
         bot_id: conversation.bot_id,
         review,
+        routine,
+        next_run: None,
         uses: SkillUses::default(),
         titled: conversation.title.is_some(),
         recorder: Recorder::new(store.clone(), conversation.id),
@@ -259,6 +286,11 @@ struct RunningTurn {
     /// The active skills of the bot when the turn started: the ones its
     /// index listed.
     indexed: u32,
+    /// The run of a routine this turn is.
+    run: Option<i64>,
+    /// The agent sent an event of the turn: a message, a thought, a tool
+    /// call, or a request.
+    heard: bool,
 }
 
 impl Default for RunningTurn {
@@ -274,6 +306,8 @@ impl Default for RunningTurn {
             not_recorded: None,
             last_activity: Instant::now(),
             indexed: 0,
+            run: None,
+            heard: false,
         }
     }
 }
@@ -382,6 +416,11 @@ struct Actor {
     /// The review this conversation holds, when it is one: its sessions
     /// call the daemon's tools of a review only, and no person writes in it.
     review: Option<ReviewRow>,
+    /// The routine this conversation belongs to, when it is one's: its
+    /// sessions are of kind `Routine`.
+    routine: Option<i64>,
+    /// The run of the routine the next turn is, taken when it begins.
+    next_run: Option<i64>,
     /// The skill versions `skill_view` loaded, per turn.
     uses: SkillUses,
     /// The conversation has its title, so no later message can give it one.
@@ -590,7 +629,18 @@ impl Actor {
             Command::ResumeQueue { sink } => self.resume_queue(&sink),
             Command::StandingChanged => self.review_approvals(),
             Command::ChangeMemory { operations, sink } => self.change_memory(&operations, &sink),
-            Command::ChangeSkills { plans, sink } => self.change_skills(&plans, &sink),
+            Command::ChangeSkills {
+                plans,
+                author,
+                sink,
+            } => self.change_skills(&plans, author, &sink),
+            Command::StartRun { run_id, text } => self.start_run(run_id, text),
+            Command::Notice { event } => {
+                let closed = self.recorder.close();
+                self.report_store(closed);
+                self.emit(event);
+            }
+            Command::RoutineDeleted => self.routine = None,
             Command::Review { text } => self.start_review(text),
             Command::RecordReview {
                 review_conversation_id,
@@ -642,13 +692,14 @@ impl Actor {
         }
     }
 
-    /// Applies a person's change of the bot's skills, all or none, with the
-    /// event that records it, after the text still in memory.
-    fn change_skills(&mut self, plans: &[SkillPlan], sink: &Sink) {
+    /// Applies a change of the bot's skills by a person or the curator, all
+    /// or none, with the event that records it, after the text still in
+    /// memory.
+    fn change_skills(&mut self, plans: &[SkillPlan], author: SkillAuthor, sink: &Sink) {
         let closed = self.recorder.close();
         self.report_store(closed);
         let writer = SkillWriter {
-            author: SkillAuthor::User,
+            author,
             bot_id: self.bot_id,
             conversation_id: Some(self.id),
         };
@@ -1039,8 +1090,66 @@ impl Actor {
             origin,
             text: text.to_owned(),
             indexed: self.indexed_skills(),
+            run: self.next_run.take(),
             ..RunningTurn::default()
         };
+    }
+
+    /// Starts a queued run of this conversation's routine, in a new provider
+    /// session, when the bot's switch and limits allow it. A run that finds
+    /// a turn of the conversation running does not start.
+    fn start_run(&mut self, run_id: i64, text: String) {
+        // A run of another conversation's routine never starts here.
+        let routine_id = self
+            .store
+            .with(|store| store.run(run_id))
+            .ok()
+            .flatten()
+            .filter(|run| run.conversation_id == self.id)
+            .map(|run| run.routine_id);
+        let Some(routine_id) = routine_id else {
+            return;
+        };
+        let not_started = |this: &mut Self, outcome: RunOutcome, end: RunEnd| {
+            this.daemon.end_run(run_id, routine_id, outcome, &end);
+        };
+        if self.turn_active || self.closing.is_some() {
+            return not_started(
+                self,
+                RunOutcome::Skipped,
+                RunEnd {
+                    refusal: None,
+                    detail: Some("A turn of the routine's conversation was running.".to_owned()),
+                },
+            );
+        }
+        // Each run starts clean: no session, and no memory of earlier runs
+        // but what the database gives it.
+        self.close_session();
+        let forgot = self
+            .store
+            .with(|store| store.forget_provider_sessions(self.id));
+        self.report_store(forgot);
+        let daemon = self.daemon.clone();
+        let _admission = daemon.admission();
+        if let Err(cause) = self.admit_cause(TurnOrigin::Routine) {
+            return not_started(
+                self,
+                RunOutcome::NotStarted,
+                RunEnd {
+                    refusal: Some(cause),
+                    detail: None,
+                },
+            );
+        }
+        match self.store.with(|store| store.run_started(run_id)) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => return self.report_store(Err::<(), _>(error)),
+        }
+        self.next_run = Some(run_id);
+        self.start_turn(text, TurnOrigin::Routine, 0);
+        self.daemon.publish_routine(routine_id);
     }
 
     /// The active skills of the bot, which its index lists. A review's
@@ -1058,8 +1167,13 @@ impl Actor {
     /// may not is recorded with its cause; a pause or a limit is also told
     /// here, while a switch that is off is the person's own choice.
     fn admit(&mut self, origin: TurnOrigin) -> bool {
+        self.admit_cause(origin).is_ok()
+    }
+
+    /// `admit`, with the cause of a refusal.
+    fn admit_cause(&mut self, origin: TurnOrigin) -> Result<(), TurnRefusal> {
         let Err(cause) = self.daemon.admit(self.bot_id, origin) else {
-            return true;
+            return Ok(());
         };
         self.daemon
             .record_refusal(self.bot_id, Some(self.id), origin, cause, false);
@@ -1068,7 +1182,7 @@ impl Actor {
             self.report_store(closed);
             self.emit(Event::TurnNotStarted { origin, cause });
         }
-        false
+        Err(cause)
     }
 
     /// Sends again the message of a turn that failed before it said
@@ -1476,6 +1590,8 @@ impl Actor {
             conversation_id: self.id,
             kind: if self.review.is_some() {
                 SessionKind::Review
+            } else if self.routine.is_some() {
+                SessionKind::Routine
             } else {
                 SessionKind::Conversation
             },
@@ -1559,6 +1675,7 @@ impl Actor {
                                 _ => None,
                             };
                             let skills = matches!(event, Event::SkillChanged { .. });
+                            let routines = matches!(event, Event::RoutineChanged { .. });
                             self.broadcast(ServerMessage::ConversationEvent {
                                 conversation_id: self.id,
                                 event,
@@ -1569,6 +1686,9 @@ impl Actor {
                             }
                             if skills {
                                 self.daemon.skills_changed(self.bot_id);
+                            }
+                            if routines {
+                                self.daemon.routines_changed(self.bot_id);
                             }
                         }
                         reply.send(Ok(applied.output)).ok();
@@ -2014,6 +2134,7 @@ impl Actor {
                 .with(|store| store.record_skill_turn(self.id, indexed, ended, &uses));
             self.report_store(figured);
         }
+        let last_end = end.clone();
         self.emit(end);
         if !self.followers.is_empty() {
             // A client has the end of the conversation on screen: the turn
@@ -2065,6 +2186,9 @@ impl Actor {
                 }
             }
         }
+        if let Some(run) = self.running.run.take() {
+            self.end_run(run, &last_end);
+        }
         if self.closing.is_some() {
             return;
         }
@@ -2112,11 +2236,106 @@ impl Actor {
         else {
             return None;
         };
-        // A review is not sent again: the next one reads the same work.
-        if self.running.said || self.review.is_some() {
+        // A review is not sent again: the next one reads the same work. A
+        // run of a routine has its own retries, by the clock of routines.
+        if self.running.said || self.review.is_some() || self.running.run.is_some() {
             return None;
         }
         RETRY_DELAYS.get(self.running.retries).copied()
+    }
+
+    /// The turn of a run of this conversation's routine ended: the run
+    /// records how. A run that said it had nothing to tell leaves the
+    /// conversation read; a sign-in that is needed pauses the routine; a
+    /// usage limit is told once while it repeats; and a run that failed
+    /// before its agent sent anything is tried again after each of
+    /// `RUN_RETRY_DELAYS`, and no further (US-034).
+    fn end_run(&mut self, run_id: i64, end: &Event) {
+        let now = crate::clock::now_ms();
+        let outcome = match end {
+            Event::TurnEnded(TurnEnd::Cancelled) => RunOutcome::Stopped,
+            Event::TurnEnded(_) => RunOutcome::Completed,
+            Event::TurnInterrupted { .. } => RunOutcome::Interrupted,
+            _ => RunOutcome::Failed,
+        };
+        let read = self.store.with(|store| {
+            store.end_run(run_id, outcome, &RunEnd::default(), now)?;
+            let Some(run) = store.run(run_id)? else {
+                return Ok(None);
+            };
+            Ok::<_, StoreError>(store.routine(run.routine_id)?.map(|row| (run, row.routine)))
+        });
+        let (run, routine) = match read {
+            Ok(Some(found)) => found,
+            Ok(None) => return,
+            Err(error) => return self.report_store(Err::<(), _>(error)),
+        };
+        let mut read_it = false;
+        let heard = self.running.heard;
+        let changed = self.store.with(|store| match end {
+            Event::TurnEnded(_) if outcome == RunOutcome::Completed => {
+                read_it = run.silent;
+                store.routine_succeeded(routine.id)
+            }
+            Event::TurnFailed {
+                cause: Some(FailureCause::SignInRequired),
+                ..
+            } => store
+                .set_routine_state(routine.id, RoutineState::Paused, routine.next_ms)
+                .map(|_| ()),
+            Event::TurnFailed {
+                cause: Some(FailureCause::UsageLimit),
+                ..
+            } => {
+                let incident = match &routine.incident {
+                    Some(incident) if incident.cause == FailureCause::UsageLimit => {
+                        // Told when it began: a repeat asks for no one,
+                        // and leaves unread what a person has not read.
+                        read_it = !store.unread_before_last_turn(self.id)?;
+                        RoutineIncident {
+                            runs: incident.runs + 1,
+                            ..incident.clone()
+                        }
+                    }
+                    _ => RoutineIncident {
+                        cause: FailureCause::UsageLimit,
+                        since_ms: now,
+                        runs: 1,
+                    },
+                };
+                store.set_incident(routine.id, Some(&incident))
+            }
+            Event::TurnFailed {
+                cause: None | Some(FailureCause::Other),
+                ..
+            } if !heard => match RUN_RETRY_DELAYS.get(run.attempt as usize) {
+                Some(wait) => {
+                    let wait = i64::try_from(wait.as_millis()).unwrap_or(i64::MAX);
+                    store.set_retry(routine.id, now.saturating_add(wait), run.attempt + 1)
+                }
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        });
+        self.report_store(changed);
+        if matches!(
+            end,
+            Event::TurnFailed {
+                cause: Some(FailureCause::SignInRequired),
+                ..
+            }
+        ) {
+            self.emit(Event::RoutinePaused {
+                routine_id: routine.id,
+                cause: RoutinePause::SignInRequired,
+            });
+        }
+        if read_it {
+            let marked = self.store.with(|store| store.mark_read(self.id));
+            self.report_store(marked);
+        }
+        self.daemon.publish_routine(routine.id);
+        self.daemon.wake_routines();
     }
 
     fn start_next_queued(&mut self) {
@@ -2256,6 +2475,18 @@ impl Actor {
                 | Event::ApprovalResolved { .. }
         ) {
             self.running.said = true;
+        }
+        if self.turn_active
+            && matches!(
+                event,
+                Event::MessageText(_)
+                    | Event::ThoughtText(_)
+                    | Event::ToolCallStarted { .. }
+                    | Event::ToolCallUpdated { .. }
+                    | Event::ApprovalRequested { .. }
+            )
+        {
+            self.running.heard = true;
         }
         self.recorder.record(event.clone())
     }

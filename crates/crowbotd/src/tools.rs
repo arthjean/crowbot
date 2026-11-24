@@ -30,11 +30,10 @@ use crate::store::{SharedStore, SkillUse, Store, StoreError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Conversation,
-    // The kinds below start with the routines and the delegations of the
-    // harness; a tool lists them already.
-    #[allow(dead_code)]
+    /// A session of a routine's conversation.
     Routine,
     Review,
+    // Delegations start with EP-009; a tool lists the kind already.
     #[allow(dead_code)]
     Delegated,
 }
@@ -386,6 +385,7 @@ impl Registry {
         registry.add(crate::memory::MemoryTool);
         registry.add(crate::history::SessionSearch(store.clone()));
         crate::skills::add_tools(&mut registry, skills);
+        crate::routines::add_tools(&mut registry, store);
         #[cfg(debug_assertions)]
         if let Some(folder) = crate::test_harness::folder() {
             crate::test_harness::add_tools(&mut registry, &folder);

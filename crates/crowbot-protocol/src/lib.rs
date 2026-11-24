@@ -7,6 +7,7 @@ mod memory;
 mod message;
 mod preferences;
 mod provider;
+mod routine;
 mod rules;
 #[cfg(any(test, feature = "scratch"))]
 pub mod scratch;
@@ -48,6 +49,12 @@ pub use preferences::{
 pub use provider::{
     DaemonInfo, ModelChoice, ModelsState, ProviderModels, ProviderState, ProviderStatus,
     RuntimeInstall, SignInMethod,
+};
+pub use routine::{
+    ROUTINE_EVERY_MAX_SECONDS, ROUTINE_EVERY_MIN_SECONDS, ROUTINE_NAME_CHARACTERS,
+    ROUTINE_PROMPT_CHARACTERS, ROUTINE_SKILLS, Routine, RoutineChangeKind, RoutineDraft,
+    RoutineIncident, RoutinePause, RoutineRun, RoutineScript, RoutineState, RoutineStateChange,
+    RunOutcome, Schedule,
 };
 pub use rules::{
     ApprovalRule, RULE_ARGUMENT_BYTES, RULE_ARGUMENTS, RULE_PROGRAM_BYTES, RuleDraft, RuleKind,

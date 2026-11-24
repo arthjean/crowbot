@@ -586,6 +586,90 @@ fn a_conversation_with_skill_events_opens_and_shows_them(cx: &mut TestAppContext
     )));
 }
 
+/// A conversation of a routine opens with its records, each shown as a
+/// notice: a routine a person allowed, occurrences it missed, a pause the
+/// daemon made, and the curator's change of skills (EP-007 of the harness
+/// PRD). A run shows as a turn of origin `Routine`.
+#[gpui::test]
+fn a_routine_s_records_open_as_notices(cx: &mut TestAppContext) {
+    use crowbot_protocol::{
+        RoutineChangeKind, RoutinePause, SkillAuthor, SkillChange, SkillChangeKind, TurnOrigin,
+        UserMessage,
+    };
+
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::RoutineChanged {
+                    routine_id: 4,
+                    name: "Morning".to_owned(),
+                    kind: RoutineChangeKind::Created,
+                },
+                Event::RoutineMissed {
+                    routine_id: 4,
+                    missed: 3,
+                    caught_up: true,
+                },
+                Event::UserText(UserMessage::new("run").with_origin(TurnOrigin::Routine)),
+                Event::TurnEnded(TurnEnd::Completed),
+                Event::RoutinePaused {
+                    routine_id: 4,
+                    cause: RoutinePause::ScriptChanged,
+                },
+                Event::SkillChanged {
+                    author: SkillAuthor::Curator,
+                    changes: vec![SkillChange {
+                        name: "deploy".to_owned(),
+                        kind: SkillChangeKind::Stale,
+                        old_hash: Some("ab12".to_owned()),
+                        new_hash: Some("ab12".to_owned()),
+                    }],
+                },
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 4);
+    for notice in notices {
+        assert!(shown(cx, notice), "{notice}");
+    }
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::RoutineMissed {
+            missed: 3,
+            caught_up: true,
+            ..
+        })
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::RoutinePaused {
+            cause: RoutinePause::ScriptChanged,
+            ..
+        })
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::RoutineChanged { name, .. }) if name == "Morning"
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::User {
+            origin: TurnOrigin::Routine,
+            ..
+        }
+    )));
+}
+
 /// A conversation that holds the records of learning from use opens, and
 /// each one shows as a notice: a turn the daemon did not start, and what a
 /// review of its work changed (EP-006 of the harness PRD).

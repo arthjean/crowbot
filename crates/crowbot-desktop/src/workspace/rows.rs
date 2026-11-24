@@ -4,7 +4,8 @@ use std::time::Instant;
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use crowbot_protocol::{
     ApprovalDecision, ApprovalReason, FailureCause, MemoryAuthor, MemoryChange, MemoryChangeKind,
-    ProviderState, SkillAuthor, SkillChange, SkillChangeKind, TurnOrigin, TurnRefusal,
+    ProviderState, RoutineChangeKind, RoutinePause, SkillAuthor, SkillChange, SkillChangeKind,
+    TurnOrigin, TurnRefusal,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
@@ -197,7 +198,58 @@ pub(super) fn notice_text(notice: &Notice) -> String {
         }
         Notice::TurnNotStarted { origin, cause } => not_started_text(*origin, *cause),
         Notice::ReviewApplied { memory, skills, .. } => review_text(memory, skills),
+        Notice::RoutineChanged { name, kind, .. } => routine_changed_text(name, *kind),
+        Notice::RoutineMissed {
+            missed, caught_up, ..
+        } => routine_missed_text(*missed, *caught_up),
+        Notice::RoutinePaused { cause, .. } => routine_paused_text(*cause),
     }
+}
+
+/// What a person allowed of a routine the bot proposed.
+fn routine_changed_text(name: &str, kind: RoutineChangeKind) -> String {
+    let name = format!("\u{201c}{name}\u{201d}");
+    match kind {
+        RoutineChangeKind::Created => {
+            format!("You allowed the routine {name}. Each run is a conversation turn of its own.")
+        }
+        RoutineChangeKind::Changed => format!("You allowed a change of the routine {name}."),
+        RoutineChangeKind::Paused => format!("The routine {name} is paused."),
+        RoutineChangeKind::Resumed => format!("The routine {name} runs again."),
+        RoutineChangeKind::Deleted => format!("The routine {name} was deleted."),
+        RoutineChangeKind::Other => format!("The routine {name} changed."),
+    }
+}
+
+/// What Crow Bot did about the occurrences it could not run.
+fn routine_missed_text(missed: u32, caught_up: bool) -> String {
+    let what = if missed == 1 {
+        "an occurrence".to_owned()
+    } else {
+        format!("{missed} occurrences")
+    };
+    if caught_up {
+        format!("Crow Bot was not running for {what} of this routine: it runs once to catch up.")
+    } else {
+        format!("Crow Bot was not running for {what} of this routine: they were skipped.")
+    }
+}
+
+/// Why Crow Bot paused a routine on its own.
+fn routine_paused_text(cause: RoutinePause) -> String {
+    match cause {
+        RoutinePause::SignInRequired => {
+            "Crow Bot paused this routine: its provider needs a sign-in. Sign in, then resume it."
+        }
+        RoutinePause::ScriptChanged => {
+            "Crow Bot paused this routine: its guard script changed since you approved it."
+        }
+        RoutinePause::NoDailyLimit => {
+            "Crow Bot paused this routine: the bot has no daily limit of turns."
+        }
+        RoutinePause::Other => "Crow Bot paused this routine.",
+    }
+    .to_owned()
 }
 
 /// Why a turn the daemon would have started did not start.
@@ -264,6 +316,7 @@ fn skill_text(author: SkillAuthor, changes: &[SkillChange]) -> String {
         SkillAuthor::Bot => "The bot changed its skills",
         SkillAuthor::Review => "The bot's review changed its skills",
         SkillAuthor::User => "You changed the bot's skills",
+        SkillAuthor::Curator => "Crow Bot set aside skills nobody used",
     };
     let parts: Vec<String> = changes
         .iter()
@@ -278,6 +331,7 @@ fn skill_text(author: SkillAuthor, changes: &[SkillChange]) -> String {
                 SkillChangeKind::Imported => format!("imported {name}"),
                 SkillChangeKind::Pinned => format!("pinned {name}"),
                 SkillChangeKind::Unpinned => format!("unpinned {name}"),
+                SkillChangeKind::Stale => format!("marked {name} stale"),
                 SkillChangeKind::Other => format!("changed {name}"),
             }
         })
@@ -1059,6 +1113,41 @@ mod tests {
                 }],
             }),
             "The bot's review changed its skills: wrote deploy. The review is a conversation of the bot."
+        );
+        assert_eq!(
+            notice_text(&Notice::RoutineMissed {
+                routine_id: 1,
+                missed: 3,
+                caught_up: true,
+            }),
+            "Crow Bot was not running for 3 occurrences of this routine: it runs once to catch up."
+        );
+        assert_eq!(
+            notice_text(&Notice::RoutinePaused {
+                routine_id: 1,
+                cause: RoutinePause::SignInRequired,
+            }),
+            "Crow Bot paused this routine: its provider needs a sign-in. Sign in, then resume it."
+        );
+        assert_eq!(
+            notice_text(&Notice::RoutineChanged {
+                routine_id: 1,
+                name: "Morning".to_owned(),
+                kind: RoutineChangeKind::Created,
+            }),
+            "You allowed the routine \u{201c}Morning\u{201d}. Each run is a conversation turn of its own."
+        );
+        assert_eq!(
+            notice_text(&Notice::SkillChanged {
+                author: SkillAuthor::Curator,
+                changes: vec![SkillChange {
+                    name: "deploy".to_owned(),
+                    kind: SkillChangeKind::Stale,
+                    old_hash: Some("a".to_owned()),
+                    new_hash: Some("a".to_owned()),
+                }],
+            }),
+            "Crow Bot set aside skills nobody used: marked deploy stale."
         );
         assert_eq!(
             notice_text(&Notice::ModelUnavailable {

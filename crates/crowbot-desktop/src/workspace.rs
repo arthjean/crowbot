@@ -820,7 +820,11 @@ impl Workspace {
             | ServerMessage::HarnessSettings { .. }
             | ServerMessage::Consumption(_)
             | ServerMessage::SkillFigures(_)
-            | ServerMessage::BotSkillFigures(_) => {}
+            | ServerMessage::BotSkillFigures(_)
+            | ServerMessage::Routines { .. }
+            | ServerMessage::RoutineChanged(_)
+            | ServerMessage::RoutineCreated { .. }
+            | ServerMessage::RoutineDeleted { .. } => {}
             ServerMessage::SearchResults(results) => self.palette_results(results),
             ServerMessage::BotDeleted { bot_id } => {
                 self.deleting.remove(&bot_id);

@@ -31,6 +31,8 @@ pub enum SkillAuthor {
     Review,
     /// A person, through a client.
     User,
+    /// The daemon's pass over skills nobody uses (US-028).
+    Curator,
 }
 
 /// Whether a skill is in the index of the bot's sessions.
@@ -54,6 +56,10 @@ pub struct SkillSummary {
     pub hash: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// The curator found it unused for long: it is archived when it stays
+    /// so (US-028).
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// One version a skill had, as its history lists it.
@@ -83,6 +89,8 @@ pub enum SkillChangeKind {
     Imported,
     Pinned,
     Unpinned,
+    /// Unused for long enough to be archived next.
+    Stale,
     #[serde(other)]
     Other,
 }

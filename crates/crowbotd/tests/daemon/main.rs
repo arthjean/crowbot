@@ -16,6 +16,7 @@ mod prompt;
 mod providers;
 mod queue;
 mod recovery;
+mod routines;
 mod runtimes;
 #[cfg(target_os = "linux")]
 mod service;

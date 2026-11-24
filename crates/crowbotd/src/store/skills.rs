@@ -26,6 +26,8 @@ pub struct SkillRow {
     pub pinned: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// The curator found it unused for long (US-028).
+    pub stale: bool,
 }
 
 impl SkillRow {
@@ -38,6 +40,7 @@ impl SkillRow {
             hash: self.version.clone(),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
+            stale: self.stale,
         }
     }
 }
@@ -69,6 +72,8 @@ pub struct SkillPlan {
     pub version: Option<(Version, SkillChangeKind)>,
     pub state: Option<SkillState>,
     pub pinned: Option<bool>,
+    /// Marks the skill as unused for long, for the curator alone.
+    pub stale: bool,
 }
 
 impl SkillPlan {
@@ -79,6 +84,7 @@ impl SkillPlan {
             version: None,
             state: None,
             pinned: None,
+            stale: false,
         }
     }
 }
@@ -107,6 +113,7 @@ fn kind_name(kind: SkillChangeKind) -> &'static str {
         SkillChangeKind::Imported => "imported",
         SkillChangeKind::Pinned => "pinned",
         SkillChangeKind::Unpinned => "unpinned",
+        SkillChangeKind::Stale => "stale",
         SkillChangeKind::Other => "other",
     }
 }
@@ -121,6 +128,7 @@ fn kind_of(name: &str) -> SkillChangeKind {
         "imported" => SkillChangeKind::Imported,
         "pinned" => SkillChangeKind::Pinned,
         "unpinned" => SkillChangeKind::Unpinned,
+        "stale" => SkillChangeKind::Stale,
         _ => SkillChangeKind::Other,
     }
 }
@@ -130,6 +138,7 @@ fn author_name(author: SkillAuthor) -> &'static str {
         SkillAuthor::Bot => "bot",
         SkillAuthor::Review => "review",
         SkillAuthor::User => "user",
+        SkillAuthor::Curator => "curator",
     }
 }
 
@@ -137,6 +146,7 @@ fn author_of(name: &str) -> SkillAuthor {
     match name {
         "review" => SkillAuthor::Review,
         "user" => SkillAuthor::User,
+        "curator" => SkillAuthor::Curator,
         _ => SkillAuthor::Bot,
     }
 }
@@ -148,8 +158,8 @@ fn state_name(state: SkillState) -> &'static str {
     }
 }
 
-const SKILL_COLUMNS: &str =
-    "id, name, version, description, state, pinned, created_at_ms, updated_at_ms";
+const SKILL_COLUMNS: &str = "id, name, version, description, state, pinned, created_at_ms,
+    updated_at_ms, stale_since_ms IS NOT NULL";
 
 fn skill_row(row: &Row<'_>) -> rusqlite::Result<SkillRow> {
     let state: String = row.get(4)?;
@@ -166,6 +176,7 @@ fn skill_row(row: &Row<'_>) -> rusqlite::Result<SkillRow> {
         pinned: row.get(5)?,
         created_at_ms: row.get(6)?,
         updated_at_ms: row.get(7)?,
+        stale: row.get(8)?,
     })
 }
 
@@ -465,6 +476,7 @@ impl Store {
                     pinned: false,
                     created_at_ms: now,
                     updated_at_ms: now,
+                    stale: false,
                 }
             }
         };
@@ -481,6 +493,7 @@ impl Store {
                     params![skill.id, hash, front.description, now],
                 )?;
                 self.log_skill_change(writer, skill.id, *kind, &hash, now)?;
+                self.clear_stale(skill.id)?;
                 skill.version = hash;
                 skill.description = front.description;
                 kinds.push(*kind);
@@ -498,7 +511,26 @@ impl Store {
                 SkillState::Archived => SkillChangeKind::Archived,
             };
             self.log_skill_change(writer, skill.id, kind, &skill.version, now)?;
+            self.clear_stale(skill.id)?;
+            skill.state = state;
             kinds.push(kind);
+        }
+        // Unused for long: the curator's mark, which leaves the time of the
+        // skill's last change as it was.
+        if plan.stale && !skill.stale && skill.state == SkillState::Active {
+            self.connection.execute(
+                "UPDATE skills SET stale_since_ms = ?2 WHERE id = ?1",
+                params![skill.id, now],
+            )?;
+            self.log_skill_change(
+                writer,
+                skill.id,
+                SkillChangeKind::Stale,
+                &skill.version,
+                now,
+            )?;
+            skill.stale = true;
+            kinds.push(SkillChangeKind::Stale);
         }
         if let Some(pinned) = plan.pinned
             && pinned != skill.pinned
@@ -533,6 +565,15 @@ impl Store {
             old_hash,
             new_hash: Some(skill.version.clone()),
         }))
+    }
+
+    /// A skill used, changed, or restored is no longer stale.
+    pub fn clear_stale(&self, skill_id: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE skills SET stale_since_ms = NULL WHERE id = ?1",
+            params![skill_id],
+        )?;
+        Ok(())
     }
 
     fn log_skill_change(
@@ -576,6 +617,62 @@ impl Store {
              DELETE FROM skill_files WHERE hash NOT IN (SELECT file FROM skill_version_files);",
         )?;
         Ok(())
+    }
+}
+
+/// An active skill a pass may change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub bot_id: i64,
+    pub name: String,
+    pub stale: bool,
+    /// The last time a turn loaded it, or a version of it became active.
+    pub last_active_ms: i64,
+}
+
+impl Store {
+    /// The active skills that no person pinned or imported, whose first
+    /// version a bot or a review wrote.
+    pub fn curator_candidates(&self) -> Result<Vec<Candidate>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT s.bot_id, s.name, s.stale_since_ms IS NOT NULL, MAX(
+                COALESCE((SELECT MAX(t.created_at_ms) FROM skill_uses u
+                    JOIN skill_turns t ON t.turn_event_id = u.turn_event_id
+                    WHERE u.skill_id = s.id), 0),
+                COALESCE((SELECT MAX(c.created_at_ms) FROM skill_changes c
+                    WHERE c.skill_id = s.id
+                        AND c.kind IN ('created', 'corrected', 'rolled_back', 'imported', 'restored')),
+                    s.created_at_ms))
+             FROM skills s
+             WHERE s.state = 'active' AND s.pinned = 0
+                AND NOT EXISTS (SELECT 1 FROM skill_changes c
+                    WHERE c.skill_id = s.id AND c.kind = 'imported')
+                AND (SELECT c.author FROM skill_changes c WHERE c.skill_id = s.id
+                    ORDER BY c.seq LIMIT 1) IN ('bot', 'review')
+             ORDER BY s.bot_id, s.name",
+        )?;
+        let candidates = statement
+            .query_map(params![], |row| {
+                Ok(Candidate {
+                    bot_id: row.get(0)?,
+                    name: row.get(1)?,
+                    stale: row.get(2)?,
+                    last_active_ms: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(candidates)
+    }
+
+    /// The last time a turn of any bot started or ended.
+    pub fn last_turn_ms(&self) -> Result<Option<i64>, StoreError> {
+        let last = self.connection.query_row(
+            "SELECT MAX(created_at_ms) FROM events
+             WHERE kind IN ('user_text', 'turn_ended', 'turn_failed', 'turn_interrupted')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(last)
     }
 }
 

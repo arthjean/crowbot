@@ -6,11 +6,12 @@ use crate::harness::{BotSkillFigures, Consumption, HarnessSettings, SkillFigures
 use crate::memory::{MemoryEntry, MemoryOperation};
 use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
+use crate::routine::{Routine, RoutineDraft, RoutineStateChange};
 use crate::rules::{ApprovalRule, RuleDraft};
 use crate::search::SearchResults;
 use crate::skill::{SkillFinding, SkillStateChange, SkillSummary, SkillVersion};
 
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -237,6 +238,31 @@ pub enum ClientMessage {
     GetBotSkillFigures {
         bot_id: i64,
     },
+    /// Asks for the routines of a bot.
+    ListRoutines {
+        bot_id: i64,
+    },
+    /// Creates a routine, as a person, in a conversation of its own. It is
+    /// refused while the bot has no daily limit of turns; once created, the
+    /// bot's `routine` switch is on.
+    CreateRoutine {
+        bot_id: i64,
+        draft: RoutineDraft,
+    },
+    /// Pauses or resumes a routine. A routine resumed is next due at its
+    /// first occurrence after now: what it missed while paused does not run.
+    SetRoutineState {
+        routine_id: i64,
+        change: RoutineStateChange,
+    },
+    /// Removes a routine. Its conversation stays.
+    DeleteRoutine {
+        routine_id: i64,
+    },
+    /// Runs a routine once now. Its next occurrence does not move.
+    RunRoutineNow {
+        routine_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +425,23 @@ pub enum ServerMessage {
     SkillFigures(SkillFigures),
     /// Answers `GetBotSkillFigures`.
     BotSkillFigures(BotSkillFigures),
+    /// The routines of a bot, the oldest first. Answers `ListRoutines`.
+    Routines {
+        bot_id: i64,
+        routines: Vec<Routine>,
+    },
+    /// A routine was created or changed, or one of its runs started or
+    /// ended. Every attached client receives it.
+    RoutineChanged(Routine),
+    /// Answers the client that created a routine, after `RoutineChanged`.
+    RoutineCreated {
+        routine_id: i64,
+    },
+    /// A routine is gone. Every attached client receives it.
+    RoutineDeleted {
+        bot_id: i64,
+        routine_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

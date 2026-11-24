@@ -266,6 +266,15 @@ impl ClientState {
             ClientMessage::GetBotSkillFigures { bot_id } => {
                 daemon.bot_skill_figures(bot_id).map(reply)
             }
+            ClientMessage::ListRoutines { bot_id } => daemon.list_routines(bot_id).map(reply),
+            ClientMessage::CreateRoutine { bot_id, draft } => daemon
+                .create_routine(bot_id, draft)
+                .map(|routine_id| reply(ServerMessage::RoutineCreated { routine_id })),
+            ClientMessage::SetRoutineState { routine_id, change } => {
+                daemon.set_routine_state(routine_id, change)
+            }
+            ClientMessage::DeleteRoutine { routine_id } => daemon.delete_routine(routine_id),
+            ClientMessage::RunRoutineNow { routine_id } => daemon.run_routine_now(routine_id),
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
             }

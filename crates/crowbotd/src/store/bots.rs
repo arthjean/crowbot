@@ -274,6 +274,7 @@ impl Store {
     pub fn delete_bot(&self, id: i64) -> Result<bool, StoreError> {
         let transaction = self.connection.unchecked_transaction()?;
         self.forget_work(id)?;
+        self.forget_routines(id)?;
         for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
@@ -316,18 +317,26 @@ impl Store {
             return Ok(None);
         };
         self.forget_work(bot_id)?;
+        // Each routine keeps going, in a new conversation of its own.
+        let mut kept = self.rehome_routines(bot_id)?;
+        kept.push(current);
+        let kept = kept
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         for owned in ["queue", "turn_usage", "events", "provider_sessions"] {
             transaction.execute(
                 &format!(
                     "DELETE FROM {owned} WHERE conversation_id IN
-                        (SELECT id FROM conversations WHERE bot_id = ?1)"
+                        (SELECT id FROM conversations WHERE bot_id = ?1 AND id NOT IN ({kept}))"
                 ),
                 params![bot_id],
             )?;
         }
         transaction.execute(
-            "DELETE FROM conversations WHERE bot_id = ?1 AND id != ?2",
-            params![bot_id, current],
+            &format!("DELETE FROM conversations WHERE bot_id = ?1 AND id NOT IN ({kept})"),
+            params![bot_id],
         )?;
         transaction.commit()?;
         Ok(Some(current))

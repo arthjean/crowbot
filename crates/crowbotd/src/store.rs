@@ -4,6 +4,7 @@ mod harness;
 mod memory;
 mod preferences;
 mod reviews;
+mod routines;
 mod rules;
 mod search;
 mod sessions;
@@ -15,6 +16,7 @@ pub use figures::SkillUse;
 pub use harness::TurnEndKind;
 pub use memory::{MemoryWriter, OperationResult};
 pub use reviews::ReviewRow;
+pub use routines::{Fire, NewRoutine, RoutineRow, RunEnd};
 pub use search::{HistorySearch, HistoryWindow};
 pub use sessions::{ProviderSession, ProviderSetting, session_fingerprint};
 pub use skills::{Expected, SkillPlan, SkillRow, SkillWriter, changed as skill_changed};
@@ -31,7 +33,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -411,6 +413,53 @@ CREATE TABLE skill_uses (
 CREATE INDEX skill_uses_by_skill ON skill_uses(skill_id, version);
 ";
 
+/// The routines of each bot, each with a conversation of its own, and their
+/// runs, whose ids are never given again: a run's script outlives a delete,
+/// and must not reach a later routine or run; the marks of the daemon's own passes (the curator's); and the time
+/// the curator found a skill unused for long.
+const SCHEMA_V15: &str = "
+CREATE TABLE routines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    name TEXT NOT NULL,
+    schedule TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    skills TEXT NOT NULL,
+    skip_missed INTEGER NOT NULL DEFAULT 0,
+    script_path TEXT,
+    script_hash TEXT,
+    state TEXT NOT NULL,
+    next_ms INTEGER,
+    retry_at_ms INTEGER,
+    retry_attempt INTEGER NOT NULL DEFAULT 0,
+    incident TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX routines_by_conversation ON routines(conversation_id);
+CREATE INDEX routines_by_bot ON routines(bot_id);
+CREATE TABLE routine_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    routine_id INTEGER NOT NULL REFERENCES routines(id),
+    due_ms INTEGER NOT NULL,
+    at_ms INTEGER NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL,
+    refusal TEXT,
+    detail TEXT,
+    silent INTEGER NOT NULL DEFAULT 0,
+    prompt TEXT NOT NULL,
+    ended_at_ms INTEGER
+);
+CREATE INDEX routine_runs_by_routine ON routine_runs(routine_id, id);
+CREATE TABLE daemon_marks (
+    name TEXT PRIMARY KEY,
+    at_ms INTEGER NOT NULL
+);
+ALTER TABLE skills ADD COLUMN stale_since_ms INTEGER;
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -582,6 +631,9 @@ impl Store {
         if version < 14 {
             transaction.execute_batch(SCHEMA_V14)?;
         }
+        if version < 15 {
+            transaction.execute_batch(SCHEMA_V15)?;
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         Ok(())
@@ -621,6 +673,9 @@ impl Store {
             "UPDATE conversations SET queue_paused = 1 WHERE id IN (SELECT conversation_id FROM queue)",
             [],
         )?;
+        // A run the previous daemon recorded and did not end never runs
+        // again: its occurrence has moved on (US-031).
+        self.interrupt_runs()?;
         transaction.commit()?;
         Ok(unfinished.len())
     }
@@ -1078,6 +1133,9 @@ fn kind(event: &Event) -> &'static str {
         Event::SkillUnavailable { .. } => "skill_unavailable",
         Event::TurnNotStarted { .. } => "turn_not_started",
         Event::ReviewApplied { .. } => "review_applied",
+        Event::RoutineChanged { .. } => "routine_changed",
+        Event::RoutineMissed { .. } => "routine_missed",
+        Event::RoutinePaused { .. } => "routine_paused",
     }
 }
 

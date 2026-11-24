@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::harness::TurnRefusal;
 use crate::memory::{MemoryAuthor, MemoryChange};
+use crate::routine::{RoutineChangeKind, RoutinePause};
 use crate::skill::{SkillAuthor, SkillChange};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +123,25 @@ pub enum Event {
         memory: Vec<MemoryChange>,
         #[serde(default)]
         skills: Vec<SkillChange>,
+    },
+    /// A routine of the bot was created or changed, through the `schedule`
+    /// tool and with a person's approval.
+    RoutineChanged {
+        routine_id: i64,
+        name: String,
+        kind: RoutineChangeKind,
+    },
+    /// Occurrences of the routine whose conversation this is came due while
+    /// the daemon could not run them. With `caught_up`, one run follows.
+    RoutineMissed {
+        routine_id: i64,
+        missed: u32,
+        caught_up: bool,
+    },
+    /// The daemon paused the routine whose conversation this is.
+    RoutinePaused {
+        routine_id: i64,
+        cause: RoutinePause,
     },
 }
 

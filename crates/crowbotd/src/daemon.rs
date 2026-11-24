@@ -3,6 +3,7 @@
 
 mod harness;
 mod providers;
+mod routines;
 
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -17,9 +18,10 @@ use crowbot_protocol::{
     BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, MemoryChange, MemoryOperation,
     MemoryScope, PROTOCOL_VERSION, PermissionLevel, Preferences, PreferencesPatch,
     RULE_ARGUMENT_BYTES, RULE_ARGUMENTS, RULE_PROGRAM_BYTES, RuleDraft, SIDEBAR_WIDTH_LIMIT,
-    ServerMessage, SkillChangeKind, SkillState, SkillStateChange, TOOL_CALL_LIMIT_MAX, mascot_at,
+    ServerMessage, SkillAuthor, SkillChangeKind, SkillState, SkillStateChange, TOOL_CALL_LIMIT_MAX,
+    mascot_at,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 use crate::approval::floors::Floors;
 use crate::conversation::{self, Command, ConversationHandle, Sink};
@@ -150,6 +152,8 @@ pub struct Daemon {
     /// that start at once cannot both take the last place of the day. It is
     /// taken before the state and the store.
     admission: Mutex<()>,
+    /// Wakes the scheduler of routines when one changes.
+    routines_wake: Notify,
     next_connection: AtomicU64,
     tools: Arc<Registry>,
     sections: Sections,
@@ -194,6 +198,7 @@ impl Daemon {
                 ..State::default()
             }),
             admission: Mutex::new(()),
+            routines_wake: Notify::new(),
             next_connection: AtomicU64::new(1),
             tools,
             sections,
@@ -786,6 +791,18 @@ impl Daemon {
         plans: Vec<SkillPlan>,
         sink: Sink,
     ) -> Result<(), Refusal> {
+        self.change_skills_as(bot_id, plans, SkillAuthor::User, sink)
+    }
+
+    /// Hands a change of a bot's skills, by a person or by the curator, to
+    /// the bot's current conversation, which records it among its events.
+    fn change_skills_as(
+        self: &Arc<Self>,
+        bot_id: i64,
+        plans: Vec<SkillPlan>,
+        author: SkillAuthor,
+        sink: Sink,
+    ) -> Result<(), Refusal> {
         let row = self
             .store
             .with(|store| store.bot(bot_id))?
@@ -796,7 +813,11 @@ impl Daemon {
             self.new_conversation(bot_id).map_err(Refusal::Other)?.id
         };
         let handle = self.conversation(conversation_id).map_err(Refusal::Other)?;
-        handle.send(Command::ChangeSkills { plans, sink });
+        handle.send(Command::ChangeSkills {
+            plans,
+            author,
+            sink,
+        });
         Ok(())
     }
 

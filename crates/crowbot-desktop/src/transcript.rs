@@ -3,8 +3,9 @@ use std::collections::HashSet;
 use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, MemoryAuthor, MemoryChange, SkillAuthor, SkillChange, TimedEvent, ToolEffect,
-    ToolKind, ToolStatus, TurnEnd, TurnOrigin, TurnRefusal, UserMessage,
+    Interruption, MemoryAuthor, MemoryChange, RoutineChangeKind, RoutinePause, SkillAuthor,
+    SkillChange, TimedEvent, ToolEffect, ToolKind, ToolStatus, TurnEnd, TurnOrigin, TurnRefusal,
+    UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -111,6 +112,24 @@ pub enum Notice {
         review_conversation_id: i64,
         memory: Vec<MemoryChange>,
         skills: Vec<SkillChange>,
+    },
+    /// A person allowed a routine the bot proposed, or a change of it.
+    RoutineChanged {
+        routine_id: i64,
+        name: String,
+        kind: RoutineChangeKind,
+    },
+    /// Occurrences of this conversation's routine came due while Crow Bot
+    /// could not run them.
+    RoutineMissed {
+        routine_id: i64,
+        missed: u32,
+        caught_up: bool,
+    },
+    /// Crow Bot paused this conversation's routine.
+    RoutinePaused {
+        routine_id: i64,
+        cause: RoutinePause,
     },
 }
 
@@ -726,6 +745,35 @@ impl Transcript {
                     skills,
                 },
             ),
+            Event::RoutineChanged {
+                routine_id,
+                name,
+                kind,
+            } => self.notice(
+                seq,
+                at_ms,
+                Notice::RoutineChanged {
+                    routine_id,
+                    name,
+                    kind,
+                },
+            ),
+            Event::RoutineMissed {
+                routine_id,
+                missed,
+                caught_up,
+            } => self.notice(
+                seq,
+                at_ms,
+                Notice::RoutineMissed {
+                    routine_id,
+                    missed,
+                    caught_up,
+                },
+            ),
+            Event::RoutinePaused { routine_id, cause } => {
+                self.notice(seq, at_ms, Notice::RoutinePaused { routine_id, cause })
+            }
         }
     }
 

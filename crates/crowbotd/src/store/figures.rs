@@ -54,6 +54,8 @@ impl Store {
                      SELECT ?1, id, ?3 FROM skills WHERE id = ?2",
                     params![turn, used.skill_id, used.version],
                 )?;
+                // A skill a turn loads is in use again (US-028).
+                self.clear_stale(used.skill_id)?;
             }
         }
         transaction.commit()?;

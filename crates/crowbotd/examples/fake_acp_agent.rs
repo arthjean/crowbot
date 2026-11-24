@@ -27,6 +27,7 @@
 //! - `fail other`: fail the turn with an error kind that has no known cause.
 //! - `failfirst <n> <path> <command>`: fail as `fail other` while the counter
 //!   in the file is below `n`, counting up; then run the command.
+//! - `limitfirst <n> <path> <command>`: the same, failing as `fail limit`.
 //! - `sayfail <text>`: answer with the text, then fail as `fail other`.
 //! - `toolfail`: start a tool call, then fail as `fail other`.
 //! - `spend <used> <size> <cost> <input> <output>`: send a `UsageUpdate` of
@@ -77,7 +78,9 @@
 //! by `config` as the preface. A prompt of a review of Crow Bot, which opens
 //! with `REVIEW_OPENING`, runs instead the command that the file
 //! `FAKE_AGENT_REVIEW` names holds, and answers `Nothing to keep.` when there
-//! is no such file.
+//! is no such file. A prompt of a run of a routine, which opens with
+//! `ROUTINE_OPENING`, runs the routine's own prompt, the text after the line
+//! `ROUTINE_TASK`, and `routine` reports the whole prompt of the run.
 //!
 //! The agent offers the models `fast` and `smart` through a session config
 //! option, and starts each process on `fast`.
@@ -137,6 +140,10 @@ const NO_MODELS: &str = "FAKE_AGENT_NO_MODELS";
 const REVIEW: &str = "FAKE_AGENT_REVIEW";
 /// How the daemon opens the prompt of a review (`review.rs`).
 const REVIEW_OPENING: &str = "You are reviewing your recent work for Crow Bot.";
+/// How the prompt of a run of a routine opens, and the line its task follows
+/// (`crates/crowbotd/src/routines/limits.rs`).
+const ROUTINE_OPENING: &str = "This is a run of a routine of Crow Bot.";
+const ROUTINE_TASK: &str = "The task of the routine:";
 const SIGNED_IN: &str = "authenticated";
 /// The page a Grok-like agent names for its sign-in.
 /// The page a `terminal` sign-in in the modes `xdg-open` and `browser` opens.
@@ -448,6 +455,24 @@ fn failing_first(text: &str) -> Option<Result<(), String>> {
     Some(Err(command))
 }
 
+/// The command of a run of a routine: the routine's own prompt, or, for the
+/// prompt `routine`, a command that reports the whole prompt of the run.
+fn routine_task(text: &str) -> Option<String> {
+    if !text.starts_with(ROUTINE_OPENING) {
+        return None;
+    }
+    let marker = format!("\n{ROUTINE_TASK}\n");
+    let task = text
+        .rsplit_once(&marker)
+        .map_or("", |(_, task)| task)
+        .trim();
+    Some(if task == "routine" {
+        format!("say {}", text.replace('\n', " | "))
+    } else {
+        task.to_owned()
+    })
+}
+
 /// The command a review runs: the one the test wrote for it.
 fn reviewing(text: &str) -> Option<String> {
     if !text.starts_with(REVIEW_OPENING) {
@@ -736,7 +761,20 @@ impl Agent {
         let mut parts = texts(&params["prompt"]);
         let text = parts.pop().unwrap_or_default();
         let text = reviewing(&text).unwrap_or(text);
-        let text = match failing_first(&text) {
+        let text = routine_task(&text).unwrap_or(text);
+        let limited = text.starts_with("limitfirst ");
+        let counted = text.replacen("limitfirst ", "failfirst ", usize::from(limited));
+        let text = match failing_first(&counted) {
+            Some(Ok(())) if limited => {
+                return self.fail(
+                    id,
+                    json!({
+                        "code": -32603,
+                        "message": "Internal error",
+                        "data": { "errorKind": "rate_limit" }
+                    }),
+                );
+            }
             Some(Ok(())) => {
                 return self.fail(
                     id,

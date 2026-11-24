@@ -1,5 +1,7 @@
 mod approval;
+mod clock;
 mod conversation;
+mod curator;
 mod daemon;
 mod digest;
 mod guard;
@@ -13,8 +15,10 @@ mod private;
 mod prompt;
 mod provider;
 mod review;
+mod routines;
 mod runtime;
 mod scan;
+mod schedule;
 mod server;
 #[cfg(target_os = "linux")]
 mod sign_in_page;
@@ -260,6 +264,9 @@ async fn run(args: Args) -> Result<(), StartError> {
         args.command,
         runtimes,
     ));
+    // The scheduler of routines and the curator's passes, until the daemon
+    // stops.
+    let scheduling = tokio::spawn(routines::run(daemon.clone()));
     let (listen, stop_listening) = oneshot::channel();
     let (close, closing) = watch::channel(false);
     let mut serving = tokio::spawn(server::serve(
@@ -285,6 +292,8 @@ async fn run(args: Args) -> Result<(), StartError> {
     daemon
         .stop(STOP_PATIENCE, tokio::time::Instant::now() + STOP_DEADLINE)
         .await;
+    daemon.wake_routines();
+    scheduling.abort();
     close.send(true).ok();
     serving.await.ok();
     if let Err(error) = store.close() {

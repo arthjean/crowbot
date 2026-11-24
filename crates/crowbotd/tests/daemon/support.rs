@@ -233,6 +233,9 @@ pub struct Daemon {
     /// What the waits of the daemon's guards are divided by
     /// (`CROWBOT_TEST_TIME_SCALE`, `guard.rs`).
     time_scale: Option<u32>,
+    /// The daemon's routines follow the clock of the file `clock` of the
+    /// test folder (`CROWBOT_TEST_CLOCK`, `clock.rs`).
+    clock: bool,
 }
 
 /// What a daemon in a user namespace of its own goes without. Its account
@@ -263,6 +266,27 @@ impl Daemon {
         daemon.time_scale = Some(scale);
         daemon.spawn();
         daemon
+    }
+
+    /// A daemon whose routines and curator read the time from a file the
+    /// test moves, which starts at `now_ms`; its guards wait `scale` times
+    /// less, when given.
+    pub fn start_with_clock(now_ms: i64, scale: Option<u32>) -> Self {
+        let mut daemon = Self::stopped(Agent::Scripted {
+            system_prompt: false,
+        });
+        daemon.clock = true;
+        daemon.time_scale = scale;
+        daemon.set_clock(now_ms);
+        daemon.spawn();
+        daemon
+    }
+
+    /// Moves the clock of the daemon's routines to `now_ms`, in one write.
+    pub fn set_clock(&self, now_ms: i64) {
+        let next = self.dir.join("clock.next");
+        std::fs::write(&next, now_ms.to_string()).unwrap();
+        std::fs::rename(&next, self.dir.join("clock")).unwrap();
     }
 
     /// A wait of the daemon's guards, as this daemon applies it.
@@ -378,6 +402,7 @@ impl Daemon {
             agent,
             confinement: None,
             time_scale: None,
+            clock: false,
         }
     }
 
@@ -408,6 +433,9 @@ impl Daemon {
         let mut command = daemon_command(&self.dir, &self.endpoint, self.agent);
         if let Some(scale) = self.time_scale {
             command.env("CROWBOT_TEST_TIME_SCALE", scale.to_string());
+        }
+        if self.clock {
+            command.env("CROWBOT_TEST_CLOCK", self.dir.join("clock"));
         }
         if let Some(confinement) = self.confinement {
             command = confined(command, &self.dir.join("runtimes"), confinement);
