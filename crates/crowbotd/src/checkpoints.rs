@@ -15,6 +15,7 @@
 //! record keep it to a walk of the folder when few files changed, and the
 //! files it does read are hashed on several threads.
 
+mod beneath;
 mod ignored;
 mod limits;
 mod objects;
@@ -33,6 +34,7 @@ use crowbot_protocol::{
 };
 
 use crate::store::{CheckpointRow, NewCheckpoint, SharedStore, StoreError};
+use beneath::Root;
 use ignored::Ignored;
 use objects::Objects;
 pub use snapshot::Skip;
@@ -499,12 +501,13 @@ fn plan(
             // What the restore would write over or remove and no record could
             // give back: a file git ignores now, or one whose content the
             // record of the folder as it stands did not keep.
+            let root = Root::open(key).ok();
             let unrecorded = |difference: &tree::Difference| match &difference.after {
                 None => {
                     difference.before.is_some()
-                        && restore::place(key, &difference.path)
-                            .symlink_metadata()
-                            .is_ok_and(|metadata| !metadata.is_dir())
+                        && root
+                            .as_ref()
+                            .is_some_and(|root| root.holds(&difference.path))
                 }
                 Some(Node::File { kept, .. }) => !kept,
                 Some(_) => false,

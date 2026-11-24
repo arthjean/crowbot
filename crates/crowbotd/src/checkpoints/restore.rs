@@ -2,16 +2,16 @@
 //! first, the deepest first, so a file that takes the place of a folder or
 //! a link finds its place free; then each file and link is written. A file
 //! is written to a file of its own in the same folder, then moved into
-//! place. No write goes through a link: every folder above a path must be a
-//! folder of the bot's folder, so a link an agent left cannot send a
-//! restore outside it.
+//! place. Every path is reached from a handle on the bot's folder, one
+//! folder at a time, and no link is followed (`beneath.rs`): a link an agent
+//! left, or swaps in while the restore runs, cannot send it outside.
 
 use std::collections::BTreeSet;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crowbot_protocol::{LeftCause, LeftFile};
 
+use super::beneath::{Root, split};
 use super::objects::Objects;
 use super::tree::{Difference, Node};
 
@@ -31,35 +31,6 @@ fn failed(path: &str, error: impl std::fmt::Display) -> LeftFile {
     }
 }
 
-pub(super) fn place(folder: &Path, path: &str) -> PathBuf {
-    path.split('/')
-        .fold(folder.to_owned(), |place, part| place.join(part))
-}
-
-/// Checks that each folder above `path` is a folder and no link, creating
-/// the ones that are missing when `create` is set.
-fn parents(folder: &Path, path: &str, create: bool) -> std::io::Result<()> {
-    let mut place = folder.to_owned();
-    let parts: Vec<&str> = path.split('/').collect();
-    for part in &parts[..parts.len().saturating_sub(1)] {
-        place.push(part);
-        match place.symlink_metadata() {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(std::io::Error::other(format!(
-                    "{} is not a folder",
-                    place.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
-                std::fs::create_dir(&place)?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
 /// Applies the differences: each path takes the state `before` holds, the
 /// record's. `folders` are the folders of that record, which stay when
 /// they are left empty.
@@ -70,6 +41,16 @@ pub fn apply(
     objects: &Objects,
 ) -> Done {
     let mut done = Done::default();
+    let root = match Root::open(folder) {
+        Ok(root) => root,
+        Err(error) => {
+            done.left = differences
+                .iter()
+                .map(|difference| failed(&difference.path, &error))
+                .collect();
+            return done;
+        }
+    };
     let mut removals: Vec<&Difference> = differences
         .iter()
         .filter(|difference| difference.before.is_none())
@@ -78,8 +59,7 @@ pub fn apply(
     let mut emptied = BTreeSet::new();
     for difference in removals {
         let path = &difference.path;
-        let removed = parents(folder, path, false).and_then(|()| remove(&place(folder, path)));
-        match removed {
+        match remove(&root, path) {
             Ok(()) => {
                 done.removed.push(path.clone());
                 if let Some((parent, _)) = path.rsplit_once('/') {
@@ -89,13 +69,13 @@ pub fn apply(
             Err(error) => done.left.push(failed(path, error)),
         }
     }
-    prune(folder, emptied, folders);
+    prune(&root, emptied, folders);
     for difference in differences {
         let Some(node) = &difference.before else {
             continue;
         };
         let path = &difference.path;
-        match write(folder, path, node, objects) {
+        match write(&root, path, node, objects) {
             Ok(()) => done.restored.push(path.clone()),
             Err(left) => done.left.push(left),
         }
@@ -105,21 +85,30 @@ pub fn apply(
     done
 }
 
-fn remove(place: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(place) {
+fn remove(root: &Root, path: &str) -> std::io::Result<()> {
+    let (parents, name) = split(path);
+    match root.dir(&parents, false) {
+        Ok(dir) => dir.remove_file(name),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        removed => removed,
+        Err(error) => Err(error),
     }
 }
 
 /// Removes the folders that a removal left empty and that the record did
 /// not hold, up toward the bot's folder.
-fn prune(folder: &Path, emptied: BTreeSet<String>, kept: &BTreeSet<String>) {
+fn prune(root: &Root, emptied: BTreeSet<String>, kept: &BTreeSet<String>) {
     let mut emptied: Vec<String> = emptied.into_iter().collect();
     emptied.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
     for mut path in emptied {
         loop {
-            if kept.contains(&path) || std::fs::remove_dir(place(folder, &path)).is_err() {
+            if kept.contains(&path) {
+                break;
+            }
+            let (parents, name) = split(&path);
+            let removed = root
+                .dir(&parents, false)
+                .and_then(|dir| dir.remove_dir(name));
+            if removed.is_err() {
                 break;
             }
             match path.rsplit_once('/') {
@@ -130,8 +119,20 @@ fn prune(folder: &Path, emptied: BTreeSet<String>, kept: &BTreeSet<String>) {
     }
 }
 
-fn write(folder: &Path, path: &str, node: &Node, objects: &Objects) -> Result<(), LeftFile> {
-    let target = place(folder, path);
+/// The permission bits to write a file with: those of the file it replaces,
+/// or `0o644`, with the execute bits where it reads when the record says it
+/// is executable.
+fn mode_for(existing: Option<u32>, executable: bool) -> u32 {
+    let mode = existing.unwrap_or(0o644);
+    if executable {
+        mode | ((mode & 0o444) >> 2)
+    } else {
+        mode & !0o111
+    }
+}
+
+fn write(root: &Root, path: &str, node: &Node, objects: &Objects) -> Result<(), LeftFile> {
+    let (parents, name) = split(path);
     match node {
         Node::File {
             sha256,
@@ -151,66 +152,21 @@ fn write(folder: &Path, path: &str, node: &Node, objects: &Objects) -> Result<()
                 cause: LeftCause::ContentLost,
                 message: None,
             })?;
-            parents(folder, path, true).map_err(|error| failed(path, error))?;
-            write_file(&target, &content, *executable).map_err(|error| failed(path, error))
+            let dir = root
+                .dir(&parents, true)
+                .map_err(|error| failed(path, error))?;
+            let mode = mode_for(dir.mode(name), *executable);
+            dir.write_file(name, &content, mode)
+                .map_err(|error| failed(path, error))
         }
-        Node::Link { target: link } => {
-            parents(folder, path, true).map_err(|error| failed(path, error))?;
-            remove(&target).map_err(|error| failed(path, error))?;
-            make_link(link, &target).map_err(|error| failed(path, error))
+        Node::Link { target } => {
+            let dir = root
+                .dir(&parents, true)
+                .map_err(|error| failed(path, error))?;
+            dir.remove_file(name).map_err(|error| failed(path, error))?;
+            dir.symlink(target, name)
+                .map_err(|error| failed(path, error))
         }
         Node::Folder { .. } => Ok(()),
-    }
-}
-
-fn write_file(target: &Path, content: &[u8], executable: bool) -> std::io::Result<()> {
-    let name = target
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let partial = target.with_file_name(format!(".{name}.crowbot-restore-{}", std::process::id()));
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&partial)?;
-        file.write_all(content)?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = file.metadata()?.permissions().mode();
-            let mode = if executable {
-                mode | ((mode & 0o444) >> 2)
-            } else {
-                mode & !0o111
-            };
-            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
-        }
-        #[cfg(not(unix))]
-        let _ = executable;
-        drop(file);
-        std::fs::rename(&partial, target)
-    })();
-    if written.is_err() {
-        std::fs::remove_file(&partial).ok();
-    }
-    written
-}
-
-#[cfg(unix)]
-fn make_link(link: &str, target: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(link, target)
-}
-
-#[cfg(windows)]
-fn make_link(link: &str, target: &Path) -> std::io::Result<()> {
-    let resolved = target
-        .parent()
-        .map_or_else(|| PathBuf::from(link), |parent| parent.join(link));
-    if resolved.is_dir() {
-        std::os::windows::fs::symlink_dir(link, target)
-    } else {
-        std::os::windows::fs::symlink_file(link, target)
     }
 }

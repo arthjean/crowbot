@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crowbot_protocol::CheckpointCause;
 use sha2::{Digest, Sha256};
 
+use super::beneath::{Root, is_moved};
 use super::limits::{
     CHECKPOINT_ENTRIES, CHECKPOINT_FILE_BYTES, CHECKPOINT_NEW_BYTES, HASH_THREAD_BYTES,
     HASH_THREADS, RACY_MARGIN,
@@ -173,7 +174,8 @@ pub fn take(
         });
     }
     let entries = walk(folder, excluded)?;
-    let hashed = hash(folder, &entries, objects, cache)?;
+    let root = Root::open(folder).map_err(|error| unreadable(folder, None, error))?;
+    let hashed = hash(folder, &root, &entries, objects, cache)?;
     let mut taken = build(&entries, &hashed);
     taken.taken_at_ms = i64::try_from(started_ns / 1_000_000).unwrap_or(i64::MAX);
     taken.stored_bytes = hashed.stored;
@@ -259,6 +261,7 @@ struct HashedFiles {
 /// content that fits. A file that is gone by then is left out.
 fn hash(
     folder: &Path,
+    root: &Root,
     entries: &[(String, Kind)],
     objects: &Objects,
     cache: Option<&FolderCache>,
@@ -303,7 +306,7 @@ fn hash(
             let Some((path, stamp)) = jobs.get(index) else {
                 break;
             };
-            let result = hash_file(&folder.join(path), *stamp, objects, &stored);
+            let result = hash_file(root, path, *stamp, objects, &stored);
             let failed = result.is_err();
             results
                 .lock()
@@ -372,26 +375,21 @@ enum Failure {
 
 /// Reads a file once: a content that fits is hashed from memory and kept
 /// from the same bytes, so the hash always names what was kept.
+///
+/// The file is opened from a handle on the bot's folder, with no link
+/// followed (`beneath.rs`): a link, a pipe, or a device put in its place
+/// since the walk, or a folder above it swapped for a link, is left out and
+/// does not hold the record waiting.
 fn hash_file(
-    path: &Path,
+    root: &Root,
+    path: &str,
     stamp: Stamp,
     objects: &Objects,
     stored: &Storing,
 ) -> Result<Option<Hashed>, Failure> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    // The walk saw a file: a link, a pipe, or a device put in its place
-    // since is not followed, and does not hold the record waiting.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = match options.open(path) {
+    let file = match root.open_file(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        #[cfg(unix)]
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        Err(error) if is_moved(&error) => return Ok(None),
         Err(error) => return Err(Failure::Read(error)),
     };
     if !file.metadata().map_err(Failure::Read)?.is_file() {
@@ -567,20 +565,28 @@ mod tests {
             inode: 0,
             executable: false,
         };
-        let pipe = dir.path().join("pipe");
+        let folder = dir.path().join("bot");
+        std::fs::create_dir(&folder).unwrap();
+        let root = Root::open(&folder).unwrap();
+        let pipe = folder.join("pipe");
         let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
         // SAFETY: `name` is a valid C string that lives through the call.
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        // An open that waited for a writer would hold this test forever.
         assert!(matches!(
-            hash_file(&pipe, stamp, &objects, &stored),
+            hash_file(&root, "pipe", stamp, &objects, &stored),
             Ok(None)
         ));
-        std::fs::write(dir.path().join("secret"), b"outside").unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(dir.path().join("secret"), &link).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), folder.join("link")).unwrap();
         assert!(matches!(
-            hash_file(&link, stamp, &objects, &stored),
+            hash_file(&root, "link", stamp, &objects, &stored),
+            Ok(None)
+        ));
+        std::os::unix::fs::symlink(&outside, folder.join("sub")).unwrap();
+        assert!(matches!(
+            hash_file(&root, "sub/secret", stamp, &objects, &stored),
             Ok(None)
         ));
     }
