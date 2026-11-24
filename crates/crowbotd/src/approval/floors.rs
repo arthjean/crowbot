@@ -230,7 +230,7 @@ pub fn protected_folders(home: Option<PathBuf>) -> Vec<PathBuf> {
     } else {
         [
             "/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/sys",
-            "/proc", "/dev",
+            "/proc", "/dev", "/home", "/root",
         ]
         .into_iter()
         .map(PathBuf::from)
@@ -936,12 +936,27 @@ mod tests {
             "/sys",
             "/proc",
             "/dev",
+            "/home",
+            "/root",
             "/home/ada",
         ]
         .into_iter()
         .map(PathBuf::from)
         .collect();
         assert_eq!(folders, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_of_every_home_is_protected_whatever_the_account() {
+        let floors = Floors::new(Some(PathBuf::from("/root")), Vec::new());
+        let check = |text: &str| {
+            let parsed = command::parse(text, false);
+            floors.check(&layers(&parsed, text), &[PathBuf::from("/root/bots")])
+        };
+        assert_eq!(check("rm -rf /home"), Verdict::Refuse);
+        assert_eq!(check("rm -rf /root"), Verdict::Refuse);
+        assert_eq!(check("rm -rf /home/ada/project/target"), Verdict::Clear);
     }
 
     #[cfg(windows)]
