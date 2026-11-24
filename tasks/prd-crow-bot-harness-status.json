@@ -33,10 +33,10 @@
     {
       "id": "EP-004",
       "title": "Memory and the search of past conversations",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 5,
-      "stories_done": 0
+      "stories_done": 5
     },
     {
       "id": "EP-005",
@@ -299,44 +299,44 @@
       "id": "US-017",
       "title": "The memory store",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-018",
       "title": "Scan what the daemon injects",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-019",
       "title": "The `memory` tool and the client messages",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [
         "US-004",
         "US-017",
         "US-018"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-020",
       "title": "Memory in the prompt and recalled by turn",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [
         "US-005",
@@ -344,22 +344,22 @@
         "US-018",
         "US-006"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-021",
       "title": "The `session_search` tool",
       "epic": "EP-004",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "blocked_by": [
         "US-003"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-022",
