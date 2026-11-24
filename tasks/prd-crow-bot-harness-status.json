@@ -49,10 +49,10 @@
     {
       "id": "EP-006",
       "title": "Learning from use",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 3,
-      "stories_done": 0
+      "stories_done": 3
     },
     {
       "id": "EP-007",
@@ -419,22 +419,22 @@
       "id": "US-026",
       "title": "Switches and limits for daemon-started turns",
       "epic": "EP-006",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "blocked_by": [
         "US-006",
         "US-007",
         "US-009"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-027",
       "title": "The review conversation",
       "epic": "EP-006",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "blocked_by": [
         "US-019",
@@ -443,23 +443,23 @@
         "US-024",
         "US-026"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-029",
       "title": "Measure what skills change",
       "epic": "EP-006",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P1",
       "blocked_by": [
         "US-006",
         "US-023"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-24",
+      "completed_at": "2026-11-24",
+      "reviewed_at": "2026-11-24"
     },
     {
       "id": "US-030",
