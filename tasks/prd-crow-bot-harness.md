@@ -6,6 +6,7 @@
 | Version | Date | Author | Summary |
 |---------|------|--------|---------|
 | 1.0 | 2026-11-23 | Arthur Jean | Initial draft, from the audit of 2026-11-23 |
+| 1.1 | 2026-11-24 | Arthur Jean | US-028 (the curator) moves from EP-006 to EP-007, the epic of the routines it waits for |
 
 ## Problem Statement
 
@@ -40,13 +41,13 @@ Key decisions. Each one settles a decision the audit left open (audit, section "
 - **D9. No provider runs in a wider mode to get daemon tools.** A provider that cannot call them in its ask-first mode runs without them, and the client says so.
 - **D10. The harness does not depend on who owns the agent loop.** A native loop is a later PRD and plugs in as one more ACP agent.
 
-The work is phased, because it holds 46 stories: EP-011 keeps the client reading the protocol, so it runs in phase A although it is numbered late. US-028 (the curator) spares the skills a routine names, so it waits for US-031. An epic's priority in the status file is the highest priority among its stories.
+The work is phased, because it holds 46 stories: EP-011 keeps the client reading the protocol, so it runs in phase A although it is numbered late. US-028 (the curator) spares the skills a routine names, so it waits for US-031 and belongs to EP-007. An epic's priority in the status file is the highest priority among its stories.
 
 | Phase | Epics | Stories | Outcome |
 |-------|-------|---------|---------|
 | A. Channel and guard | EP-001, EP-011, EP-002, EP-003 | 17 | A bot can call daemon tools on each provider; the client shows every new event; the daemon records usage, stops a turn that makes no progress, and applies approval rules |
-| B. Memory and skills | EP-004, EP-005, EP-006 without US-028 | 12 | A bot remembers, searches its past conversations, writes and reuses skills, and reviews its work when the user allows it |
-| C. Work without the user | EP-007, EP-008, US-028 | 9 | A bot runs routines on a schedule, and every file it edits can be put back |
+| B. Memory and skills | EP-004, EP-005, EP-006 | 12 | A bot remembers, searches its past conversations, writes and reuses skills, and reviews its work when the user allows it |
+| C. Work without the user | EP-007, EP-008 | 9 | A bot runs routines on a schedule, and every file it edits can be put back |
 | D. Several conversations at once | EP-009, EP-010 | 5 | A bot delegates to a child conversation and pursues a goal over several turns |
 | E. Desktop surfaces | EP-012 | 3 | The client manages what phases A to D store |
 
@@ -654,7 +655,7 @@ A bot writes down how it did a task and loads that note the next time, on any pr
 
 When the user allows it, a bot reviews what it did and keeps what is worth keeping, in the open.
 
-**Definition of Done:** In a test, a bot with the `Review` origin on runs a review conversation after 10 tool calls, the review writes one skill, and a bot with the origin off runs none; the ledger refuses a turn over budget; a stale skill is archived by the curator.
+**Definition of Done:** In a test, a bot with the `Review` origin on runs a review conversation after 10 tool calls, the review writes one skill, and a bot with the origin off runs none; the ledger refuses a turn over budget.
 
 #### US-026: Switches and limits for daemon-started turns
 **Description:** As a user, I want to choose which turns the daemon may start for a bot and how many a day, so that nothing spends my plan without my consent.
@@ -695,22 +696,6 @@ When the user allows it, a bot reviews what it did and keeps what is worth keepi
 - [ ] Given a user message sent to the bot while a review runs, when it arrives, then the review is stopped and the user's turn starts
 - [ ] Given a bot with `Review` off, when the counters pass 10, then no review starts
 
-#### US-028: The curator
-**Description:** As a user, I want skills nobody uses set aside, so that the index stays short.
-
-**Priority:** P2
-**Dependencies:** Blocked by US-025, US-029, US-031
-
-**References:** Audit, section "À reprendre : skills", row "Curateur". `hermes-agent/agent/curator.py:42-46`, `:210-264`, `:318-326`.
-
-**Acceptance Criteria:**
-- [ ] Given a skill written by a bot or a review with no use for 14 days, when the curator runs, then it is marked stale (`curator.py:43`)
-- [ ] Given such a skill with no use for 30 days, when the curator runs, then it is archived and leaves the index (`curator.py:43`)
-- [ ] Given a skill that is pinned, imported by the user, or named by a routine, when the curator runs, then it is not changed
-- [ ] Given the curator, when it runs, then it starts no model call and deletes no version
-- [ ] Given a daemon, when 7 days have passed since the last pass and no turn ran for 2 hours, then the curator runs once (`DEFAULT_INTERVAL_HOURS` and `DEFAULT_MIN_IDLE_HOURS`, `curator.py:42`)
-- [ ] Given an archived skill, when a client restores it (US-025), then it is active again and its versions are unchanged
-
 #### US-029: Measure what skills change
 **Description:** As the product owner, I want the outcome of turns that used a skill recorded, so that learning is judged by figures.
 
@@ -732,7 +717,7 @@ When the user allows it, a bot reviews what it did and keeps what is worth keepi
 
 A bot does a task on a schedule, whether or not a client is attached.
 
-**Definition of Done:** In tests with a controlled clock, a routine runs once at its time in its own conversation; a daemon stopped across three occurrences records the misses and runs at most once; a routine that needs an approval waits and skips its next occurrence; and a bot cannot create a routine without a person.
+**Definition of Done:** In tests with a controlled clock, a routine runs once at its time in its own conversation; a daemon stopped across three occurrences records the misses and runs at most once; a routine that needs an approval waits and skips its next occurrence; a bot cannot create a routine without a person; and the curator archives a stale skill while it spares one a routine names.
 
 #### US-030: Schedules and their next occurrence
 **Description:** As the daemon, I want a typed schedule and one function that gives its next occurrence, so that time zones and clock changes are handled in one tested place.
@@ -839,6 +824,22 @@ A bot does a task on a schedule, whether or not a client is attached.
 - [ ] Given a script whose content hash differs from the approved one, when the routine is due, then the script does not run and the routine is paused
 - [ ] Given a script that runs longer than 3,600 seconds, when the limit passes, then the daemon ends its process group and records the failure (`scheduler.py:1384`)
 - [ ] Given a script path outside the bot's folder, when a routine is created, then it is refused
+
+#### US-028: The curator
+**Description:** As a user, I want skills nobody uses set aside, so that the index stays short.
+
+**Priority:** P2
+**Dependencies:** Blocked by US-025, US-029, US-031
+
+**References:** Audit, section "À reprendre : skills", row "Curateur". `hermes-agent/agent/curator.py:42-46`, `:210-264`, `:318-326`.
+
+**Acceptance Criteria:**
+- [ ] Given a skill written by a bot or a review with no use for 14 days, when the curator runs, then it is marked stale (`curator.py:43`)
+- [ ] Given such a skill with no use for 30 days, when the curator runs, then it is archived and leaves the index (`curator.py:43`)
+- [ ] Given a skill that is pinned, imported by the user, or named by a routine, when the curator runs, then it is not changed
+- [ ] Given the curator, when it runs, then it starts no model call and deletes no version
+- [ ] Given a daemon, when 7 days have passed since the last pass and no turn ran for 2 hours, then the curator runs once (`DEFAULT_INTERVAL_HOURS` and `DEFAULT_MIN_IDLE_HOURS`, `curator.py:42`)
+- [ ] Given an archived skill, when a client restores it (US-025), then it is active again and its versions are unchanged
 
 ---
 

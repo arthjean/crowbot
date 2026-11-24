@@ -51,7 +51,7 @@
       "title": "Learning from use",
       "status": "TODO",
       "priority": "P0",
-      "stories_total": 4,
+      "stories_total": 3,
       "stories_done": 0
     },
     {
@@ -59,7 +59,7 @@
       "title": "Routines",
       "status": "TODO",
       "priority": "P0",
-      "stories_total": 6,
+      "stories_total": 7,
       "stories_done": 0
     },
     {
@@ -448,21 +448,6 @@
       "reviewed_at": null
     },
     {
-      "id": "US-028",
-      "title": "The curator",
-      "epic": "EP-006",
-      "status": "TODO",
-      "priority": "P2",
-      "blocked_by": [
-        "US-025",
-        "US-029",
-        "US-031"
-      ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
-    },
-    {
       "id": "US-029",
       "title": "Measure what skills change",
       "epic": "EP-006",
@@ -555,6 +540,21 @@
       "blocked_by": [
         "US-018",
         "US-033"
+      ],
+      "started_at": null,
+      "completed_at": null,
+      "reviewed_at": null
+    },
+    {
+      "id": "US-028",
+      "title": "The curator",
+      "epic": "EP-007",
+      "status": "TODO",
+      "priority": "P2",
+      "blocked_by": [
+        "US-025",
+        "US-029",
+        "US-031"
       ],
       "started_at": null,
       "completed_at": null,
