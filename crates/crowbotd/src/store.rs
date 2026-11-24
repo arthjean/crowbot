@@ -4,12 +4,14 @@ mod preferences;
 mod rules;
 mod search;
 mod sessions;
+mod skills;
 mod usage;
 
 pub use bots::{BotRow, NewBot};
 pub use memory::{MemoryWriter, OperationResult};
 pub use search::{HistorySearch, HistoryWindow};
 pub use sessions::{ProviderSession, ProviderSetting, session_fingerprint};
+pub use skills::{Expected, SkillPlan, SkillRow, SkillWriter, changed as skill_changed};
 pub use usage::{Reported, Tokens};
 
 use std::fmt;
@@ -23,7 +25,7 @@ use crowbot_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 const TITLE_LENGTH: usize = 80;
 
 /// Streamed text waits at most this long in memory before it reaches the database.
@@ -314,6 +316,49 @@ INSERT INTO event_text (rowid, body)
     WHERE kind = 'tool_call_started' AND json_valid(payload);
 ";
 
+/// Skills: each file stored once by its SHA-256, each version by the hash
+/// of its paths and files, each skill naming its active version, and a log
+/// of every change of a skill that nothing rewrites. The log's sequence
+/// number is the version of the skills index.
+const SCHEMA_V13: &str = "
+CREATE TABLE skill_files (
+    hash TEXT PRIMARY KEY,
+    content BLOB NOT NULL
+);
+CREATE TABLE skill_versions (
+    hash TEXT PRIMARY KEY,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE TABLE skill_version_files (
+    version TEXT NOT NULL REFERENCES skill_versions(hash),
+    path TEXT NOT NULL,
+    file TEXT NOT NULL REFERENCES skill_files(hash),
+    PRIMARY KEY (version, path)
+);
+CREATE TABLE skills (
+    id INTEGER PRIMARY KEY,
+    bot_id INTEGER NOT NULL REFERENCES bots(id),
+    name TEXT NOT NULL,
+    version TEXT NOT NULL REFERENCES skill_versions(hash),
+    description TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (bot_id, name)
+);
+CREATE TABLE skill_changes (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_id INTEGER NOT NULL REFERENCES skills(id),
+    kind TEXT NOT NULL,
+    version TEXT NOT NULL,
+    author TEXT NOT NULL,
+    conversation_id INTEGER,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX skill_changes_by_skill ON skill_changes(skill_id);
+";
+
 const UNFINISHED_TURNS: &str = "
 SELECT turn.conversation_id, turn.started
 FROM (
@@ -478,6 +523,9 @@ impl Store {
         }
         if version < 12 {
             transaction.execute_batch(SCHEMA_V12)?;
+        }
+        if version < 13 {
+            transaction.execute_batch(SCHEMA_V13)?;
         }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -971,6 +1019,8 @@ fn kind(event: &Event) -> &'static str {
         Event::ProviderChanged { .. } => "provider_changed",
         Event::ToolRefused { .. } => "tool_refused",
         Event::MemoryChanged { .. } => "memory_changed",
+        Event::SkillChanged { .. } => "skill_changed",
+        Event::SkillUnavailable { .. } => "skill_unavailable",
     }
 }
 

@@ -16,7 +16,7 @@ use crowbot_protocol::{
     BotPatch, BotState, BotSummary, ConversationSummary, DaemonInfo, MemoryChange, MemoryOperation,
     MemoryScope, PROTOCOL_VERSION, PermissionLevel, Preferences, PreferencesPatch,
     RULE_ARGUMENT_BYTES, RULE_ARGUMENTS, RULE_PROGRAM_BYTES, RuleDraft, SIDEBAR_WIDTH_LIMIT,
-    ServerMessage, TOOL_CALL_LIMIT_MAX, mascot_at,
+    ServerMessage, SkillChangeKind, SkillState, SkillStateChange, TOOL_CALL_LIMIT_MAX, mascot_at,
 };
 use tokio::sync::oneshot;
 
@@ -25,7 +25,8 @@ use crate::conversation::{self, Command, ConversationHandle, Sink};
 use crate::private;
 use crate::prompt::Sections;
 use crate::runtime::Runtimes;
-use crate::store::{BotRow, NewBot, SharedStore, StoreError};
+use crate::skills::{self, Library};
+use crate::store::{BotRow, Expected, NewBot, SharedStore, SkillPlan, StoreError};
 use crate::tools::Registry;
 
 /// The provider of a bot that runs the agent command given to the daemon.
@@ -132,6 +133,7 @@ pub struct Daemon {
     tools: Arc<Registry>,
     sections: Sections,
     floors: Floors,
+    skills: Arc<Library>,
 }
 
 impl Daemon {
@@ -156,8 +158,9 @@ impl Daemon {
         .filter_map(|path| std::path::absolute(path).ok())
         .collect();
         let floors = Floors::new(std::env::home_dir(), kept);
-        let tools = Arc::new(Registry::new(&store));
-        let sections = Sections::new(&store);
+        let skills = Library::new(store.clone(), data_dir.join("skills"));
+        let tools = Arc::new(Registry::new(&store, &skills));
+        let sections = Sections::new(&store, &skills);
         Self {
             store,
             database,
@@ -173,7 +176,13 @@ impl Daemon {
             tools,
             sections,
             floors,
+            skills,
         }
+    }
+
+    /// The skills of every bot, and their projection.
+    pub fn skills(&self) -> &Arc<Library> {
+        &self.skills
     }
 
     /// The built-in refusals of this computer.
@@ -629,6 +638,160 @@ impl Daemon {
         }
     }
 
+    /// The skills of a bot, active and archived.
+    pub fn skill_list(&self, bot_id: i64) -> Result<ServerMessage, Refusal> {
+        let skills = self
+            .store
+            .with(|store| store.bot(bot_id)?.map(|_| store.skills(bot_id)).transpose())?;
+        let skills = skills.ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        Ok(ServerMessage::Skills {
+            bot_id,
+            skills: skills.iter().map(crate::store::SkillRow::summary).collect(),
+        })
+    }
+
+    /// The versions a skill of a bot had.
+    pub fn skill_history(&self, bot_id: i64, name: &str) -> Result<ServerMessage, Refusal> {
+        let versions = self
+            .store
+            .with(|store| store.skill_history(bot_id, name))?
+            .ok_or_else(|| Refusal::Other(format!("bot {bot_id} has no skill named {name}")))?;
+        Ok(ServerMessage::SkillHistory {
+            bot_id,
+            name: name.to_owned(),
+            versions,
+        })
+    }
+
+    /// Makes an earlier version of a skill active again, as a person.
+    pub fn roll_back_skill(
+        self: &Arc<Self>,
+        bot_id: i64,
+        name: &str,
+        hash: &str,
+        sink: Sink,
+    ) -> Result<(), Refusal> {
+        let version = self.store.with(|store| {
+            let known = store
+                .skill_history(bot_id, name)?
+                .ok_or_else(|| {
+                    StoreError::Refused(format!("bot {bot_id} has no skill named {name}"))
+                })?
+                .iter()
+                .any(|version| version.hash == hash);
+            if !known {
+                return Err(StoreError::Refused(format!(
+                    "the skill {name} never had the version {hash}"
+                )));
+            }
+            store
+                .skill_version(hash)?
+                .ok_or_else(|| StoreError::Refused(format!("the version {hash} is not stored")))
+        })?;
+        let plan = SkillPlan {
+            version: Some((version, SkillChangeKind::RolledBack)),
+            ..SkillPlan::new(name, Expected::Any)
+        };
+        self.change_skills(bot_id, vec![plan], sink)
+    }
+
+    /// Gives a bot the skill a folder holds, as a person. A skill the scan
+    /// finds dangerous in is imported only when the person confirmed it;
+    /// otherwise the answer lists the findings.
+    pub fn import_skill(
+        self: &Arc<Self>,
+        bot_id: i64,
+        folder: &str,
+        confirm: bool,
+        sink: Sink,
+    ) -> Result<Option<ServerMessage>, Refusal> {
+        self.store
+            .with(|store| store.bot(bot_id))?
+            .ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        let not_imported = |message: String, findings| {
+            Ok(Some(ServerMessage::SkillNotImported {
+                bot_id,
+                folder: folder.to_owned(),
+                message,
+                findings,
+            }))
+        };
+        let (name, version) = match skills::read_folder(Path::new(folder)) {
+            Ok(read) => read,
+            Err(message) => return not_imported(message, Vec::new()),
+        };
+        let findings = skills::format::findings(&version);
+        if skills::format::dangerous(&findings) && !confirm {
+            return not_imported(
+                format!(
+                    "The scan found something dangerous in the skill {name}, so it was not imported. Import it again with the confirmation to keep it anyway."
+                ),
+                findings,
+            );
+        }
+        let plan = SkillPlan {
+            version: Some((version, SkillChangeKind::Imported)),
+            state: Some(SkillState::Active),
+            ..SkillPlan::new(&name, Expected::Any)
+        };
+        self.change_skills(bot_id, vec![plan], sink)?;
+        Ok(None)
+    }
+
+    /// Pins, unpins, archives, or restores a skill, as a person.
+    pub fn set_skill_state(
+        self: &Arc<Self>,
+        bot_id: i64,
+        name: &str,
+        change: SkillStateChange,
+        sink: Sink,
+    ) -> Result<(), Refusal> {
+        let mut plan = SkillPlan::new(name, Expected::Any);
+        match change {
+            SkillStateChange::Pin => plan.pinned = Some(true),
+            SkillStateChange::Unpin => plan.pinned = Some(false),
+            SkillStateChange::Archive => plan.state = Some(SkillState::Archived),
+            SkillStateChange::Restore => plan.state = Some(SkillState::Active),
+        }
+        self.change_skills(bot_id, vec![plan], sink)
+    }
+
+    /// Hands a person's change of a bot's skills to the bot's current
+    /// conversation, which records it among its events.
+    fn change_skills(
+        self: &Arc<Self>,
+        bot_id: i64,
+        plans: Vec<SkillPlan>,
+        sink: Sink,
+    ) -> Result<(), Refusal> {
+        let row = self
+            .store
+            .with(|store| store.bot(bot_id))?
+            .ok_or_else(|| Refusal::Other(missing_bot(bot_id)))?;
+        let conversation_id = if row.current_conversation_id > 0 {
+            row.current_conversation_id
+        } else {
+            self.new_conversation(bot_id).map_err(Refusal::Other)?.id
+        };
+        let handle = self.conversation(conversation_id).map_err(Refusal::Other)?;
+        handle.send(Command::ChangeSkills { plans, sink });
+        Ok(())
+    }
+
+    /// After a change of a bot's skills: the projection follows at once, so
+    /// that the folder `skill_view` names holds the new version, and every
+    /// attached client receives the skills.
+    pub fn skills_changed(&self, bot_id: i64) {
+        self.skills.project(bot_id);
+        self.publish_skills(bot_id);
+    }
+
+    pub fn publish_skills(&self, bot_id: i64) {
+        if let Ok(skills) = self.skill_list(bot_id) {
+            self.state().broadcast(&skills);
+        }
+    }
+
     /// Tells every attached client the rules of the bot, and each of its
     /// conversations to answer again the approvals that wait.
     fn publish_rules(&self, bot_id: i64) {
@@ -717,6 +880,9 @@ impl Daemon {
     pub async fn delete_bot(&self, bot_id: i64) -> Result<(), String> {
         self.shut_down_conversations(bot_id).await?;
         let deleted = self.store.with(|store| store.delete_bot(bot_id));
+        if matches!(deleted, Ok(true)) {
+            self.skills.forget(bot_id);
+        }
         let mut state = self.state();
         state.deleting.remove(&bot_id);
         state

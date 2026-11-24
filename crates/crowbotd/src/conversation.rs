@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, Bot, ConversationSnapshot, Event,
     FailureCause, Interruption, MESSAGE_LENGTH, MemoryAuthor, MemoryOperation, QueueState,
-    ServerMessage, TurnEnd, TurnOrigin, UserMessage,
+    ServerMessage, SkillAuthor, TurnEnd, TurnOrigin, UserMessage,
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -23,7 +23,7 @@ use crate::provider::acp::{
 };
 use crate::store::{
     BotRow, Conversation, EventsPage, MemoryWriter, ProviderSession, Recorder, Reported,
-    SharedStore, StoreError, Tokens, session_fingerprint,
+    SharedStore, SkillPlan, SkillWriter, StoreError, Tokens, session_fingerprint,
 };
 use crate::tools::{Outputs, SessionKind, ToolContext, TurnGate};
 
@@ -105,6 +105,12 @@ pub enum Command {
     /// conversation, in its place among the events.
     ChangeMemory {
         operations: Vec<MemoryOperation>,
+        sink: Sink,
+    },
+    /// A person changes the bot's skills; the change is recorded in this
+    /// conversation, in its place among the events.
+    ChangeSkills {
+        plans: Vec<SkillPlan>,
         sink: Sink,
     },
     /// The bot is being deleted, or the daemon stops: the running turn stops,
@@ -552,6 +558,7 @@ impl Actor {
             Command::ResumeQueue { sink } => self.resume_queue(&sink),
             Command::StandingChanged => self.review_approvals(),
             Command::ChangeMemory { operations, sink } => self.change_memory(&operations, &sink),
+            Command::ChangeSkills { plans, sink } => self.change_skills(&plans, &sink),
             Command::ShutDown { done, patience } => self.shut_down(done, patience),
         }
     }
@@ -584,6 +591,38 @@ impl Actor {
                     });
                 }
                 self.daemon.publish_memory(self.bot_id, &changes);
+            }
+            Err(error) => report(sink, error.to_string()),
+        }
+    }
+
+    /// Applies a person's change of the bot's skills, all or none, with the
+    /// event that records it, after the text still in memory.
+    fn change_skills(&mut self, plans: &[SkillPlan], sink: &Sink) {
+        let closed = self.recorder.close();
+        self.report_store(closed);
+        let writer = SkillWriter {
+            author: SkillAuthor::User,
+            bot_id: self.bot_id,
+            conversation_id: Some(self.id),
+        };
+        let id = self.id;
+        match self
+            .store
+            .with(|store| store.record_skill_change(id, &writer, plans))
+        {
+            Ok(event) => {
+                if let Some(event) = event {
+                    self.broadcast(ServerMessage::ConversationEvent {
+                        conversation_id: self.id,
+                        event,
+                        at_ms: at_ms(),
+                    });
+                    self.daemon.skills_changed(self.bot_id);
+                } else {
+                    // Nothing changed: the client still gets the skills.
+                    self.daemon.publish_skills(self.bot_id);
+                }
             }
             Err(error) => report(sink, error.to_string()),
         }
@@ -1168,6 +1207,12 @@ impl Actor {
         let moved_from = last
             .map(|session| session.provider)
             .filter(|last| *last != provider);
+        // The skills the session is given are on disk, checked by hash,
+        // before the agent starts; one that cannot be written is left out of
+        // its index, and the conversation says why.
+        for (name, message) in self.daemon.skills().project(self.bot_id) {
+            self.emit(Event::SkillUnavailable { name, message });
+        }
         let snapshot = self.daemon.sections().snapshot(self.bot_id);
         let system_prompt = Sections::system_prompt(&bot.instructions, &snapshot);
         let (note, sections) = match &resumed {
@@ -1351,6 +1396,7 @@ impl Actor {
                 title,
                 target,
                 cut,
+                person,
                 reply,
             } => {
                 if !self.turn_open(generation, turn) {
@@ -1363,6 +1409,7 @@ impl Actor {
                     cut,
                     command: false,
                     folder: None,
+                    person,
                 };
                 self.ask_approval(tool_call_id, Some(title), request, reply);
             }
@@ -1390,6 +1437,7 @@ impl Actor {
                                 Event::MemoryChanged { changes, .. } => Some(changes.clone()),
                                 _ => None,
                             };
+                            let skills = matches!(event, Event::SkillChanged { .. });
                             self.broadcast(ServerMessage::ConversationEvent {
                                 conversation_id: self.id,
                                 event,
@@ -1397,6 +1445,9 @@ impl Actor {
                             });
                             if let Some(changes) = memory {
                                 self.daemon.publish_memory(self.bot_id, &changes);
+                            }
+                            if skills {
+                                self.daemon.skills_changed(self.bot_id);
                             }
                         }
                         reply.send(Ok(applied.output)).ok();

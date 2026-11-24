@@ -49,12 +49,10 @@ pub fn shown(entry: &MemoryEntry) -> String {
     }
 }
 
-/// An entry as a line of a prompt: its id, what it says, and the event
-/// that grounds it, which `session_search` reads around.
 /// A text on one line, its line breaks and controls read as spaces, and
 /// each angle bracket, in any of its forms, turned into a guillemet: no
 /// spelling of a tag can open or close the fence.
-fn flat(text: &str) -> String {
+pub fn flat(text: &str) -> String {
     let spaced: String = text
         .chars()
         .map(|character| match character {
@@ -70,6 +68,8 @@ fn flat(text: &str) -> String {
 /// The name of the tag that fences recalled memory.
 const FENCE: &str = "recalled-memory";
 
+/// An entry as a line of a prompt: its id, what it says, and the event
+/// that grounds it, which `session_search` reads around.
 fn line(entry: &MemoryEntry) -> String {
     let source = match (entry.source_event_id, entry.source_conversation_id) {
         (Some(event), Some(conversation)) => {

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use chrono::{Local, NaiveDate, TimeZone};
 use crowbot_protocol::{
     ApprovalClosure, ApprovalDecision, ApprovalReason, ConversationSnapshot, Event, FailureCause,
-    Interruption, MemoryAuthor, MemoryChange, TimedEvent, ToolEffect, ToolKind, ToolStatus,
-    TurnEnd, TurnOrigin, UserMessage,
+    Interruption, MemoryAuthor, MemoryChange, SkillAuthor, SkillChange, TimedEvent, ToolEffect,
+    ToolKind, ToolStatus, TurnEnd, TurnOrigin, UserMessage,
 };
 
 pub const GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -89,6 +89,16 @@ pub enum Notice {
     MemoryChanged {
         author: MemoryAuthor,
         changes: Vec<MemoryChange>,
+    },
+    /// The bot's skills changed: one entry per skill of one change.
+    SkillChanged {
+        author: SkillAuthor,
+        changes: Vec<SkillChange>,
+    },
+    /// A skill was not given to the session that started.
+    SkillUnavailable {
+        name: String,
+        message: String,
     },
 }
 
@@ -681,6 +691,12 @@ impl Transcript {
             }
             Event::MemoryChanged { author, changes } => {
                 self.notice(seq, at_ms, Notice::MemoryChanged { author, changes })
+            }
+            Event::SkillChanged { author, changes } => {
+                self.notice(seq, at_ms, Notice::SkillChanged { author, changes })
+            }
+            Event::SkillUnavailable { name, message } => {
+                self.notice(seq, at_ms, Notice::SkillUnavailable { name, message })
             }
         }
     }

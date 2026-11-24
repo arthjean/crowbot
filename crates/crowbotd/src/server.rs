@@ -230,6 +230,29 @@ impl ClientState {
             ClientMessage::ChangeMemory { bot_id, operations } => {
                 daemon.change_memory(bot_id, operations, sink.clone())
             }
+            ClientMessage::ListSkills { bot_id } => daemon.skill_list(bot_id).map(reply),
+            ClientMessage::ListSkillHistory { bot_id, name } => {
+                daemon.skill_history(bot_id, &name).map(reply)
+            }
+            ClientMessage::RollBackSkill { bot_id, name, hash } => {
+                daemon.roll_back_skill(bot_id, &name, &hash, sink.clone())
+            }
+            ClientMessage::ImportSkill {
+                bot_id,
+                folder,
+                confirm,
+            } => daemon
+                .import_skill(bot_id, &folder, confirm, sink.clone())
+                .map(|answer| {
+                    if let Some(answer) = answer {
+                        reply(answer);
+                    }
+                }),
+            ClientMessage::SetSkillState {
+                bot_id,
+                name,
+                change,
+            } => daemon.set_skill_state(bot_id, &name, change, sink.clone()),
             ClientMessage::ListConversations { bot_id } => {
                 daemon.list_conversations(bot_id).map(reply).map_err(failed)
             }

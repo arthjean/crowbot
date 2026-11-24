@@ -50,9 +50,13 @@ const NOTE_HEAD: &str = "[Crow Bot note: what follows changed since this session
 const RENEWED_HEAD: &str = "[Crow Bot note: your context was compacted, so this part of your system prompt is sent again.]";
 
 impl Sections {
-    pub fn new(store: &crate::store::SharedStore) -> Self {
+    pub fn new(
+        store: &crate::store::SharedStore,
+        skills: &std::sync::Arc<crate::skills::Library>,
+    ) -> Self {
         let mut sections = Self::default();
         crate::memory::add_sections(&mut sections, store);
+        crate::skills::add_section(&mut sections, skills);
         #[cfg(debug_assertions)]
         if let Some(folder) = crate::test_harness::folder() {
             crate::test_harness::add_sections(&mut sections, &folder);

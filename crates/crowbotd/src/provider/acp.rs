@@ -1475,6 +1475,7 @@ fn approval_request(fields: &ToolCallUpdateFields, command_folder: CommandFolder
                 cut,
                 command: is_command,
                 folder,
+                person: false,
             }
         }
         None => Request::default(),

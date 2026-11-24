@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryAuthor, MemoryChange};
+use crate::skill::{SkillAuthor, SkillChange};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -93,6 +94,18 @@ pub enum Event {
     MemoryChanged {
         author: MemoryAuthor,
         changes: Vec<MemoryChange>,
+    },
+    /// The bot's skills changed: one entry per skill that one call or one
+    /// client message changed, with its active version before and after.
+    SkillChanged {
+        author: SkillAuthor,
+        changes: Vec<SkillChange>,
+    },
+    /// A skill could not be given to the session that starts, which runs
+    /// without it.
+    SkillUnavailable {
+        name: String,
+        message: String,
     },
 }
 

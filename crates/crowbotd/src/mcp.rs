@@ -50,6 +50,8 @@ pub enum ToolSignal {
         title: String,
         target: Option<String>,
         cut: bool,
+        /// Only a person answers it: neither the level nor a rule does.
+        person: bool,
         reply: oneshot::Sender<ApprovalAnswer>,
     },
     /// A change to the bot's own state, which the conversation applies only
@@ -322,37 +324,75 @@ async fn call(session: &Session, id: Value, params: Value) -> Value {
             title: format!("Crow Bot tool {name}"),
             target: Some(target),
             cut,
+            person: false,
             reply,
         });
-        let answer = match asked {
-            Ok(()) => answer.await.unwrap_or(ApprovalAnswer::Cancel),
-            Err(_) => ApprovalAnswer::Cancel,
-        };
-        match answer {
-            ApprovalAnswer::Allow => {}
-            ApprovalAnswer::Decline => {
-                return tool_result(
-                    id,
-                    "A person declined this call, so the tool did not run and nothing was changed."
-                        .to_owned(),
-                    true,
-                );
-            }
-            ApprovalAnswer::Cancel => return tool_result(id, stopped(), true),
-        }
-        if session.ended.load(Ordering::SeqCst) {
-            return error(id, INVALID_REQUEST, "The session of this server ended.");
+        if let Some(refused) = refused_by(session, &id, asked, answer).await {
+            return refused;
         }
     }
     let output = match call(permit).await {
         Ok(Done::Output(output)) => Ok(output),
-        Ok(Done::Mutation(mutation)) => apply(session, mutation).await,
+        Ok(Done::Mutation(mut mutation)) => {
+            // A change that only a person may allow waits for one, and is
+            // applied only once allowed.
+            if let Some(review) = mutation.take_review() {
+                let (reply, answer) = oneshot::channel();
+                let asked = session.signals.send(ToolSignal::Approval {
+                    turn: permit.turn(),
+                    tool_call_id: agent_call_id(&params),
+                    title: review.title,
+                    target: Some(review.target),
+                    cut: false,
+                    person: true,
+                    reply,
+                });
+                if let Some(refused) = refused_by(session, &id, asked, answer).await {
+                    return refused;
+                }
+            }
+            apply(session, mutation).await
+        }
         Err(message) => Err(message),
     };
     match output {
         Ok(output) => tool_result(id, session.context.outputs.deliver(output), false),
         Err(message) => tool_result(id, message, true),
     }
+}
+
+/// Waits for the answer to an approval the call asked for: `None` once it is
+/// allowed, and otherwise what the agent receives.
+async fn refused_by(
+    session: &Session,
+    id: &Value,
+    asked: Result<(), mpsc::error::SendError<ToolSignal>>,
+    answer: oneshot::Receiver<ApprovalAnswer>,
+) -> Option<Value> {
+    let answer = match asked {
+        Ok(()) => answer.await.unwrap_or(ApprovalAnswer::Cancel),
+        Err(_) => ApprovalAnswer::Cancel,
+    };
+    match answer {
+        ApprovalAnswer::Allow => {}
+        ApprovalAnswer::Decline => {
+            return Some(tool_result(
+                id.clone(),
+                "A person declined this call, so the tool did not run and nothing was changed."
+                    .to_owned(),
+                true,
+            ));
+        }
+        ApprovalAnswer::Cancel => return Some(tool_result(id.clone(), stopped(), true)),
+    }
+    if session.ended.load(Ordering::SeqCst) {
+        return Some(error(
+            id.clone(),
+            INVALID_REQUEST,
+            "The session of this server ended.",
+        ));
+    }
+    None
 }
 
 fn stopped() -> String {
@@ -380,7 +420,12 @@ mod tests {
     fn session(kind: SessionKind) -> (Session, mpsc::UnboundedReceiver<ToolSignal>) {
         let (signals, received) = mpsc::unbounded_channel();
         let session = Session {
-            registry: Arc::new(Registry::new(&crate::store::SharedStore::in_memory())),
+            registry: Arc::new({
+                let store = crate::store::SharedStore::in_memory();
+                let skills =
+                    crate::skills::Library::new(store.clone(), std::path::PathBuf::from("skills"));
+                Registry::new(&store, &skills)
+            }),
             context: ToolContext {
                 bot_id: 1,
                 conversation_id: 2,

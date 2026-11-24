@@ -10,6 +10,7 @@ mod rules;
 #[cfg(any(test, feature = "scratch"))]
 pub mod scratch;
 mod search;
+mod skill;
 #[cfg(feature = "transport")]
 pub mod transport;
 mod wire;
@@ -48,6 +49,12 @@ pub use rules::{
 pub use search::{
     ConversationHit, MessageAuthor, MessageHit, SEARCH_MESSAGE_TERM_LENGTH, SEARCH_QUERY_LENGTH,
     SearchResults,
+};
+pub use skill::{
+    SKILL_DESCRIPTION_CHARACTERS, SKILL_DOCUMENT, SKILL_DOCUMENT_CHARACTERS, SKILL_FILE_BYTES,
+    SKILL_FILES, SKILL_FOLDERS, SKILL_INDEX_DESCRIPTION_CHARACTERS, SKILL_NAME_CHARACTERS,
+    SKILL_OPERATIONS, SkillAuthor, SkillChange, SkillChangeKind, SkillFinding, SkillState,
+    SkillStateChange, SkillSummary, SkillVersion,
 };
 pub use wire::{WireError, decode, encode};
 

@@ -532,6 +532,60 @@ fn a_conversation_with_a_memory_change_opens_and_shows_it(cx: &mut TestAppContex
     )));
 }
 
+/// A conversation that holds a change of the bot's skills and a skill left
+/// out of a session opens, and each shows as a notice (EP-005 of the
+/// harness PRD).
+#[gpui::test]
+fn a_conversation_with_skill_events_opens_and_shows_them(cx: &mut TestAppContext) {
+    use crowbot_protocol::{SkillAuthor, SkillChange, SkillChangeKind};
+
+    let (workspace, daemon, cx) = open(cx);
+    daemon_connected(&daemon, cx);
+    click(cx, "bot-1");
+    daemon.tell(
+        ServerMessage::ConversationOpened(snapshot(
+            10,
+            1,
+            vec![
+                Event::user_text("save how you deployed"),
+                Event::SkillUnavailable {
+                    name: "tidy".to_owned(),
+                    message: "cannot create the folder".to_owned(),
+                },
+                Event::SkillChanged {
+                    author: SkillAuthor::Bot,
+                    changes: vec![SkillChange {
+                        name: "deploy".to_owned(),
+                        kind: SkillChangeKind::Created,
+                        old_hash: None,
+                        new_hash: Some("ab12".to_owned()),
+                    }],
+                },
+                Event::MessageText("Saved.".to_owned()),
+                Event::TurnEnded(TurnEnd::Completed),
+            ],
+        )),
+        cx,
+    );
+    let notices = notice_keys(&workspace, cx);
+    assert_eq!(notices.len(), 2);
+    for notice in notices {
+        assert!(shown(cx, notice), "{notice}");
+    }
+    let rows = workspace.read_with(cx, |this, _| {
+        this.open.as_ref().unwrap().transcript.rows().to_vec()
+    });
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::SkillChanged { changes, .. })
+            if changes[0].name == "deploy"
+    )));
+    assert!(rows.iter().any(|row| matches!(
+        &row.kind,
+        RowKind::Notice(crate::transcript::Notice::SkillUnavailable { name, .. }) if name == "tidy"
+    )));
+}
+
 /// A conversation that holds a turn the daemon started and turns its guards
 /// stopped opens, and each row says so (EP-002 of the harness PRD).
 #[gpui::test]

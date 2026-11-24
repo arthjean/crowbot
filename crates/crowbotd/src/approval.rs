@@ -29,6 +29,9 @@ pub struct Request {
     /// The folder the command runs in, when the agent names it in a field
     /// the model does not write (`AgentProfile::command_folder`).
     pub folder: Option<PathBuf>,
+    /// Only a person answers it: a change the scan found dangerous in, which
+    /// no level or rule allows.
+    pub person: bool,
 }
 
 /// Where the bot stands when a request is answered: read from its record
@@ -61,7 +64,7 @@ pub fn answer(request: &Request, standing: Option<&Standing>, floors: &Floors) -
     let Some(standing) = standing else {
         return Answer::Wait;
     };
-    if request.cut || reading.held {
+    if request.cut || reading.held || request.person {
         return Answer::Wait;
     }
     if let Some(rule) = reading.allow_rule(request, standing) {
@@ -227,6 +230,7 @@ mod tests {
             cut: false,
             command: true,
             folder: folder.map(Path::to_path_buf),
+            person: false,
         }
     }
 
@@ -326,6 +330,7 @@ mod tests {
             cut: true,
             command: false,
             folder: None,
+            person: false,
         };
         assert_eq!(answer(&file, Some(&standing), &floors()), Answer::Wait);
         let file = Request { cut: false, ..file };

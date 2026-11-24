@@ -108,7 +108,6 @@ impl AsRef<std::ffi::OsStr> for Scratch {
 /// the removal is tried again until the folder is gone, for a second at most.
 impl Drop for Scratch {
     fn drop(&mut self) {
-        #[cfg(unix)]
         restore_permissions(&self.path);
         for _ in 0..20 {
             if std::fs::remove_dir_all(&self.path).is_ok() || !self.path.exists() {
@@ -120,7 +119,8 @@ impl Drop for Scratch {
 }
 
 /// Gives the owner back the right to change every folder of the tree, which
-/// a test may have taken away, so that the tree can be removed.
+/// a test, or a projection of skills, may have taken away, so that the tree
+/// can be removed.
 #[cfg(unix)]
 fn restore_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -135,6 +135,28 @@ fn restore_permissions(path: &Path) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o700)).ok();
     }
     if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            restore_permissions(&entry.path());
+        }
+    }
+}
+
+/// Makes every read-only file of the tree writable, since Windows does not
+/// remove a read-only file.
+#[cfg(not(unix))]
+#[allow(clippy::permissions_set_readonly_false)]
+fn restore_permissions(path: &Path) {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.is_file() && metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions).ok();
+    }
+    if metadata.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
         for entry in entries.flatten() {
             restore_permissions(&entry.path());
         }

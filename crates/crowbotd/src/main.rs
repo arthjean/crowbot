@@ -17,6 +17,7 @@ mod scan;
 mod server;
 #[cfg(target_os = "linux")]
 mod sign_in_page;
+mod skills;
 mod stop;
 mod store;
 mod systemd;

@@ -4,7 +4,7 @@ use std::time::Instant;
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use crowbot_protocol::{
     ApprovalDecision, ApprovalReason, FailureCause, MemoryAuthor, MemoryChange, MemoryChangeKind,
-    ProviderState, TurnOrigin,
+    ProviderState, SkillAuthor, SkillChange, SkillChangeKind, TurnOrigin,
 };
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, FontWeight, Hsla, Role, SharedString,
@@ -191,6 +191,10 @@ pub(super) fn notice_text(notice: &Notice) -> String {
             format!("Crow Bot did not run the tool {tool}: {message}")
         }
         Notice::MemoryChanged { author, changes } => memory_text(*author, changes),
+        Notice::SkillChanged { author, changes } => skill_text(*author, changes),
+        Notice::SkillUnavailable { name, message } => {
+            format!("The bot started without its skill {name}: {message}.")
+        }
     }
 }
 
@@ -211,6 +215,33 @@ fn memory_text(author: MemoryAuthor, changes: &[MemoryChange]) -> String {
                 change.text
             ),
             MemoryChangeKind::Retired => format!("retired \u{201c}{}\u{201d}", change.text),
+        })
+        .collect();
+    format!("{who}: {}.", parts.join("; "))
+}
+
+/// What a change of skills did, in the words of the person who reads it.
+fn skill_text(author: SkillAuthor, changes: &[SkillChange]) -> String {
+    let who = match author {
+        SkillAuthor::Bot => "The bot changed its skills",
+        SkillAuthor::Review => "The bot's review changed its skills",
+        SkillAuthor::User => "You changed the bot's skills",
+    };
+    let parts: Vec<String> = changes
+        .iter()
+        .map(|change| {
+            let name = &change.name;
+            match change.kind {
+                SkillChangeKind::Created => format!("wrote {name}"),
+                SkillChangeKind::Corrected => format!("corrected {name}"),
+                SkillChangeKind::Archived => format!("archived {name}"),
+                SkillChangeKind::Restored => format!("restored {name}"),
+                SkillChangeKind::RolledBack => format!("put back an earlier version of {name}"),
+                SkillChangeKind::Imported => format!("imported {name}"),
+                SkillChangeKind::Pinned => format!("pinned {name}"),
+                SkillChangeKind::Unpinned => format!("unpinned {name}"),
+                SkillChangeKind::Other => format!("changed {name}"),
+            }
         })
         .collect();
     format!("{who}: {}.", parts.join("; "))
@@ -916,6 +947,33 @@ mod tests {
                 to: "codex".to_owned(),
             }),
             "The bot moved from Claude to ChatGPT. ChatGPT received what was said before."
+        );
+        assert_eq!(
+            notice_text(&Notice::SkillChanged {
+                author: SkillAuthor::User,
+                changes: vec![
+                    SkillChange {
+                        name: "deploy".to_owned(),
+                        kind: SkillChangeKind::RolledBack,
+                        old_hash: Some("b".to_owned()),
+                        new_hash: Some("a".to_owned()),
+                    },
+                    SkillChange {
+                        name: "tidy".to_owned(),
+                        kind: SkillChangeKind::Archived,
+                        old_hash: Some("c".to_owned()),
+                        new_hash: Some("c".to_owned()),
+                    },
+                ],
+            }),
+            "You changed the bot's skills: put back an earlier version of deploy; archived tidy."
+        );
+        assert_eq!(
+            notice_text(&Notice::SkillUnavailable {
+                name: "deploy".to_owned(),
+                message: "cannot create /data/skills/1: Permission denied".to_owned(),
+            }),
+            "The bot started without its skill deploy: cannot create /data/skills/1: Permission denied."
         );
         assert_eq!(
             notice_text(&Notice::MemoryChanged {

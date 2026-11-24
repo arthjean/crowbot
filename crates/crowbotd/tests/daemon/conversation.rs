@@ -414,9 +414,11 @@ async fn a_version_4_database_migrates_and_its_older_events_still_load() {
 
     let database = rusqlite::Connection::open(daemon.database()).unwrap();
     let count = |sql: &str| -> i64 { database.query_row(sql, [], |row| row.get(0)).unwrap() };
-    assert_eq!(count("PRAGMA user_version"), 12);
+    assert_eq!(count("PRAGMA user_version"), 13);
     assert_eq!(count("SELECT COUNT(*) FROM approval_rules"), 0);
     assert_eq!(count("SELECT COUNT(*) FROM memory"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM skills"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM skill_versions"), 0);
     // The tool call stored before the index held tool calls is found.
     assert_eq!(
         count("SELECT COUNT(*) FROM event_text WHERE event_text MATCH '\"Read\"'"),

@@ -22,6 +22,7 @@ mod settings;
 mod shell;
 #[cfg(unix)]
 mod signals;
+mod skills;
 mod startup;
 mod stop;
 mod support;

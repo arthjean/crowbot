@@ -66,6 +66,12 @@ pub struct TurnPermit {
 }
 
 impl TurnPermit {
+    /// A permit for a test that drives a tool without a conversation.
+    #[cfg(test)]
+    pub fn for_test(turn: u64) -> Self {
+        Self { turn }
+    }
+
     /// The turn the permit was given in.
     pub fn turn(self) -> u64 {
         self.turn
@@ -82,6 +88,7 @@ impl TurnPermit {
         Mutation {
             turn: self.turn,
             apply: Box::new(apply),
+            review: None,
         }
     }
 }
@@ -123,9 +130,33 @@ type Apply = Box<dyn FnOnce(&Store) -> Result<Applied, StoreError> + Send>;
 pub struct Mutation {
     turn: u64,
     apply: Apply,
+    review: Option<Review>,
+}
+
+/// What a person reads before a change that only a person may allow is
+/// applied: no permission level and no rule answers it.
+pub struct Review {
+    pub title: String,
+    pub target: String,
 }
 
 impl Mutation {
+    /// The change waits for a person, who reads `target` and allows it or
+    /// not, whatever the bot's level and rules.
+    pub fn for_person(mut self, title: &str, target: String) -> Self {
+        self.review = Some(Review {
+            title: title.to_owned(),
+            target,
+        });
+        self
+    }
+
+    /// What a person reads before the change applies, when one must allow
+    /// it.
+    pub fn take_review(&mut self) -> Option<Review> {
+        self.review.take()
+    }
+
     /// The turn the change was made in.
     pub fn turn(&self) -> u64 {
         self.turn
@@ -316,13 +347,14 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn new(store: &SharedStore) -> Self {
+    pub fn new(store: &SharedStore, skills: &Arc<crate::skills::Library>) -> Self {
         let mut registry = Self {
             tools: BTreeMap::new(),
         };
         registry.add(ReadOutput);
         registry.add(crate::memory::MemoryTool);
         registry.add(crate::history::SessionSearch(store.clone()));
+        crate::skills::add_tools(&mut registry, skills);
         #[cfg(debug_assertions)]
         if let Some(folder) = crate::test_harness::folder() {
             crate::test_harness::add_tools(&mut registry, &folder);
@@ -481,6 +513,12 @@ mod tests {
         }
     }
 
+    fn test_registry() -> Registry {
+        let store = SharedStore::in_memory();
+        let skills = crate::skills::Library::new(store.clone(), std::path::PathBuf::from("skills"));
+        Registry::new(&store, &skills)
+    }
+
     fn context(kind: SessionKind) -> ToolContext {
         ToolContext {
             bot_id: 1,
@@ -492,7 +530,7 @@ mod tests {
 
     #[test]
     fn the_schema_comes_from_the_input_type() {
-        let mut registry = Registry::new(&SharedStore::in_memory());
+        let mut registry = test_registry();
         registry.add(Note);
         let listing = registry.get("note").unwrap().listing();
         let schema = &listing["inputSchema"];
@@ -509,7 +547,7 @@ mod tests {
 
     #[test]
     fn each_kind_sees_the_tools_that_list_it() {
-        let mut registry = Registry::new(&SharedStore::in_memory());
+        let mut registry = test_registry();
         registry.add(Note);
         let names = |kind| {
             registry
@@ -527,8 +565,8 @@ mod tests {
     }
 
     #[test]
-    fn a_delegated_session_has_no_memory_tool_and_every_kind_can_search() {
-        let registry = Registry::new(&SharedStore::in_memory());
+    fn a_delegated_session_writes_no_memory_or_skill_and_every_kind_can_read() {
+        let registry = test_registry();
         let has = |kind, name| registry.for_kind(kind).any(|tool| tool.name == name);
         assert!(!has(SessionKind::Delegated, "memory"));
         for kind in [
@@ -540,14 +578,20 @@ mod tests {
         }
         for kind in ALL_KINDS {
             assert!(has(*kind, "session_search"), "{kind:?}");
+            assert!(has(*kind, "skills_list"), "{kind:?}");
+            assert!(has(*kind, "skill_view"), "{kind:?}");
         }
+        assert!(!has(SessionKind::Delegated, "skill_manage"));
+        assert!(has(SessionKind::Review, "skill_manage"));
+        assert_eq!(registry.effect("skill_manage"), Some(ToolEffect::BotState));
+        assert_eq!(registry.effect("skill_view"), Some(ToolEffect::Read));
         assert_eq!(registry.effect("memory"), Some(ToolEffect::BotState));
         assert_eq!(registry.effect("session_search"), Some(ToolEffect::Read));
     }
 
     #[tokio::test]
     async fn arguments_that_do_not_fit_name_their_first_wrong_field_and_run_nothing() {
-        let mut registry = Registry::new(&SharedStore::in_memory());
+        let mut registry = test_registry();
         registry.add(Note);
         let note = registry.get("note").unwrap();
         let start = |arguments: Value| note.prepare(context(SessionKind::Review), arguments);

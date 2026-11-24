@@ -7,8 +7,9 @@ use crate::preferences::{Preferences, PreferencesPatch};
 use crate::provider::{DaemonInfo, ProviderModels, ProviderStatus};
 use crate::rules::{ApprovalRule, RuleDraft};
 use crate::search::SearchResults;
+use crate::skill::{SkillFinding, SkillStateChange, SkillSummary, SkillVersion};
 
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 pub const MESSAGE_LENGTH: usize = 100_000;
 
@@ -180,6 +181,36 @@ pub enum ClientMessage {
         bot_id: i64,
         operations: Vec<MemoryOperation>,
     },
+    /// Asks for the skills of a bot, active and archived.
+    ListSkills {
+        bot_id: i64,
+    },
+    /// Asks for the versions a skill of a bot had, the oldest first.
+    ListSkillHistory {
+        bot_id: i64,
+        name: String,
+    },
+    /// Makes an earlier version of a skill the active one, as a person. The
+    /// change is recorded in the bot's current conversation.
+    RollBackSkill {
+        bot_id: i64,
+        name: String,
+        hash: String,
+    },
+    /// Gives a bot the skill a folder of this computer holds, as a person. A
+    /// skill the scan finds dangerous is imported only when `confirm` is set.
+    ImportSkill {
+        bot_id: i64,
+        folder: String,
+        #[serde(default)]
+        confirm: bool,
+    },
+    /// Pins, unpins, archives, or restores a skill, as a person.
+    SetSkillState {
+        bot_id: i64,
+        name: String,
+        change: SkillStateChange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +339,26 @@ pub enum ServerMessage {
     Memory {
         bot_id: i64,
         entries: Vec<MemoryEntry>,
+    },
+    /// The skills of a bot, by name. Answers `ListSkills`, and every
+    /// attached client receives it after the skills change.
+    Skills {
+        bot_id: i64,
+        skills: Vec<SkillSummary>,
+    },
+    /// Answers `ListSkillHistory`.
+    SkillHistory {
+        bot_id: i64,
+        name: String,
+        versions: Vec<SkillVersion>,
+    },
+    /// Answers an `ImportSkill` that was not applied: why, and what the scan
+    /// found when that is the reason.
+    SkillNotImported {
+        bot_id: i64,
+        folder: String,
+        message: String,
+        findings: Vec<SkillFinding>,
     },
 }
 
